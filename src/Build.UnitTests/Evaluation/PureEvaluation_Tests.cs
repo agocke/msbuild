@@ -41,6 +41,30 @@ namespace Microsoft.Build.Engine.UnitTests.Evaluation
             project.GetPropertyValue("Value").ShouldNotBeEmpty();
         }
 
+        [Fact]
+        public void PureEvaluationDoesNotImportEnvironmentProperties()
+        {
+            const string propertyName = "MSBUILD_PURE_EVALUATION_TEST_PROPERTY";
+            _env.SetEnvironmentVariable(propertyName, "ambient");
+
+            string projectContents =
+                $"""
+                 <Project>
+                   <PropertyGroup>
+                     <Value>$({propertyName})</Value>
+                   </PropertyGroup>
+                 </Project>
+                 """;
+
+            Project classicProject = Evaluate(projectContents, ProjectEvaluationMode.Classic);
+            Project pureProject = Evaluate(projectContents, ProjectEvaluationMode.Pure);
+
+            classicProject.GetPropertyValue("Value").ShouldBe("ambient");
+            classicProject.GetProperty(propertyName).IsEnvironmentProperty.ShouldBeTrue();
+            pureProject.GetPropertyValue("Value").ShouldBeEmpty();
+            pureProject.GetProperty(propertyName).ShouldBeNull();
+        }
+
         [Theory]
         [InlineData("$([System.DateTime]::UtcNow)")]
         [InlineData("$([System.Guid]::NewGuid())")]

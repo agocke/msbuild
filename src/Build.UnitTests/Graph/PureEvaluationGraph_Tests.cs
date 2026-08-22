@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Linq;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Graph;
@@ -59,6 +60,45 @@ namespace Microsoft.Build.Engine.UnitTests.Graph
 
             exception.ErrorCode.ShouldBe("MSB4286");
             exception.ProjectFile.ShouldBe(child);
+        }
+
+        [Fact]
+        public void PureModeDoesNotImportEnvironmentPropertiesIntoGraphProjects()
+        {
+            const string propertyName = "MSBUILD_PURE_GRAPH_TEST_PROPERTY";
+            _env.SetEnvironmentVariable(propertyName, "ambient");
+
+            string child = _env.CreateFile(
+                "child.proj",
+                $"""
+                 <Project>
+                   <PropertyGroup>
+                     <Value>$({propertyName})</Value>
+                   </PropertyGroup>
+                 </Project>
+                 """).Path;
+
+            string root = _env.CreateFile(
+                "root.proj",
+                """
+                <Project>
+                  <ItemGroup>
+                    <ProjectReference Include="child.proj" />
+                  </ItemGroup>
+                </Project>
+                """).Path;
+
+            ProjectGraph graph = new(
+                new ProjectGraphOptions
+                {
+                    EntryPoints = [new ProjectGraphEntryPoint(root)],
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                });
+
+            ProjectGraphNode childNode = graph.ProjectNodes.Single(
+                node => node.ProjectInstance.FullPath == child);
+            childNode.ProjectInstance.GetPropertyValue("Value").ShouldBeEmpty();
+            childNode.ProjectInstance.GetProperty(propertyName).ShouldBeNull();
         }
     }
 }

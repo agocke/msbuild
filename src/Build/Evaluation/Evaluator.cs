@@ -689,7 +689,10 @@ namespace Microsoft.Build.Evaluation
                     // Follow the order of precedence so that Global properties overwrite Environment properties
                     MSBuildEventSource.Log.EvaluatePass0Start(_projectRootElement.ProjectFileLocation.File);
                     AddBuiltInProperties();
-                    AddEnvironmentProperties();
+                    if (_evaluationContext.EvaluationMode != ProjectEvaluationMode.Pure)
+                    {
+                        AddEnvironmentProperties();
+                    }
                     AddToolsetProperties();
                     globalPropertiesCount = AddGlobalProperties();
 
