@@ -824,7 +824,8 @@ internal partial class Expander<P, I>
                         string.Empty,
                         expander.PropertiesUseTracker,
                         expander._fileSystem,
-                        expander._loggingContext);
+                        expander._loggingContext,
+                        expander.EvaluationContext);
 
                     object result = function.Execute(item.Value, expander._properties, ExpanderOptions.ExpandAll, elementLocation);
 

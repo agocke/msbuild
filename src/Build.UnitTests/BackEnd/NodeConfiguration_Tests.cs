@@ -4,6 +4,7 @@
 using System;
 using System.Linq;
 using Microsoft.Build.BackEnd;
+using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Logging;
 using Microsoft.Build.UnitTests.BackEnd;
@@ -14,6 +15,28 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
 {
     public class NodeConfiguration_Tests
     {
+        [Fact]
+        public void TestTranslationPreservesProjectEvaluationMode()
+        {
+            NodeConfiguration config = new NodeConfiguration(
+                nodeId: 1,
+                buildParameters: new BuildParameters
+                {
+                    ProjectEvaluationMode = ProjectEvaluationMode.Pure,
+                },
+                forwardingLoggers: Array.Empty<LoggerDescription>(),
+#if FEATURE_APPDOMAIN
+                appDomainSetup: new AppDomainSetup(),
+#endif
+                loggingNodeConfiguration: new LoggingNodeConfiguration());
+
+            ((ITranslatable)config).Translate(TranslationHelpers.GetWriteTranslator());
+            NodeConfiguration deserializedConfig = NodeConfiguration.FactoryForDeserialization(
+                TranslationHelpers.GetReadTranslator()).ShouldBeOfType<NodeConfiguration>();
+
+            deserializedConfig.BuildParameters.ProjectEvaluationMode.ShouldBe(ProjectEvaluationMode.Pure);
+        }
+
 #if FEATURE_APPDOMAIN
         /// <summary>
         /// Test serialization / deserialization of the AppDomainSetup instance.

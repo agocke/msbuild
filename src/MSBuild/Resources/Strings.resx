@@ -799,6 +799,28 @@
                      format. Otherwise, a tab separated file is produced.
     </value>
   </data>
+  <data name="HelpMessage_EvaluationModeSwitch" xml:space="preserve">
+    <value>  -evaluationMode:&lt;mode&gt;
+                     Selects the project evaluation semantics.
+                     Valid modes are:
+                       Classic - existing unrestricted evaluation
+                       Pure    - rejects arbitrary property-function I/O,
+                                 ambient time, and randomness
+    </value>
+    <comment>LOCALIZATION: "-evaluationMode", "Classic", and "Pure" should not be localized.</comment>
+  </data>
+  <data name="MissingEvaluationModeParameterError" xml:space="preserve">
+    <value>MSBUILD : error MSB1069: The evaluationMode switch requires a value of Classic or Pure.</value>
+    <comment>{StrBegin="MSBUILD : error MSB1069: "}LOCALIZATION: "evaluationMode", "Classic", and "Pure" should not be localized.</comment>
+  </data>
+  <data name="DuplicateEvaluationModeSwitchError" xml:space="preserve">
+    <value>MSBUILD : error MSB1069: The evaluationMode switch may be specified only once.</value>
+    <comment>{StrBegin="MSBUILD : error MSB1069: "}LOCALIZATION: "evaluationMode" should not be localized.</comment>
+  </data>
+  <data name="InvalidEvaluationModeValue" xml:space="preserve">
+    <value>MSBUILD : error MSB1069: The evaluation mode "{0}" is invalid. Valid values are Classic and Pure.</value>
+    <comment>{StrBegin="MSBUILD : error MSB1069: "}{0} is the invalid mode. LOCALIZATION: "Classic" and "Pure" should not be localized.</comment>
+  </data>
   <data name="HelpMessage_33_RestorePropertySwitch" xml:space="preserve">
     <value>  -restoreProperty:&lt;n&gt;=&lt;v&gt;
                      Set or override these project-level properties only

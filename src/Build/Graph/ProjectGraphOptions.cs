@@ -43,6 +43,11 @@ namespace Microsoft.Build.Graph
         public ProjectGraphMode Mode { get; init; } = ProjectGraphMode.Default;
 
         /// <summary>
+        /// The semantic policy to apply while evaluating projects in the graph.
+        /// </summary>
+        public ProjectEvaluationMode EvaluationMode { get; init; } = ProjectEvaluationMode.Classic;
+
+        /// <summary>
         /// The <see cref="ProjectCollection" /> to load projects into when constructing the graph. Defaults to <see cref="ProjectCollection.GlobalProjectCollection" />.
         /// </summary>
         public ProjectCollection ProjectCollection { get; init; } = ProjectCollection.GlobalProjectCollection;

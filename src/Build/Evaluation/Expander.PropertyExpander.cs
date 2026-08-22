@@ -15,6 +15,7 @@ using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.NET.StringTools;
 using Microsoft.Win32;
 using ReservedPropertyNames = Microsoft.Build.Internal.ReservedPropertyNames;
@@ -52,6 +53,7 @@ internal partial class Expander<P, I>
         private readonly IElementLocation _elementLocation;
         private readonly PropertiesUseTracker _propertiesUseTracker;
         private readonly IFileSystem _fileSystem;
+        private readonly EvaluationContext _evaluationContext;
         private readonly bool _isTruncationEnabled;
 
         private PropertyExpander(
@@ -59,13 +61,15 @@ internal partial class Expander<P, I>
             ExpanderOptions options,
             IElementLocation elementLocation,
             PropertiesUseTracker propertiesUseTracker,
-            IFileSystem fileSystem)
+            IFileSystem fileSystem,
+            EvaluationContext evaluationContext)
         {
             _properties = properties;
             _options = options;
             _elementLocation = elementLocation;
             _propertiesUseTracker = propertiesUseTracker;
             _fileSystem = fileSystem;
+            _evaluationContext = evaluationContext;
             _isTruncationEnabled = IsTruncationEnabled(options);
         }
 
@@ -92,7 +96,8 @@ internal partial class Expander<P, I>
             ExpanderOptions options,
             IElementLocation elementLocation,
             PropertiesUseTracker propertiesUseTracker,
-            IFileSystem fileSystem)
+            IFileSystem fileSystem,
+            EvaluationContext evaluationContext = null)
         {
             return
                 ConvertToString(
@@ -102,7 +107,8 @@ internal partial class Expander<P, I>
                         options,
                         elementLocation,
                         propertiesUseTracker,
-                        fileSystem));
+                        fileSystem,
+                        evaluationContext));
         }
 
         /// <summary>
@@ -128,7 +134,8 @@ internal partial class Expander<P, I>
             ExpanderOptions options,
             IElementLocation elementLocation,
             PropertiesUseTracker propertiesUseTracker,
-            IFileSystem fileSystem)
+            IFileSystem fileSystem,
+            EvaluationContext evaluationContext = null)
         {
             if (((options & ExpanderOptions.ExpandProperties) == 0) || String.IsNullOrEmpty(expression))
             {
@@ -144,7 +151,7 @@ internal partial class Expander<P, I>
                 return expression;
             }
 
-            PropertyExpander expander = new(properties, options, elementLocation, propertiesUseTracker, fileSystem);
+            PropertyExpander expander = new(properties, options, elementLocation, propertiesUseTracker, fileSystem, evaluationContext);
             return expander.ExpandPropertiesLeaveTypedAndEscaped(expression, markerIndex);
         }
 
@@ -344,6 +351,14 @@ internal partial class Expander<P, I>
                 length >= RegistryPrefix.Length &&
                 string.Compare(expression, startIndex, RegistryPrefix, 0, RegistryPrefix.Length, StringComparison.OrdinalIgnoreCase) == 0)
             {
+                if (_evaluationContext?.EvaluationMode == ProjectEvaluationMode.Pure)
+                {
+                    ProjectErrorUtilities.ThrowInvalidProject(
+                        _elementLocation,
+                        "PureEvaluationDisallowedPropertyFunction",
+                        expression.Substring(startIndex, length));
+                }
+
                 // If the property body starts with any of our special objects, then deal with them
                 // This is a registry reference, like $(Registry:HKEY_LOCAL_MACHINE\Software\Vendor\Tools@TaskLocation)
                 // Note: ExpandRegistryValue returns an empty string if not on Windows.
@@ -373,9 +388,10 @@ internal partial class Expander<P, I>
             ExpanderOptions options,
             IElementLocation elementLocation,
             PropertiesUseTracker propertiesUseTracker,
-            IFileSystem fileSystem)
+            IFileSystem fileSystem,
+            EvaluationContext evaluationContext)
         {
-            PropertyExpander expander = new(properties, options, elementLocation, propertiesUseTracker, fileSystem);
+            PropertyExpander expander = new(properties, options, elementLocation, propertiesUseTracker, fileSystem, evaluationContext);
             return expander.ExpandPropertyBody(propertyBody, propertyValue);
         }
 
@@ -411,7 +427,8 @@ internal partial class Expander<P, I>
                         propertyValue,
                         _propertiesUseTracker,
                         _fileSystem,
-                        _propertiesUseTracker.LoggingContext);
+                        _propertiesUseTracker.LoggingContext,
+                        _evaluationContext);
 
                     // We may not have been able to parse out a function
                     if (function != null)

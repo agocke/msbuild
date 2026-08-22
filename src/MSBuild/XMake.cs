@@ -917,6 +917,7 @@ namespace Microsoft.Build.CommandLine
                 bool enableRestore = Traits.Instance.EnableRestoreFirst;
                 ProfilerLogger profilerLogger = null;
                 bool enableProfiler = false;
+                ProjectEvaluationMode evaluationMode = ProjectEvaluationMode.Classic;
                 bool interactive = false;
                 ProjectIsolationMode isolateProjects = ProjectIsolationMode.False;
                 GraphBuildOptions graphBuildOptions = null;
@@ -980,6 +981,7 @@ namespace Microsoft.Build.CommandLine
                                             ref interactive,
                                             ref profilerLogger,
                                             ref enableProfiler,
+                                            ref evaluationMode,
                                             ref restoreProperties,
                                             ref isolateProjects,
                                             ref graphBuildOptions,
@@ -1071,6 +1073,7 @@ namespace Microsoft.Build.CommandLine
                                     GlobalProperties = globalProperties,
                                     ToolsVersion = toolsVersion,
                                     EvaluationStage = evaluationStage,
+                                    EvaluationMode = evaluationMode,
                                 });
 
                                 if (getResultOutputFile.Length == 0)
@@ -1129,6 +1132,7 @@ namespace Microsoft.Build.CommandLine
                                     enableRestore,
                                     profilerLogger,
                                     enableProfiler,
+                                    evaluationMode,
                                     interactive,
                                     isolateProjects,
                                     graphBuildOptions,
@@ -1589,6 +1593,7 @@ namespace Microsoft.Build.CommandLine
             bool enableRestore,
             ProfilerLogger profilerLogger,
             bool enableProfiler,
+            ProjectEvaluationMode evaluationMode,
             bool interactive,
             ProjectIsolationMode isolateProjects,
             GraphBuildOptions graphBuildOptions,
@@ -1720,7 +1725,15 @@ namespace Microsoft.Build.CommandLine
                 // If the user has requested that the schema be validated, do that here.
                 if (needToValidateProject && !isSolution)
                 {
-                    Microsoft.Build.Evaluation.Project project = projectCollection.LoadProject(projectFile, globalProperties, toolsVersion);
+                    Microsoft.Build.Evaluation.Project project = Project.FromFile(
+                        projectFile,
+                        new ProjectOptions
+                        {
+                            ProjectCollection = projectCollection,
+                            GlobalProperties = globalProperties,
+                            ToolsVersion = toolsVersion,
+                            EvaluationMode = evaluationMode,
+                        });
                     Microsoft.Build.Evaluation.Toolset toolset = projectCollection.GetToolset(toolsVersion ?? project.ToolsVersion);
 
                     if (toolset == null)
@@ -1747,7 +1760,15 @@ namespace Microsoft.Build.CommandLine
                     }
                     else
                     {
-                        Project project = projectCollection.LoadProject(projectFile, globalProperties, toolsVersion);
+                        Project project = Project.FromFile(
+                            projectFile,
+                            new ProjectOptions
+                            {
+                                ProjectCollection = projectCollection,
+                                GlobalProperties = globalProperties,
+                                ToolsVersion = toolsVersion,
+                                EvaluationMode = evaluationMode,
+                            });
 
                         project.SaveLogicalProject(preprocessWriter);
 
@@ -1768,7 +1789,7 @@ namespace Microsoft.Build.CommandLine
                     }
                     else
                     {
-                        success = PrintTargets(projectFile, toolsVersion, globalProperties, targetsWriter, projectCollection);
+                        success = PrintTargets(projectFile, toolsVersion, globalProperties, targetsWriter, projectCollection, evaluationMode);
                     }
                 }
 
@@ -1807,6 +1828,7 @@ namespace Microsoft.Build.CommandLine
                     parameters.ReportFileAccesses = reportFileAccesses;
 #endif
                     parameters.EnableTargetOutputLogging = isTaskAndTargetItemLoggingRequired;
+                    parameters.ProjectEvaluationMode = evaluationMode;
 
                     // Propagate the profiler flag into the project load settings so the evaluator
                     // can pick it up
@@ -2023,11 +2045,25 @@ namespace Microsoft.Build.CommandLine
             return success;
         }
 
-        private static bool PrintTargets(string projectFile, string toolsVersion, Dictionary<string, string> globalProperties, TextWriter targetsWriter, ProjectCollection projectCollection)
+        private static bool PrintTargets(
+            string projectFile,
+            string toolsVersion,
+            Dictionary<string, string> globalProperties,
+            TextWriter targetsWriter,
+            ProjectCollection projectCollection,
+            ProjectEvaluationMode evaluationMode)
         {
             try
             {
-                Project project = projectCollection.LoadProject(projectFile, globalProperties, toolsVersion);
+                Project project = Project.FromFile(
+                    projectFile,
+                    new ProjectOptions
+                    {
+                        ProjectCollection = projectCollection,
+                        GlobalProperties = globalProperties,
+                        ToolsVersion = toolsVersion,
+                        EvaluationMode = evaluationMode,
+                    });
 
                 foreach (string target in project.Targets.Keys)
                 {
@@ -2432,6 +2468,7 @@ namespace Microsoft.Build.CommandLine
             ref bool interactive,
             ref ProfilerLogger profilerLogger,
             ref bool enableProfiler,
+            ref ProjectEvaluationMode evaluationMode,
             ref Dictionary<string, string> restoreProperties,
             ref ProjectIsolationMode isolateProjects,
             ref GraphBuildOptions graphBuild,
@@ -2591,6 +2628,7 @@ namespace Microsoft.Build.CommandLine
                                                            ref interactive,
                                                            ref profilerLogger,
                                                            ref enableProfiler,
+                                                           ref evaluationMode,
                                                            ref restoreProperties,
                                                            ref isolateProjects,
                                                            ref graphBuild,
@@ -2639,6 +2677,8 @@ namespace Microsoft.Build.CommandLine
 
                     // figure out which properties have been set on the command line
                     globalProperties = ProcessPropertySwitch(commandLineSwitches[CommandLineSwitches.ParameterizedSwitch.Property]);
+
+                    evaluationMode = ProcessEvaluationModeSwitch(commandLineSwitches[CommandLineSwitches.ParameterizedSwitch.EvaluationMode]);
 
                     // figure out which restore-only properties have been set on the command line
                     restoreProperties = ProcessPropertySwitch(commandLineSwitches[CommandLineSwitches.ParameterizedSwitch.RestoreProperty]);
@@ -3357,6 +3397,24 @@ namespace Microsoft.Build.CommandLine
             loggers.Add(logger);
 
             return logger;
+        }
+
+        internal static ProjectEvaluationMode ProcessEvaluationModeSwitch(string[] parameters)
+        {
+            if (parameters == null || parameters.Length == 0)
+            {
+                return ProjectEvaluationMode.Classic;
+            }
+
+            string value = parameters[parameters.Length - 1];
+            if (Enum.TryParse(value, ignoreCase: true, out ProjectEvaluationMode evaluationMode)
+                && Enum.IsDefined(typeof(ProjectEvaluationMode), evaluationMode))
+            {
+                return evaluationMode;
+            }
+
+            CommandLineSwitchException.Throw("InvalidEvaluationModeValue", value);
+            return ProjectEvaluationMode.Classic;
         }
 
         /// <summary>

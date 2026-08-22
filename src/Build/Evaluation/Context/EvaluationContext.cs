@@ -51,6 +51,11 @@ namespace Microsoft.Build.Evaluation.Context
 
         internal SharingPolicy Policy { get; }
 
+        /// <summary>
+        /// Gets the semantic policy applied to project evaluation.
+        /// </summary>
+        public ProjectEvaluationMode EvaluationMode { get; }
+
         internal ISdkResolverService SdkResolverService { get; }
         internal IFileSystem FileSystem { get; }
         internal FileMatcher FileMatcher { get; }
@@ -60,10 +65,11 @@ namespace Microsoft.Build.Evaluation.Context
         /// </summary>
         private ConcurrentDictionary<string, IReadOnlyList<string>> FileEntryExpansionCache { get; }
 
-        private EvaluationContext(SharingPolicy policy, IFileSystem fileSystem, ISdkResolverService sdkResolverService = null,
+        private EvaluationContext(SharingPolicy policy, ProjectEvaluationMode evaluationMode, IFileSystem fileSystem, ISdkResolverService sdkResolverService = null,
             ConcurrentDictionary<string, IReadOnlyList<string>> fileEntryExpansionCache = null)
         {
             Policy = policy;
+            EvaluationMode = evaluationMode;
 
             SdkResolverService = sdkResolverService ?? new CachingSdkResolverService();
             FileEntryExpansionCache = fileEntryExpansionCache ?? new ConcurrentDictionary<string, IReadOnlyList<string>>();
@@ -78,7 +84,15 @@ namespace Microsoft.Build.Evaluation.Context
         public static EvaluationContext Create(SharingPolicy policy)
         {
             // Do not remove this method to avoid breaking binary compatibility.
-            return Create(policy, fileSystem: null);
+            return Create(policy, ProjectEvaluationMode.Classic, fileSystem: null);
+        }
+
+        /// <summary>
+        /// Creates an evaluation context with the specified sharing and semantic policies.
+        /// </summary>
+        public static EvaluationContext Create(SharingPolicy policy, ProjectEvaluationMode evaluationMode)
+        {
+            return Create(policy, evaluationMode, fileSystem: null);
         }
 
         /// <summary>
@@ -93,6 +107,19 @@ namespace Microsoft.Build.Evaluation.Context
         /// </param>
         public static EvaluationContext Create(SharingPolicy policy, MSBuildFileSystemBase fileSystem)
         {
+            return Create(policy, ProjectEvaluationMode.Classic, fileSystem);
+        }
+
+        /// <summary>
+        /// Creates an evaluation context with the specified sharing policy, semantic policy, and file system.
+        /// </summary>
+        public static EvaluationContext Create(SharingPolicy policy, ProjectEvaluationMode evaluationMode, MSBuildFileSystemBase fileSystem)
+        {
+            ErrorUtilities.VerifyThrowArgument(
+                Enum.IsDefined(typeof(ProjectEvaluationMode), evaluationMode),
+                "InvalidProjectEvaluationMode",
+                evaluationMode);
+
             // Unsupported case: not-fully-shared context with non null file system.
             ErrorUtilities.VerifyThrowArgument(
                 policy == SharingPolicy.Shared || fileSystem == null,
@@ -100,6 +127,7 @@ namespace Microsoft.Build.Evaluation.Context
 
             var context = new EvaluationContext(
                 policy,
+                evaluationMode,
                 fileSystem);
 
             TestOnlyHookOnCreate?.Invoke(context);
@@ -122,7 +150,7 @@ namespace Microsoft.Build.Evaluation.Context
                         return this;
                     }
                     // Create a copy if this context has already been used. Mark it used.
-                    EvaluationContext context = new EvaluationContext(Policy, fileSystem: null, sdkResolverService: Policy == SharingPolicy.SharedSDKCache ? SdkResolverService : null)
+                    EvaluationContext context = new EvaluationContext(Policy, EvaluationMode, fileSystem: null, sdkResolverService: Policy == SharingPolicy.SharedSDKCache ? SdkResolverService : null)
                     {
                         _used = 1,
                     };
@@ -141,7 +169,7 @@ namespace Microsoft.Build.Evaluation.Context
         /// <returns>The new evaluation context.</returns>
         internal EvaluationContext ContextWithFileSystem(IFileSystem fileSystem)
         {
-            return new EvaluationContext(Policy, fileSystem, SdkResolverService, FileEntryExpansionCache)
+            return new EvaluationContext(Policy, EvaluationMode, fileSystem, SdkResolverService, FileEntryExpansionCache)
             {
                 _used = 1,
             };

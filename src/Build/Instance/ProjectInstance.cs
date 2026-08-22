@@ -935,7 +935,7 @@ namespace Microsoft.Build.Execution
                 options.SubToolsetVersion,
                 options.ProjectCollection ?? ProjectCollection.GlobalProjectCollection,
                 options.LoadSettings,
-                options.EvaluationContext,
+                options.GetEvaluationContext(),
                 options.DirectoryCacheFactory,
                 options.Interactive,
                 options.EvaluationStage);
@@ -955,7 +955,7 @@ namespace Microsoft.Build.Execution
                 options.SubToolsetVersion,
                 options.ProjectCollection ?? ProjectCollection.GlobalProjectCollection,
                 options.LoadSettings,
-                options.EvaluationContext,
+                options.GetEvaluationContext(),
                 options.DirectoryCacheFactory,
                 options.Interactive,
                 options.EvaluationStage);
@@ -3340,7 +3340,8 @@ namespace Microsoft.Build.Execution
 
             Assumed.Equal(EvaluationId, BuildEventContext.InvalidEvaluationId, "Evaluation ID is invalid prior to evaluation");
 
-            evaluationContext = evaluationContext?.ContextForNewProject() ?? EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated);
+            evaluationContext = evaluationContext?.ContextForNewProject()
+                ?? EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated, buildParameters.ProjectEvaluationMode);
 
             Evaluator<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.Evaluate(
                 data: this,

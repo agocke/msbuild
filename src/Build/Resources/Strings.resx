@@ -639,6 +639,20 @@
       LOCALIZATION: "{0}" is the static function name, "{1}" is the .NET Framework type name
     </comment>
   </data>
+  <data name="PureEvaluationDisallowedPropertyFunction" xml:space="preserve">
+    <value>MSB4286: The property function "{0}" is not permitted in pure evaluation because it can observe ambient state or perform an effect. Use an MSBuild declarative operation, pass the value as an explicit property, or move the operation to target execution.</value>
+    <comment>{StrBegin="MSB4286: "}{0} is the property-function expression rejected by pure evaluation.</comment>
+  </data>
+  <data name="InvalidProjectEvaluationMode" xml:space="preserve">
+    <value>The project evaluation mode "{0}" is invalid.</value>
+    <comment>{0} is the invalid enum value supplied through an MSBuild API.</comment>
+  </data>
+  <data name="EvaluationModeDoesNotMatchContext" xml:space="preserve">
+    <value>The evaluation mode specified by ProjectOptions does not match the supplied EvaluationContext.</value>
+  </data>
+  <data name="PureEvaluationDoesNotSupportCustomProjectInstanceFactory" xml:space="preserve">
+    <value>Pure evaluation cannot be combined with a custom ProjectInstance factory because MSBuild cannot enforce the evaluation policy inside the callback.</value>
+  </data>
   <data name="InvalidFunctionTypeUnavailable" xml:space="preserve">
     <value>MSB4212: Invalid static method invocation syntax: "{0}". The type "{1}" is either not available for execution in an MSBuild property function or could not be found.</value>
     <comment>

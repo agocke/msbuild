@@ -254,7 +254,7 @@ internal partial class Expander<P, I>
         Assumed.NotNull(elementLocation);
 
         string result = MetadataExpander.ExpandMetadataLeaveEscaped(expression, _metadata, options, elementLocation, _loggingContext);
-        result = PropertyExpander.ExpandPropertiesLeaveEscaped(result, _properties, options, elementLocation, _propertiesUseTracker, _fileSystem);
+        result = PropertyExpander.ExpandPropertiesLeaveEscaped(result, _properties, options, elementLocation, _propertiesUseTracker, _fileSystem, EvaluationContext);
         result = ItemExpander.ExpandItemVectorsIntoString(this, result, _items, options, elementLocation);
         result = FileUtilities.MaybeAdjustFilePath(result);
 
@@ -275,7 +275,7 @@ internal partial class Expander<P, I>
         Assumed.NotNull(elementLocation);
 
         string metaExpanded = MetadataExpander.ExpandMetadataLeaveEscaped(expression, _metadata, options, elementLocation);
-        return PropertyExpander.ExpandPropertiesLeaveTypedAndEscaped(metaExpanded, _properties, options, elementLocation, _propertiesUseTracker, _fileSystem);
+        return PropertyExpander.ExpandPropertiesLeaveTypedAndEscaped(metaExpanded, _properties, options, elementLocation, _propertiesUseTracker, _fileSystem, EvaluationContext);
     }
 
     /// <summary>
@@ -323,7 +323,7 @@ internal partial class Expander<P, I>
         Assumed.NotNull(elementLocation);
 
         expression = MetadataExpander.ExpandMetadataLeaveEscaped(expression, _metadata, options, elementLocation);
-        expression = PropertyExpander.ExpandPropertiesLeaveEscaped(expression, _properties, options, elementLocation, _propertiesUseTracker, _fileSystem);
+        expression = PropertyExpander.ExpandPropertiesLeaveEscaped(expression, _properties, options, elementLocation, _propertiesUseTracker, _fileSystem, EvaluationContext);
         expression = FileUtilities.MaybeAdjustFilePath(expression);
 
         List<T> result = new List<T>();

@@ -120,6 +120,8 @@ namespace Microsoft.Build.CommandLine.Experimental
 
         public string[]? ProfileEvaluation => GetParameterizedSwitchValue(ParameterizedSwitch.ProfileEvaluation);
 
+        public string[]? EvaluationMode => GetParameterizedSwitchValue(ParameterizedSwitch.EvaluationMode);
+
         public string[]? RestoreProperty => GetParameterizedSwitchValue(ParameterizedSwitch.RestoreProperty);
 
         public string[]? Interactive => GetParameterizedSwitchValue(ParameterizedSwitch.Interactive);

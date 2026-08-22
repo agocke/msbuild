@@ -556,6 +556,11 @@
         <target state="translated">MSB4258: 从路径“{0}”写入输出结果缓存文件时遇到错误: {1}</target>
         <note />
       </trans-unit>
+      <trans-unit id="EvaluationModeDoesNotMatchContext">
+        <source>The evaluation mode specified by ProjectOptions does not match the supplied EvaluationContext.</source>
+        <target state="new">The evaluation mode specified by ProjectOptions does not match the supplied EvaluationContext.</target>
+        <note />
+      </trans-unit>
       <trans-unit id="FailedToResolveSDK">
         <source>Could not resolve SDK "{0}". Exactly one of the probing messages below indicates why we could not resolve the SDK. Investigate and resolve that message to correctly specify the SDK.
   {1}</source>
@@ -601,6 +606,11 @@
         <source>MSB4255: The following input result cache files do not exist: "{0}"</source>
         <target state="translated">MSB4255: 以下输入结果缓存文件不存在:“{0}”</target>
         <note />
+      </trans-unit>
+      <trans-unit id="InvalidProjectEvaluationMode">
+        <source>The project evaluation mode "{0}" is invalid.</source>
+        <target state="new">The project evaluation mode "{0}" is invalid.</target>
+        <note>{0} is the invalid enum value supplied through an MSBuild API.</note>
       </trans-unit>
       <trans-unit id="InvalidVersionFormat">
         <source>Version string was not in a correct format.</source>
@@ -931,6 +941,16 @@
       <trans-unit id="ProxyRequestNotScheduledOnInprocNode">
         <source>MSB4274: Disabling the inproc node leads to performance degradation when using project cache plugins that emit proxy build requests.</source>
         <target state="translated">MSB4274: 使用发出代理构建请求的项目缓存插件时，禁用 inproc 节点会导致性能下降。</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="PureEvaluationDisallowedPropertyFunction">
+        <source>MSB4286: The property function "{0}" is not permitted in pure evaluation because it can observe ambient state or perform an effect. Use an MSBuild declarative operation, pass the value as an explicit property, or move the operation to target execution.</source>
+        <target state="new">MSB4286: The property function "{0}" is not permitted in pure evaluation because it can observe ambient state or perform an effect. Use an MSBuild declarative operation, pass the value as an explicit property, or move the operation to target execution.</target>
+        <note>{StrBegin="MSB4286: "}{0} is the property-function expression rejected by pure evaluation.</note>
+      </trans-unit>
+      <trans-unit id="PureEvaluationDoesNotSupportCustomProjectInstanceFactory">
+        <source>Pure evaluation cannot be combined with a custom ProjectInstance factory because MSBuild cannot enforce the evaluation policy inside the callback.</source>
+        <target state="new">Pure evaluation cannot be combined with a custom ProjectInstance factory because MSBuild cannot enforce the evaluation policy inside the callback.</target>
         <note />
       </trans-unit>
       <trans-unit id="ReflectiveLoggerLoadingNotSupported">

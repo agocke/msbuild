@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Build.CommandLine.Experimental;
+using Microsoft.Build.Evaluation;
 using Shouldly;
 using Xunit;
 
@@ -34,6 +35,31 @@ namespace Microsoft.Build.CommandLine.UnitTests
                 // first parameter must be the executable name
                 parser.Parse(["tempproject.proj", "tempproject.proj"]);
             });
+        }
+
+        [Fact]
+        public void ParseRecognizesEvaluationMode()
+        {
+            CommandLineSwitchesAccessor result = new CommandLineParser().Parse(["-evaluationMode:Pure"]);
+
+            result.EvaluationMode.ShouldBe(["Pure"]);
+        }
+
+        [Theory]
+        [InlineData("Classic", ProjectEvaluationMode.Classic)]
+        [InlineData("classic", ProjectEvaluationMode.Classic)]
+        [InlineData("Pure", ProjectEvaluationMode.Pure)]
+        [InlineData("pure", ProjectEvaluationMode.Pure)]
+        public void EvaluationModeValuesAreCaseInsensitive(string value, ProjectEvaluationMode expected)
+        {
+            MSBuildApp.ProcessEvaluationModeSwitch([value]).ShouldBe(expected);
+        }
+
+        [Fact]
+        public void InvalidEvaluationModeIsRejected()
+        {
+            Should.Throw<CommandLineSwitchException>(
+                () => MSBuildApp.ProcessEvaluationModeSwitch(["tracked"]));
         }
     }
 }

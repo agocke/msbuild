@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.FileSystem;
+using Microsoft.Build.Shared;
 
 #nullable disable
 
@@ -47,6 +48,23 @@ namespace Microsoft.Build.Definition
         public EvaluationContext EvaluationContext { get; set; }
 
         /// <summary>
+        /// Gets or sets the semantic policy applied during evaluation.
+        /// </summary>
+        public ProjectEvaluationMode EvaluationMode
+        {
+            get => _evaluationMode;
+            set
+            {
+                if (!Enum.IsDefined(typeof(ProjectEvaluationMode), value))
+                {
+                    throw new ArgumentOutOfRangeException(nameof(value), value, null);
+                }
+
+                _evaluationMode = value;
+            }
+        }
+
+        /// <summary>
         /// Provides <see cref="IDirectoryCache"/> to be used for evaluation.
         /// </summary>
         public IDirectoryCacheFactory DirectoryCacheFactory { get; set; }
@@ -82,5 +100,24 @@ namespace Microsoft.Build.Definition
         }
 
         private ProjectEvaluationStage _evaluationStage = ProjectEvaluationStage.Full;
+        private ProjectEvaluationMode _evaluationMode = ProjectEvaluationMode.Classic;
+
+        internal EvaluationContext GetEvaluationContext()
+        {
+            if (EvaluationContext != null)
+            {
+                ErrorUtilities.VerifyThrowArgument(
+                    EvaluationMode == ProjectEvaluationMode.Classic || EvaluationContext.EvaluationMode == EvaluationMode,
+                    "EvaluationModeDoesNotMatchContext");
+
+                return EvaluationContext;
+            }
+
+            return EvaluationMode == ProjectEvaluationMode.Classic
+                ? null
+                : Microsoft.Build.Evaluation.Context.EvaluationContext.Create(
+                    Microsoft.Build.Evaluation.Context.EvaluationContext.SharingPolicy.Isolated,
+                    EvaluationMode);
+        }
     }
 }

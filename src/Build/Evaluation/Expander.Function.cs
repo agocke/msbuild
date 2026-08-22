@@ -15,6 +15,7 @@ using Microsoft.Build.Evaluation.Expander;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.NET.StringTools;
 using AvailableStaticMethods = Microsoft.Build.Internal.AvailableStaticMethods;
 using FeatureSwitches = Microsoft.Build.Framework.FeatureSwitches;
@@ -117,6 +118,8 @@ internal partial class Expander<P, I>
 
         private readonly LoggingContext _loggingContext;
 
+        private readonly EvaluationContext _evaluationContext;
+
         /// <summary>
         /// Construct a function that will be executed during property evaluation.
         /// </summary>
@@ -134,7 +137,8 @@ internal partial class Expander<P, I>
             string remainder,
             PropertiesUseTracker propertiesUseTracker,
             IFileSystem fileSystem,
-            LoggingContext loggingContext)
+            LoggingContext loggingContext,
+            EvaluationContext evaluationContext)
         {
             _methodMethodName = methodName;
             if (arguments == null)
@@ -164,6 +168,7 @@ internal partial class Expander<P, I>
             _propertiesUseTracker = propertiesUseTracker;
             _fileSystem = fileSystem;
             _loggingContext = loggingContext;
+            _evaluationContext = evaluationContext;
         }
 
         /// <summary>
@@ -203,16 +208,23 @@ internal partial class Expander<P, I>
         /// <param name="propertiesUseTracker">Tracks property reads performed while evaluating the function.</param>
         /// <param name="fileSystem">File system abstraction used by file and directory property functions.</param>
         /// <param name="loggingContext">Logging context for the operation; may be <see langword="null"/>.</param>
+        /// <param name="evaluationContext">Evaluation context carrying the semantic evaluation policy; may be <see langword="null"/> outside evaluation.</param>
         internal static Function ExtractPropertyFunction(
             string expressionFunction,
             IElementLocation elementLocation,
             object propertyValue,
             PropertiesUseTracker propertiesUseTracker,
             IFileSystem fileSystem,
-            LoggingContext loggingContext)
+            LoggingContext loggingContext,
+            EvaluationContext evaluationContext)
         {
             // Used to aggregate all the components needed for a Function
-            FunctionBuilder functionBuilder = new FunctionBuilder { FileSystem = fileSystem, LoggingContext = loggingContext };
+            FunctionBuilder functionBuilder = new FunctionBuilder
+            {
+                FileSystem = fileSystem,
+                LoggingContext = loggingContext,
+                EvaluationContext = evaluationContext,
+            };
 
             // By default the expression root is the whole function expression
             ReadOnlySpan<char> expressionRoot = expressionFunction == null ? ReadOnlySpan<char>.Empty : expressionFunction.AsSpan();
@@ -413,7 +425,8 @@ internal partial class Expander<P, I>
                         options,
                         elementLocation,
                         _propertiesUseTracker,
-                        _fileSystem);
+                        _fileSystem,
+                        _evaluationContext);
 
                     if (argument is string argumentValue)
                     {
@@ -451,6 +464,12 @@ internal partial class Expander<P, I>
                     {
                         args[n] = argument;
                     }
+                }
+
+                if (_evaluationContext?.EvaluationMode == ProjectEvaluationMode.Pure
+                    && !PureEvaluationPolicy.IsPropertyFunctionAllowed(_receiverType, _methodMethodName, objectInstance == null, args))
+                {
+                    ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "PureEvaluationDisallowedPropertyFunction", GenerateStringOfMethodExecuted(_expression, objectInstance, _methodMethodName, args));
                 }
 
                 // Handle special cases where the object type needs to affect the choice of method
@@ -581,7 +600,8 @@ internal partial class Expander<P, I>
                     options,
                     elementLocation,
                     _propertiesUseTracker,
-                    _fileSystem);
+                    _fileSystem,
+                    _evaluationContext);
             }
 
             // Exceptions coming from the actual function called are wrapped in a TargetInvocationException

@@ -1192,6 +1192,7 @@ namespace Microsoft.Build.UnitTests
                                         enableRestore: false,
                                         profilerLogger: null,
                                         enableProfiler: false,
+                                        evaluationMode: Microsoft.Build.Evaluation.ProjectEvaluationMode.Classic,
                                         interactive: false,
                                         isolateProjects: ProjectIsolationMode.False,
                                         graphBuildOptions: null,

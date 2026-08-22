@@ -448,6 +448,16 @@ namespace Microsoft.Build.Graph
             {
                 throw new ArgumentOutOfRangeException(nameof(options.DegreeOfParallelism), "DegreeOfParallelism must be greater than zero.");
             }
+            if (!Enum.IsDefined(typeof(ProjectEvaluationMode), options.EvaluationMode))
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.EvaluationMode), options.EvaluationMode, null);
+            }
+            if (options.EvaluationMode != ProjectEvaluationMode.Classic && options.ProjectInstanceFactoryFunc != null)
+            {
+                throw new ArgumentException(
+                    AssemblyResources.GetString("PureEvaluationDoesNotSupportCustomProjectInstanceFactory"),
+                    nameof(options));
+            }
 
             var measurementInfo = BeginMeasurement();
 
@@ -455,7 +465,7 @@ namespace Microsoft.Build.Graph
 
             if (projectInstanceFactory is null)
             {
-                _evaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared);
+                _evaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared, options.EvaluationMode);
                 projectInstanceFactory = DefaultProjectInstanceFactory;
             }
 

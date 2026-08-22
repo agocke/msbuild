@@ -221,6 +221,8 @@ namespace Microsoft.Build.Execution
         /// </summary>
         private ProjectLoadSettings _projectLoadSettings = ProjectLoadSettings.Default;
 
+        private ProjectEvaluationMode _projectEvaluationMode = ProjectEvaluationMode.Classic;
+
         private bool _interactive;
 
         /// <summary>
@@ -325,6 +327,7 @@ namespace Microsoft.Build.Execution
             WarningsNotAsErrors = other.WarningsNotAsErrors == null ? null : new HashSet<string>(other.WarningsNotAsErrors, StringComparer.OrdinalIgnoreCase);
             WarningsAsMessages = other.WarningsAsMessages == null ? null : new HashSet<string>(other.WarningsAsMessages, StringComparer.OrdinalIgnoreCase);
             _projectLoadSettings = other._projectLoadSettings;
+            _projectEvaluationMode = other._projectEvaluationMode;
             _interactive = other._interactive;
             _projectIsolationMode = other.ProjectIsolationMode;
             _inputResultsCacheFiles = other._inputResultsCacheFiles;
@@ -831,6 +834,23 @@ namespace Microsoft.Build.Execution
         }
 
         /// <summary>
+        /// Gets or sets the semantic policy applied while evaluating projects for this build.
+        /// </summary>
+        public ProjectEvaluationMode ProjectEvaluationMode
+        {
+            get => _projectEvaluationMode;
+            set
+            {
+                if (!Enum.IsDefined(typeof(ProjectEvaluationMode), value))
+                {
+                    throw new ArgumentOutOfRangeException(nameof(value), value, null);
+                }
+
+                _projectEvaluationMode = value;
+            }
+        }
+
+        /// <summary>
         /// Gets or sets the configuration for allowed unknown attributes/elements during parsing.
         /// When set, this configuration is used for parsing and evaluation.
         /// </summary>
@@ -1004,6 +1024,7 @@ namespace Microsoft.Build.Execution
             translator.Translate(ref _logTaskInputs);
             translator.Translate(ref _logInitialPropertiesAndItems);
             translator.TranslateEnum(ref _projectLoadSettings, (int)_projectLoadSettings);
+            translator.TranslateEnum(ref _projectEvaluationMode, (int)_projectEvaluationMode);
             translator.Translate(ref _interactive);
             translator.Translate(ref _question);
             translator.Translate(ref _isBuildCheckEnabled);

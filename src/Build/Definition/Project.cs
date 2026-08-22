@@ -494,7 +494,7 @@ namespace Microsoft.Build.Evaluation
                 options.SubToolsetVersion,
                 options.ProjectCollection ?? ProjectCollection.GlobalProjectCollection,
                 options.LoadSettings,
-                options.EvaluationContext,
+                options.GetEvaluationContext(),
                 options.DirectoryCacheFactory,
                 options.Interactive);
         }
@@ -514,7 +514,7 @@ namespace Microsoft.Build.Evaluation
                 options.SubToolsetVersion,
                 options.ProjectCollection ?? ProjectCollection.GlobalProjectCollection,
                 options.LoadSettings,
-                options.EvaluationContext,
+                options.GetEvaluationContext(),
                 options.DirectoryCacheFactory,
                 options.Interactive);
         }
@@ -534,7 +534,7 @@ namespace Microsoft.Build.Evaluation
                 options.SubToolsetVersion,
                 options.ProjectCollection ?? ProjectCollection.GlobalProjectCollection,
                 options.LoadSettings,
-                options.EvaluationContext,
+                options.GetEvaluationContext(),
                 options.DirectoryCacheFactory,
                 options.Interactive);
         }
@@ -1878,6 +1878,8 @@ namespace Microsoft.Build.Evaluation
             /// This is retained after construction as it will be needed for reevaluation.
             /// </summary>
             private ProjectLoadSettings _loadSettings;
+
+            private ProjectEvaluationMode _evaluationMode = ProjectEvaluationMode.Classic;
 
             /// <summary>
             /// The delegate registered with the ProjectRootElement to be called if the file name
@@ -3593,7 +3595,8 @@ namespace Microsoft.Build.Evaluation
                 ProjectLoadSettings loadSettings,
                 EvaluationContext evaluationContext = null)
             {
-                evaluationContext = evaluationContext?.ContextForNewProject() ?? EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated);
+                evaluationContext = evaluationContext?.ContextForNewProject()
+                    ?? EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated, _evaluationMode);
 
                 Evaluator<ProjectProperty, ProjectItem, ProjectMetadata, ProjectItemDefinition>.Evaluate(
                     _data,
@@ -3647,6 +3650,7 @@ namespace Microsoft.Build.Evaluation
             /// </summary>
             internal void Initialize(IDictionary<string, string> globalProperties, string toolsVersion, string subToolsetVersion, ProjectLoadSettings loadSettings, EvaluationContext evaluationContext, bool interactive)
             {
+                _evaluationMode = evaluationContext?.EvaluationMode ?? ProjectEvaluationMode.Classic;
                 Xml.MarkAsExplicitlyLoaded();
 
                 var globalPropertiesCollection = new PropertyDictionary<ProjectPropertyInstance>();
