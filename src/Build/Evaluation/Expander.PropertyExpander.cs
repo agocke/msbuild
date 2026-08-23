@@ -587,14 +587,29 @@ internal partial class Expander<P, I>
         /// </summary>
         private object LookupProperty(string propertyName, int startIndex, int endIndex)
         {
-            P property = _properties.GetProperty(propertyName, startIndex, endIndex);
+            string compactValue = null;
+            bool foundCompactValue =
+                _properties is IPropertyValueProvider valueProvider &&
+                valueProvider.TryGetEscapedPropertyValue(
+                    propertyName,
+                    startIndex,
+                    endIndex,
+                    out compactValue);
+            P property = foundCompactValue
+                ? null
+                : _properties.GetProperty(
+                    propertyName,
+                    startIndex,
+                    endIndex);
 
             object propertyValue;
 
-            bool isArtificial = property == null && ((endIndex - startIndex) >= 7) &&
+            bool propertyNotFound =
+                !foundCompactValue && property == null;
+            bool isArtificial = propertyNotFound && ((endIndex - startIndex) >= 7) &&
                                MSBuildNameIgnoreCaseComparer.Default.Equals("MSBuild", propertyName, startIndex, 7);
 
-            _propertiesUseTracker.TrackRead(propertyName, startIndex, endIndex, _elementLocation, property == null, isArtificial);
+            _propertiesUseTracker.TrackRead(propertyName, startIndex, endIndex, _elementLocation, propertyNotFound, isArtificial);
 
             if (isArtificial)
             {
@@ -608,6 +623,10 @@ internal partial class Expander<P, I>
                 {
                     propertyValue = ExpandMSBuildThisFileProperty(propertyName);
                 }
+            }
+            else if (foundCompactValue)
+            {
+                propertyValue = compactValue;
             }
             else if (property == null)
             {

@@ -45,7 +45,10 @@ namespace Microsoft.Build.Evaluation
         CompiledPropertyBatch,
         CompiledPropertyEffect,
         CompiledPropertyFold,
+        CompiledPropertyExpansion,
         CompiledPropertyDeadStore,
+        CompiledPropertyBlockCacheHit,
+        CompiledPropertyBlockCacheMiss,
     }
 
     internal static class EvaluationPerformanceInstrumentation
@@ -66,6 +69,16 @@ namespace Microsoft.Build.Evaluation
                     string,
                     ConditionContentionAccumulator>(
                         StringComparer.Ordinal);
+        private static readonly ConcurrentDictionary<
+            string,
+            CompiledPropertyModuleAccumulator>
+            s_compiledPropertyModules =
+                new ConcurrentDictionary<
+                    string,
+                    CompiledPropertyModuleAccumulator>(
+                        StringComparer.OrdinalIgnoreCase);
+        private static readonly object s_reportLock = new object();
+        private static long s_completedEvaluations;
         private static readonly string s_outputDirectory =
             Environment.GetEnvironmentVariable(
                 OutputDirectoryEnvironmentVariable);
@@ -139,6 +152,131 @@ namespace Microsoft.Build.Evaluation
                 elapsedTicks);
         }
 
+        internal static void RecordConstantPropertyBlock(
+            EvaluationModule module,
+            int effectCount)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            CompiledPropertyModuleAccumulator accumulator =
+                GetCompiledPropertyModuleAccumulator(module);
+            Interlocked.Increment(
+                ref accumulator.ConstantApplications);
+            Interlocked.Add(
+                ref accumulator.AppliedEffects,
+                effectCount);
+        }
+
+        internal static void RecordPropertyBlockFallback(
+            EvaluationModule module,
+            CompiledPropertyBlockFallback fallback)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            CompiledPropertyModuleAccumulator accumulator =
+                GetCompiledPropertyModuleAccumulator(module);
+            switch (fallback)
+            {
+                case CompiledPropertyBlockFallback.GlobalProperty:
+                    Interlocked.Increment(
+                        ref accumulator.GlobalPropertyFallbacks);
+                    break;
+                case CompiledPropertyBlockFallback.UndefinedInput:
+                    Interlocked.Increment(
+                        ref accumulator.UndefinedInputFallbacks);
+                    break;
+                case CompiledPropertyBlockFallback.Destination:
+                    Interlocked.Increment(
+                        ref accumulator.DestinationFallbacks);
+                    break;
+            }
+        }
+
+        internal static void RecordPropertyBlockSpecialization(
+            EvaluationModule module,
+            bool cacheHit,
+            long startTimestamp,
+            int effectCount,
+            bool applied)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            CompiledPropertyModuleAccumulator accumulator =
+                GetCompiledPropertyModuleAccumulator(module);
+            long elapsedTicks = Stopwatch.GetTimestamp() - startTimestamp;
+            if (cacheHit)
+            {
+                Interlocked.Increment(
+                    ref accumulator.SpecializationHits);
+                Interlocked.Add(
+                    ref accumulator.SpecializationHitTicks,
+                    elapsedTicks);
+            }
+            else
+            {
+                Interlocked.Increment(
+                    ref accumulator.SpecializationMisses);
+                Interlocked.Add(
+                    ref accumulator.SpecializationMissTicks,
+                    elapsedTicks);
+            }
+
+            if (applied)
+            {
+                Interlocked.Increment(
+                    ref accumulator.SpecializationApplications);
+                Interlocked.Add(
+                    ref accumulator.AppliedEffects,
+                    effectCount);
+            }
+        }
+
+        internal static void WriteReportSnapshot()
+        {
+            if (Enabled)
+            {
+                WriteReport();
+            }
+        }
+
+        internal static void RecordEvaluationCompleted()
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            long completed =
+                Interlocked.Increment(ref s_completedEvaluations);
+            if (completed == 1 || (completed & 255) == 0)
+            {
+                WriteReport();
+            }
+        }
+
+        private static CompiledPropertyModuleAccumulator
+            GetCompiledPropertyModuleAccumulator(EvaluationModule module)
+        {
+            string path = module.Source.FullPath;
+            if (string.IsNullOrEmpty(path))
+            {
+                path = module.Source.Location?.File ?? "<in-memory>";
+            }
+
+            return s_compiledPropertyModules.GetOrAdd(
+                path,
+                static _ => new CompiledPropertyModuleAccumulator());
+        }
+
         private static void Record(
             EvaluationPerformanceMetric metric,
             long elapsedTicks)
@@ -150,6 +288,14 @@ namespace Microsoft.Build.Evaluation
         }
 
         private static void WriteReport()
+        {
+            lock (s_reportLock)
+            {
+                WriteReportCore();
+            }
+        }
+
+        private static void WriteReportCore()
         {
             Directory.CreateDirectory(s_outputDirectory);
             int processId;
@@ -250,11 +396,75 @@ namespace Microsoft.Build.Evaluation
                         .ToString("F3", CultureInfo.InvariantCulture));
             }
 
+            report.AppendLine(
+                "compiled_property_module\tconstant_applications\t" +
+                "specialization_hits\tspecialization_misses\t" +
+                "specialization_applications\tglobal_fallbacks\t" +
+                "undefined_fallbacks\tdestination_fallbacks\t" +
+                "applied_effects\thit_ms\tmiss_ms");
+            foreach (KeyValuePair<
+                         string,
+                         CompiledPropertyModuleAccumulator> entry
+                     in s_compiledPropertyModules
+                         .OrderByDescending(
+                             pair =>
+                                 Interlocked.Read(
+                                     ref pair.Value.AppliedEffects))
+                         .ThenBy(pair => pair.Key))
+            {
+                CompiledPropertyModuleAccumulator accumulator =
+                    entry.Value;
+                report.Append(Escape(entry.Key));
+                report.Append('\t');
+                report.Append(
+                    Read(ref accumulator.ConstantApplications));
+                report.Append('\t');
+                report.Append(
+                    Read(ref accumulator.SpecializationHits));
+                report.Append('\t');
+                report.Append(
+                    Read(ref accumulator.SpecializationMisses));
+                report.Append('\t');
+                report.Append(
+                    Read(ref accumulator.SpecializationApplications));
+                report.Append('\t');
+                report.Append(
+                    Read(ref accumulator.GlobalPropertyFallbacks));
+                report.Append('\t');
+                report.Append(
+                    Read(ref accumulator.UndefinedInputFallbacks));
+                report.Append('\t');
+                report.Append(
+                    Read(ref accumulator.DestinationFallbacks));
+                report.Append('\t');
+                report.Append(
+                    Read(ref accumulator.AppliedEffects));
+                report.Append('\t');
+                report.Append(
+                    ToMilliseconds(
+                            Interlocked.Read(
+                                ref accumulator.SpecializationHitTicks))
+                        .ToString("F3", CultureInfo.InvariantCulture));
+                report.Append('\t');
+                report.AppendLine(
+                    ToMilliseconds(
+                            Interlocked.Read(
+                                ref accumulator.SpecializationMissTicks))
+                        .ToString("F3", CultureInfo.InvariantCulture));
+            }
+
             string outputPath = Path.Combine(
                 s_outputDirectory,
                 $"evaluation-profile-{processId}.tsv");
             File.WriteAllText(outputPath, report.ToString());
         }
+
+        private static string Read(ref long value) =>
+            Interlocked.Read(ref value)
+                .ToString(CultureInfo.InvariantCulture);
+
+        private static double ToMilliseconds(long elapsedTicks) =>
+            elapsedTicks * 1000.0 / Stopwatch.Frequency;
 
         private static string Escape(string value) =>
             value?.Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ') ??
@@ -279,6 +489,20 @@ namespace Microsoft.Build.Evaluation
             internal long ElapsedTicks;
         }
 
+        private sealed class CompiledPropertyModuleAccumulator
+        {
+            internal long ConstantApplications;
+            internal long SpecializationHits;
+            internal long SpecializationMisses;
+            internal long SpecializationApplications;
+            internal long GlobalPropertyFallbacks;
+            internal long UndefinedInputFallbacks;
+            internal long DestinationFallbacks;
+            internal long AppliedEffects;
+            internal long SpecializationHitTicks;
+            internal long SpecializationMissTicks;
+        }
+
         internal readonly struct Scope : IDisposable
         {
             private readonly EvaluationPerformanceMetric _metric;
@@ -301,5 +525,12 @@ namespace Microsoft.Build.Evaluation
                 }
             }
         }
+    }
+
+    internal enum CompiledPropertyBlockFallback
+    {
+        GlobalProperty,
+        UndefinedInput,
+        Destination,
     }
 }

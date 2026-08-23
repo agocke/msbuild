@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -684,7 +685,7 @@ namespace Microsoft.Build.UnitTests.Evaluation
             module.Properties[0].IsDeadStore.ShouldBeTrue();
             module.Properties[1].IsDeadStore.ShouldBeFalse();
             TableRange segments = module.PropertyGroups[0].PropertySegments;
-            segments.Count.ShouldBe(5);
+            segments.Count.ShouldBe(1);
             PropertySegmentTemplate[] loweredSegments =
                 module.PropertySegments
                     .Skip(segments.Start)
@@ -695,13 +696,18 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     new[]
                     {
                         PropertySegmentKind.CompiledEffectBatch,
-                        PropertySegmentKind.Scalar,
-                        PropertySegmentKind.CompiledEffectBatch,
-                        PropertySegmentKind.Scalar,
-                        PropertySegmentKind.CompiledEffectBatch,
                     });
             loweredSegments.Select(segment => segment.Properties.Count)
-                .ShouldBe(new[] { 3, 1, 1, 1, 3 });
+                .ShouldBe(new[] { 9 });
+            loweredSegments[0].ExternalPropertyReads.Count.ShouldBe(1);
+            module.PropertyInstructions
+                .Skip(loweredSegments[0].Instructions.Start)
+                .Take(loweredSegments[0].Instructions.Count)
+                .Count(instruction =>
+                    instruction.Kind ==
+                    PropertyInstructionKind
+                        .BranchIfPropertyConditionFalse)
+                .ShouldBe(1);
         }
 
         [Fact]
@@ -773,7 +779,7 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 optimizedContext.EvaluationModuleCache.GetModule(
                     optimized.Xml);
             TableRange segments = module.PropertyGroups[0].PropertySegments;
-            segments.Count.ShouldBe(3);
+            segments.Count.ShouldBe(1);
             PropertySegmentTemplate[] loweredSegments =
                 module.PropertySegments
                     .Skip(segments.Start)
@@ -784,14 +790,798 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     new[]
                     {
                         PropertySegmentKind.CompiledEffectBatch,
-                        PropertySegmentKind.Scalar,
-                        PropertySegmentKind.CompiledEffectBatch,
                     });
             loweredSegments.Select(segment => segment.Properties.Count)
-                .ShouldBe(new[] { 5, 1, 2 });
+                .ShouldBe(new[] { 8 });
+            loweredSegments[0].ExternalPropertyReads.Count.ShouldBe(1);
             module.Properties.Count(
                     property => property.CompiledValueParts.Count > 0)
+                .ShouldBe(5);
+        }
+
+        [Fact]
+        public void CompiledPropertyEffectsRemainCompactUntilLegacyAccess()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "compact-property-effects.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <First>one</First>
+                    <Second>$(First)-two</Second>
+                    <Third>prefix-$(Second)</Third>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectInstance instance = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext =
+                        EvaluationContext.CreateForCompiledModuleEvaluation(
+                            ProjectEvaluationMode.Pure,
+                            useCompiledModuleEffectBatches: true),
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    ProjectCollection =
+                        environment.CreateProjectCollection().Collection,
+                });
+
+            instance.CompactPropertyCount.ShouldBe(3);
+            instance.GetPropertyValue("Second").ShouldBe("one-two");
+            instance.CompactPropertyCount.ShouldBe(3);
+
+            ProjectPropertyInstance second =
+                instance.GetProperty("second");
+            second.Name.ShouldBe("Second");
+            second.EvaluatedValue.ShouldBe("one-two");
+            instance.CompactPropertyCount.ShouldBe(2);
+
+            instance.SetProperty("Third", "changed");
+            instance.GetPropertyValue("Third").ShouldBe("changed");
+            instance.CompactPropertyCount.ShouldBe(1);
+
+            instance.Properties.Select(property => property.Name)
+                .ShouldContain("First");
+            instance.CompactPropertyCount.ShouldBe(0);
+        }
+
+        [Fact]
+        public void ConstantCompiledBlockAppliesOneImmutableDelta()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "constant-compact-block.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <FIRST>dead</FIRST>
+                    <First>one</First>
+                    <Second>two</Second>
+                    <Third>three</Third>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectInstance instance = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext =
+                        EvaluationContext.CreateForCompiledModuleEvaluation(
+                            ProjectEvaluationMode.Pure,
+                            useCompiledModuleEffectBatches: true),
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    ProjectCollection =
+                        environment.CreateProjectCollection().Collection,
+                });
+
+            instance.CompactPropertyDeltaApplications.ShouldBe(1);
+            instance.CompactPropertyCount.ShouldBe(3);
+            instance.GetPropertyValue("First").ShouldBe("one");
+            instance.GetPropertyValue("Second").ShouldBe("two");
+            instance.GetPropertyValue("Third").ShouldBe("three");
+            instance.GetProperty("first").Name.ShouldBe("First");
+        }
+
+        [Fact]
+        public void DynamicCompiledBlockReplaysResidualInstructions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "dynamic-compact-block.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <First>$(Flavor)-$(Mode)-$(Flavor)</First>
+                    <Second>$(First)-two</Second>
+                    <Third>prefix-$(Second)</Third>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectCollection collection =
+                environment.CreateProjectCollection().Collection;
+            ProjectRootElement root =
+                ProjectRootElement.Open(projectFile.Path, collection);
+            EvaluationContext context =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    ProjectEvaluationMode.Pure,
+                    useCompiledModuleEffectBatches: true);
+
+            ProjectInstance first = Evaluate("A", "debug");
+            ProjectInstance repeated = Evaluate("A", "debug");
+            ProjectInstance distinctFlavor = Evaluate("B", "debug");
+            ProjectInstance distinctMode = Evaluate("A", "release");
+
+            first.GetPropertyValue("Third")
+                .ShouldBe("prefix-A-debug-A-two");
+            repeated.GetPropertyValue("Third")
+                .ShouldBe("prefix-A-debug-A-two");
+            distinctFlavor.GetPropertyValue("Third")
+                .ShouldBe("prefix-B-debug-B-two");
+            distinctMode.GetPropertyValue("Third")
+                .ShouldBe("prefix-A-release-A-two");
+            first.CompactPropertyDeltaApplications.ShouldBe(0);
+            repeated.CompactPropertyDeltaApplications.ShouldBe(0);
+            distinctFlavor.CompactPropertyDeltaApplications.ShouldBe(0);
+            distinctMode.CompactPropertyDeltaApplications.ShouldBe(0);
+
+            EvaluationModule module =
+                context.EvaluationModuleCache.GetModule(root);
+            PropertySegmentTemplate segment =
+                module.PropertySegments[
+                    module.PropertyGroups[0].PropertySegments.Start];
+            segment.ExternalPropertyReads.Count.ShouldBe(2);
+            segment.Instructions.Count.ShouldBe(12);
+            module.PropertyInstructions
+                .Skip(segment.Instructions.Start)
+                .Take(segment.Instructions.Count)
+                .Select(instruction => instruction.Kind)
+                .ShouldBe(
+                    new[]
+                    {
+                        PropertyInstructionKind.SetValue,
+                        PropertyInstructionKind.AppendExternalProperty,
+                        PropertyInstructionKind.AppendLiteral,
+                        PropertyInstructionKind.AppendExternalProperty,
+                        PropertyInstructionKind.AppendLiteral,
+                        PropertyInstructionKind.AppendExternalProperty,
+                        PropertyInstructionKind.SetValue,
+                        PropertyInstructionKind.AppendLocalProperty,
+                        PropertyInstructionKind.AppendLiteral,
+                        PropertyInstructionKind.SetValue,
+                        PropertyInstructionKind.AppendLiteral,
+                        PropertyInstructionKind.AppendLocalProperty,
+                    });
+            segment.ConstantState.ShouldBeNull();
+
+            ProjectInstance Evaluate(string flavor, string mode) =>
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext = context,
+                        EvaluationMode = ProjectEvaluationMode.Pure,
+                        GlobalProperties =
+                            new Dictionary<string, string>
+                            {
+                                ["Flavor"] = flavor,
+                                ["Mode"] = mode,
+                            },
+                        ProjectCollection = collection,
+                    });
+        }
+
+        [Fact]
+        public void ResidualProgramDistinguishesUndefinedAndEmptyInputs()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "undefined-compact-block.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Result>prefix-$(Input)-suffix</Result>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectCollection collection =
+                environment.CreateProjectCollection().Collection;
+            ProjectRootElement root =
+                ProjectRootElement.Open(projectFile.Path, collection);
+            EvaluationContext context =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    ProjectEvaluationMode.Pure,
+                    useCompiledModuleEffectBatches: true);
+
+            var emptyGlobals = new Dictionary<string, string>();
+            ProjectInstance undefined = Evaluate(emptyGlobals);
+            ProjectInstance repeatedUndefined =
+                Evaluate(emptyGlobals);
+            ProjectInstance definedEmpty = Evaluate(
+                new Dictionary<string, string>
+                {
+                    ["Input"] = string.Empty,
+                });
+
+            undefined.GetPropertyValue("Result")
+                .ShouldBe("prefix--suffix");
+            repeatedUndefined.GetPropertyValue("Result")
+                .ShouldBe("prefix--suffix");
+            definedEmpty.GetPropertyValue("Result")
+                .ShouldBe("prefix--suffix");
+            undefined.CompactPropertyDeltaApplications.ShouldBe(0);
+            repeatedUndefined.CompactPropertyDeltaApplications.ShouldBe(0);
+            definedEmpty.CompactPropertyDeltaApplications.ShouldBe(0);
+
+            EvaluationModule module =
+                context.EvaluationModuleCache.GetModule(root);
+            PropertySegmentTemplate segment =
+                module.PropertySegments[
+                    module.PropertyGroups[0].PropertySegments.Start];
+            segment.Instructions.Count.ShouldBe(4);
+            segment.ConstantState.ShouldBeNull();
+
+            ProjectInstance Evaluate(
+                IDictionary<string, string> globalProperties) =>
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext = context,
+                        EvaluationMode = ProjectEvaluationMode.Pure,
+                        GlobalProperties = globalProperties,
+                        ProjectCollection = collection,
+                    });
+        }
+
+        [Fact]
+        public void ResidualProgramExecutesSimplePropertyConditions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "compiled-conditions.proj",
+                """
+                <Project>
+                  <PropertyGroup Condition="'$(Flavor)' == 'A' And '$(Second)' == 'B'">
+                    <Grouped>selected</Grouped>
+                  </PropertyGroup>
+                  <PropertyGroup>
+                    <Conditional Condition="'$(Flavor)' != ''">set</Conditional>
+                    <Empty Condition="'$(Missing)' == ''">empty</Empty>
+                    <Numeric Condition="'01' == '1'">numeric</Numeric>
+                    <ConditionalGlobal Condition="'$(SuppressedCondition)' == 'x'">local</ConditionalGlobal>
+                    <AndTrue Condition="'$(Flavor)' == 'A' And '$(Second)' == 'B'">and</AndTrue>
+                    <AndShortCircuit Condition="'$(Flavor)' == 'missing' And '$(SkippedAnd)' == 'x'">wrong</AndShortCircuit>
+                    <OrTrue Condition="'$(Flavor)' == 'A' Or '$(SkippedOr)' == 'x'">or</OrTrue>
+                    <OrFalse Condition="'$(Flavor)' == 'missing' Or '$(Second)' == 'missing'">wrong</OrFalse>
+                    <Nested Condition="('$(Flavor)' == 'missing' Or '$(Second)' == 'B') And '$(Third)' != ''">nested</Nested>
+                    <NestedAndOr Condition="('$(Flavor)' == 'A' And '$(Second)' == 'B') Or '$(SkippedNested)' == 'x'">nested-and-or</NestedAndOr>
+                    <PathMatched Condition="'$(PathValue)' == '/tmp/compiled-condition'">path</PathMatched>
+                    <After>$(Conditional)-after</After>
+                  </PropertyGroup>
+                  <PropertyGroup Condition="'$(Never)' == 'true'">
+                    <Unreachable Condition="(">wrong</Unreachable>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectCollection optimizedCollection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext optimizedContext =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    ProjectEvaluationMode.Pure,
+                    useCompiledModuleEffectBatches: true);
+            Project optimized = EvaluateWithGlobals(
+                projectFile.Path,
+                optimizedCollection,
+                optimizedContext,
+                new Dictionary<string, string>
+                {
+                    ["Flavor"] = "A",
+                    ["Second"] = "B",
+                    ["Third"] = "C",
+                    ["PathValue"] = "/tmp\\compiled-condition",
+                    ["ConditionalGlobal"] = "global",
+                });
+            Project optimizedUndefined = EvaluateWithGlobals(
+                projectFile.Path,
+                optimizedCollection,
+                optimizedContext,
+                new Dictionary<string, string>());
+
+            ProjectCollection scalarCollection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext scalarContext = EvaluationContext.Create(
+                EvaluationContext.SharingPolicy.Shared,
+                ProjectEvaluationMode.Pure);
+            Project scalar = EvaluateWithGlobals(
+                projectFile.Path,
+                scalarCollection,
+                scalarContext,
+                new Dictionary<string, string>
+                {
+                    ["Flavor"] = "A",
+                    ["Second"] = "B",
+                    ["Third"] = "C",
+                    ["PathValue"] = "/tmp\\compiled-condition",
+                    ["ConditionalGlobal"] = "global",
+                });
+            Project scalarUndefined = EvaluateWithGlobals(
+                projectFile.Path,
+                scalarCollection,
+                scalarContext,
+                new Dictionary<string, string>());
+
+            AssertEquivalentProperties(scalar, optimized);
+            AssertEquivalentProperties(
+                scalarUndefined,
+                optimizedUndefined);
+            optimized.GetPropertyValue("Grouped").ShouldBe("selected");
+            optimized.GetPropertyValue("Conditional").ShouldBe("set");
+            optimized.GetPropertyValue("Empty").ShouldBe("empty");
+            optimized.GetPropertyValue("Numeric").ShouldBe("numeric");
+            optimized.GetPropertyValue("ConditionalGlobal")
+                .ShouldBe("global");
+            optimized.GetPropertyValue("AndTrue").ShouldBe("and");
+            optimized.GetPropertyValue("AndShortCircuit").ShouldBeEmpty();
+            optimized.GetPropertyValue("OrTrue").ShouldBe("or");
+            optimized.GetPropertyValue("OrFalse").ShouldBeEmpty();
+            optimized.GetPropertyValue("Nested").ShouldBe("nested");
+            optimized.GetPropertyValue("NestedAndOr")
+                .ShouldBe("nested-and-or");
+            optimized.GetPropertyValue("PathMatched").ShouldBe("path");
+            optimized.GetPropertyValue("Unreachable").ShouldBeEmpty();
+            optimized.GetPropertyValue("After").ShouldBe("set-after");
+            optimizedUndefined.GetPropertyValue("Grouped").ShouldBeEmpty();
+            optimizedUndefined.GetPropertyValue("Conditional")
+                .ShouldBeEmpty();
+            optimizedUndefined.GetPropertyValue("After")
+                .ShouldBe("-after");
+            optimized.ConditionedProperties["Flavor"]
+                .ShouldBe(scalar.ConditionedProperties["Flavor"]);
+            optimized.ConditionedProperties.ContainsKey("Missing")
+                .ShouldBeFalse();
+            optimized.ConditionedProperties.ContainsKey(
+                    "SuppressedCondition")
+                .ShouldBeFalse();
+            optimized.ConditionedProperties.ContainsKey("SkippedAnd")
+                .ShouldBeFalse();
+            optimized.ConditionedProperties.ContainsKey("SkippedOr")
+                .ShouldBeFalse();
+            optimized.ConditionedProperties.ContainsKey("SkippedNested")
+                .ShouldBeFalse();
+
+            EvaluationModule module =
+                optimizedContext.EvaluationModuleCache.GetModule(
+                    optimized.Xml);
+            module.PropertyGroups[0].CompiledConditionId
+                .ShouldBeGreaterThan(0);
+            PropertyGroupTemplate secondGroup =
+                module.PropertyGroups[1];
+            module.Properties
+                .Skip(secondGroup.Properties.Start)
+                .Take(secondGroup.Properties.Count)
+                .Count(property =>
+                    property.CompiledConditionId > 0)
+                .ShouldBe(9);
+            module.PropertySegments
+                .Skip(secondGroup.PropertySegments.Start)
+                .Take(secondGroup.PropertySegments.Count)
+                .SelectMany(segment =>
+                    module.PropertyInstructions
+                        .Skip(segment.Instructions.Start)
+                        .Take(segment.Instructions.Count))
+                .Count(instruction =>
+                    instruction.Kind ==
+                    PropertyInstructionKind
+                        .BranchIfPropertyConditionFalse)
+                .ShouldBe(9);
+            module.Properties
+                .Skip(secondGroup.Properties.Start)
+                .Take(secondGroup.Properties.Count)
+                .Single(property =>
+                    module.GetStringValue(property.NameStringId) ==
+                    "Nested")
+                .CompiledConditionId
+                .ShouldBe(-1);
+            module.CompiledConditionInstructions
+                .Any(instruction =>
+                    instruction.Kind ==
+                    CompiledConditionInstructionKind
+                        .BranchIfComparisonTrue)
+                .ShouldBeTrue();
+        }
+
+        [Fact]
+        public void CompiledConditionsEvaluateConcatenatedPropertyOperands()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "compiled-condition-operands.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Configuration>Debug</Configuration>
+                    <Platform>AnyCPU</Platform>
+                    <PathRoot>/tmp\</PathRoot>
+                    <EscapedSemicolon>%3B</EscapedSemicolon>
+                    <Percent>%</Percent>
+                    <ConfigurationPlatform Condition="'$(Configuration)|$(Platform)' == 'Debug|AnyCPU'">matched</ConfigurationPlatform>
+                    <Prefixed Condition="'prefix-$(Configuration)-suffix' == 'prefix-Debug-suffix'">matched</Prefixed>
+                    <Path Condition="'$(PathRoot)compiled' == '/tmp/compiled'">matched</Path>
+                    <Escaped Condition="'prefix$(EscapedSemicolon)suffix' == 'prefix;suffix'">matched</Escaped>
+                    <CrossPartEscape Condition="'$(Percent)3B' == ';'">matched</CrossPartEscape>
+                    <Undefined Condition="'prefix$(Missing)suffix' == 'prefixsuffix'">matched</Undefined>
+                    <FunctionFallback Condition="'$(Configuration.ToUpper())' == 'DEBUG'">matched</FunctionFallback>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectCollection optimizedCollection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext optimizedContext =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    ProjectEvaluationMode.Pure,
+                    useCompiledModuleEffectBatches: true);
+            Project optimized = EvaluateWithGlobals(
+                projectFile.Path,
+                optimizedCollection,
+                optimizedContext,
+                new Dictionary<string, string>());
+
+            ProjectCollection scalarCollection =
+                environment.CreateProjectCollection().Collection;
+            Project scalar = EvaluateWithGlobals(
+                projectFile.Path,
+                scalarCollection,
+                EvaluationContext.Create(
+                    EvaluationContext.SharingPolicy.Shared,
+                    ProjectEvaluationMode.Pure),
+                new Dictionary<string, string>());
+
+            AssertEquivalentProperties(scalar, optimized);
+            optimized.GetPropertyValue("ConfigurationPlatform")
+                .ShouldBe("matched");
+            optimized.GetPropertyValue("Prefixed").ShouldBe("matched");
+            optimized.GetPropertyValue("Path").ShouldBe("matched");
+            optimized.GetPropertyValue("Escaped").ShouldBe("matched");
+            optimized.GetPropertyValue("CrossPartEscape")
+                .ShouldBe("matched");
+            optimized.GetPropertyValue("Undefined").ShouldBe("matched");
+            optimized.GetPropertyValue("FunctionFallback")
+                .ShouldBe("matched");
+            optimized.ConditionedProperties["Configuration"]
+                .ShouldBe(scalar.ConditionedProperties["Configuration"]);
+            optimized.ConditionedProperties["Platform"]
+                .ShouldBe(scalar.ConditionedProperties["Platform"]);
+
+            EvaluationModule module =
+                optimizedContext.EvaluationModuleCache.GetModule(
+                    optimized.Xml);
+            PropertyGroupTemplate group = module.PropertyGroups[0];
+            PropertyTemplate[] properties = module.Properties
+                .Skip(group.Properties.Start)
+                .Take(group.Properties.Count)
+                .ToArray();
+            properties
+                .Single(property =>
+                    module.GetStringValue(property.NameStringId) ==
+                    "FunctionFallback")
+                .CompiledConditionId
+                .ShouldBe(-1);
+            properties
+                .Where(property =>
+                    module.GetStringValue(property.NameStringId) is
+                        "ConfigurationPlatform" or
+                        "Prefixed" or
+                        "Path" or
+                        "Escaped" or
+                        "CrossPartEscape" or
+                        "Undefined")
+                .ShouldAllBe(property =>
+                    property.CompiledConditionId > 0);
+            module.CompiledConditionComparisons
+                .SelectMany(comparison =>
+                    new[] { comparison.Left, comparison.Right })
+                .Count(operand =>
+                    operand.Kind ==
+                    CompiledConditionOperandKind.ExpandedValue)
+                .ShouldBeGreaterThanOrEqualTo(6);
+            module.CompiledConditionValueParts
+                .Any(part =>
+                    part.Kind ==
+                    CompiledConditionValuePartKind.Property)
+                .ShouldBeTrue();
+        }
+
+        [Fact]
+        public void CompactPropertiesExecuteConditionsAndHonorGlobals()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "compact-barriers.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Local>one</Local>
+                    <Conditional Condition="'$(Local)' == 'one'">selected</Conditional>
+                    <AfterBarrier>after</AfterBarrier>
+                    <Global>local</Global>
+                    <DerivedGlobal>$(Global)-derived</DerivedGlobal>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectInstance instance = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext =
+                        EvaluationContext.CreateForCompiledModuleEvaluation(
+                            ProjectEvaluationMode.Pure,
+                            useCompiledModuleEffectBatches: true),
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    GlobalProperties = new Dictionary<string, string>
+                    {
+                        ["Global"] = "external",
+                    },
+                    ProjectCollection =
+                        environment.CreateProjectCollection().Collection,
+                });
+
+            instance.GetPropertyValue("Local").ShouldBe("one");
+            instance.GetPropertyValue("Conditional")
+                .ShouldBe("selected");
+            instance.GetPropertyValue("AfterBarrier")
+                .ShouldBe("after");
+            instance.GetPropertyValue("Global")
+                .ShouldBe("external");
+            instance.GetPropertyValue("DerivedGlobal")
+                .ShouldBe("external-derived");
+            instance.CompactPropertyCount.ShouldBe(4);
+            instance.GetProperty("Local").ShouldNotBeNull();
+            instance.GetProperty("Global").ShouldNotBeNull();
+        }
+
+        [Fact]
+        public void ExpandedPropertyValuesStayInResidualProgram()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "expanded-property-values.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Base>abc</Base>
+                    <Upper>$(Base.ToUpperInvariant())</Upper>
+                    <Fallback>$([MSBuild]::ValueOrDefault('$(Missing)', 'fallback'))</Fallback>
+                    <Suppressed>$([System.Int32]::Parse('not-a-number'))</Suppressed>
+                    <ConditionalFunction Condition="'$(Flavor)' == 'A'">$(Base.ToUpperInvariant())-conditional</ConditionalFunction>
+                    <After>$(Upper)-after</After>
+                  </PropertyGroup>
+                </Project>
+                """);
+            var globals = new Dictionary<string, string>
+            {
+                ["Flavor"] = "A",
+                ["Suppressed"] = "global",
+            };
+            ProjectCollection optimizedCollection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext optimizedContext =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    ProjectEvaluationMode.Pure,
+                    useCompiledModuleEffectBatches: true);
+            Project optimized = EvaluateWithGlobals(
+                projectFile.Path,
+                optimizedCollection,
+                optimizedContext,
+                globals);
+            Project scalar = EvaluateWithGlobals(
+                projectFile.Path,
+                environment.CreateProjectCollection().Collection,
+                EvaluationContext.Create(
+                    EvaluationContext.SharingPolicy.Isolated,
+                    ProjectEvaluationMode.Pure),
+                globals);
+
+            AssertEquivalentProperties(scalar, optimized);
+            optimized.GetPropertyValue("Upper").ShouldBe("ABC");
+            optimized.GetPropertyValue("Fallback")
+                .ShouldBe("fallback");
+            optimized.GetPropertyValue("Suppressed")
+                .ShouldBe("global");
+            optimized.GetPropertyValue("ConditionalFunction")
+                .ShouldBe("ABC-conditional");
+            optimized.GetPropertyValue("After")
+                .ShouldBe("ABC-after");
+
+            ProjectInstance compact = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = optimizedContext,
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    GlobalProperties = globals,
+                    ProjectCollection = optimizedCollection,
+                });
+            compact.GetPropertyValue("Upper").ShouldBe("ABC");
+            compact.GetPropertyValue("Fallback")
+                .ShouldBe("fallback");
+            compact.GetPropertyValue("ConditionalFunction")
+                .ShouldBe("ABC-conditional");
+            compact.GetPropertyValue("After").ShouldBe("ABC-after");
+            compact.CompactPropertyCount.ShouldBe(5);
+
+            EvaluationModule module =
+                optimizedContext.EvaluationModuleCache.GetModule(
+                    optimized.Xml);
+            TableRange segments =
+                module.PropertyGroups[0].PropertySegments;
+            segments.Count.ShouldBe(1);
+            PropertySegmentTemplate segment =
+                module.PropertySegments[segments.Start];
+            segment.Kind.ShouldBe(
+                PropertySegmentKind.CompiledEffectBatch);
+            module.Properties.Count(property =>
+                    property.RequiresExpansion)
                 .ShouldBe(4);
+            module.PropertyInstructions
+                .Skip(segment.Instructions.Start)
+                .Take(segment.Instructions.Count)
+                .Count(instruction =>
+                    instruction.Kind ==
+                    PropertyInstructionKind.SetExpandedValue)
+                .ShouldBe(4);
+        }
+
+        [Fact]
+        public void CompiledPropertyEffectsExpandThisFilePropertiesInProgram()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var imported = environment.CreateFile(
+                "context.props",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <ImportDirectory>$(MSBuildThisFileDirectory)</ImportDirectory>
+                  </PropertyGroup>
+                </Project>
+                """);
+            var projectFile = environment.CreateFile(
+                "context.proj",
+                $"""
+                <Project>
+                  <Import Project="{imported.Path}" />
+                </Project>
+                """);
+            ProjectCollection collection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext context =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    ProjectEvaluationMode.Pure,
+                    useCompiledModuleEffectBatches: true);
+            ProjectInstance instance = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = context,
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    ProjectCollection = collection,
+                });
+
+            instance.GetPropertyValue("ImportDirectory").ShouldBe(
+                Path.GetDirectoryName(imported.Path) +
+                Path.DirectorySeparatorChar);
+
+            EvaluationModule module =
+                context.EvaluationModuleCache.GetModule(
+                    ProjectRootElement.Open(imported.Path, collection));
+            PropertySegmentTemplate segment =
+                module.PropertySegments[
+                    module.PropertyGroups[0].PropertySegments.Start];
+            segment.Kind.ShouldBe(
+                PropertySegmentKind.CompiledEffectBatch);
+            module.PropertyInstructions[
+                    segment.Instructions.Start]
+                .Kind
+                .ShouldBe(PropertyInstructionKind.SetExpandedValue);
+        }
+
+        [Fact]
+        public void CompactPropertyEvaluationPreservesSdkPropertyImportResults()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            const string sdkName = "CompactEvaluation.Sdk";
+            string sdkRoot = environment.CreateFolder().Path;
+            string sdkDirectory = Path.Combine(
+                sdkRoot,
+                sdkName,
+                "Sdk");
+            Directory.CreateDirectory(sdkDirectory);
+            File.WriteAllText(
+                Path.Combine(sdkDirectory, "Sdk.props"),
+                """
+                <Project>
+                  <PropertyGroup>
+                    <FromSdkProps>props</FromSdkProps>
+                    <DerivedFromSdkProps>$(FromSdkProps)-derived</DerivedFromSdkProps>
+                  </PropertyGroup>
+                </Project>
+                """);
+            File.WriteAllText(
+                Path.Combine(sdkDirectory, "Sdk.targets"),
+                """
+                <Project>
+                  <PropertyGroup Condition="'$(SpikeDerived)' == 'one-two'">
+                    <FromSdkTargets>targets</FromSdkTargets>
+                  </PropertyGroup>
+                </Project>
+                """);
+            environment.SetEnvironmentVariable(
+                "MSBuildSDKsPath",
+                sdkRoot);
+            var projectFile = environment.CreateFile(
+                "sdk-compact.csproj",
+                $"""
+                <Project Sdk="{sdkName}">
+                  <PropertyGroup>
+                    <TargetFramework>net11.0</TargetFramework>
+                    <SpikeBase>one</SpikeBase>
+                    <SpikeDerived>$(SpikeBase)-two</SpikeDerived>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectInstance optimized = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext =
+                        EvaluationContext.CreateForCompiledModuleEvaluation(
+                            ProjectEvaluationMode.Classic,
+                            useCompiledModuleEffectBatches: true),
+                    EvaluationMode = ProjectEvaluationMode.Classic,
+                    EvaluationStage = ProjectEvaluationStage.Properties,
+                    ProjectCollection =
+                        environment.CreateProjectCollection().Collection,
+                });
+            ProjectInstance scalar = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = EvaluationContext.Create(
+                        EvaluationContext.SharingPolicy.Isolated,
+                        ProjectEvaluationMode.Classic),
+                    EvaluationMode = ProjectEvaluationMode.Classic,
+                    EvaluationStage = ProjectEvaluationStage.Properties,
+                    ProjectCollection =
+                        environment.CreateProjectCollection().Collection,
+                });
+
+            optimized.ImportPaths.ShouldContain(
+                path =>
+                    path.Contains(
+                        sdkName,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    path.EndsWith(
+                        "Sdk.targets",
+                        StringComparison.OrdinalIgnoreCase));
+            optimized.GetPropertyValue("SpikeDerived")
+                .ShouldBe("one-two");
+            optimized.GetPropertyValue("DerivedFromSdkProps")
+                .ShouldBe("props-derived");
+            optimized.GetPropertyValue("FromSdkTargets")
+                .ShouldBe("targets");
+            optimized.CompactPropertyCount.ShouldBeGreaterThan(0);
+
+            optimized.Properties
+                .Select(property =>
+                    $"{property.Name}={property.EvaluatedValue}")
+                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+                .ShouldBe(
+                    scalar.Properties
+                        .Select(property =>
+                            $"{property.Name}={property.EvaluatedValue}")
+                        .OrderBy(
+                            value => value,
+                            StringComparer.OrdinalIgnoreCase));
         }
 
         [Fact]

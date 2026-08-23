@@ -219,7 +219,8 @@ namespace Microsoft.Build.Evaluation.Context
         }
 
         internal static EvaluationContext CreateForCompiledModuleEvaluation(
-            ProjectEvaluationMode evaluationMode)
+            ProjectEvaluationMode evaluationMode,
+            bool useCompiledModuleEffectBatches = false)
         {
             ErrorUtilities.VerifyThrowArgument(
                 Enum.IsDefined(typeof(ProjectEvaluationMode), evaluationMode),
@@ -232,7 +233,9 @@ namespace Microsoft.Build.Evaluation.Context
                 fileSystem: null,
                 moduleEvaluationSharingCollector:
                     new ModuleEvaluationSharingCollector(),
-                evaluationModuleCache: new EvaluationModuleCache());
+                evaluationModuleCache: new EvaluationModuleCache(),
+                useCompiledModuleEffectBatches:
+                    useCompiledModuleEffectBatches);
             TestOnlyHookOnCreate?.Invoke(context);
             return context;
         }

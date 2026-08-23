@@ -24,7 +24,9 @@ namespace Microsoft.Build.Evaluation
     /// <typeparam name="I">The type of items to be produced.</typeparam>
     /// <typeparam name="M">The type of metadata on those items.</typeparam>
     /// <typeparam name="D">The type of item definitions to be produced.</typeparam>
-    internal class PropertyTrackingEvaluatorDataWrapper<P, I, M, D> : IEvaluatorData<P, I, M, D>
+    internal class PropertyTrackingEvaluatorDataWrapper<P, I, M, D> :
+        IEvaluatorData<P, I, M, D>,
+        IPropertyValueProvider
         where P : class, IProperty, IEquatable<P>, IValued
         where I : class, IItem<M>
         where M : class, IMetadatum
@@ -95,6 +97,39 @@ namespace Microsoft.Build.Evaluation
             return prop;
         }
 
+        public bool TryGetEscapedPropertyValue(
+            string name,
+            int startIndex,
+            int endIndex,
+            out string escapedValue)
+        {
+            if (_wrapped is not IPropertyValueProvider valueProvider ||
+                !valueProvider.TryGetEscapedPropertyValue(
+                    name,
+                    startIndex,
+                    endIndex,
+                    out escapedValue))
+            {
+                escapedValue = string.Empty;
+                return false;
+            }
+
+            string propertyName = name.Substring(
+                startIndex,
+                endIndex - startIndex + 1);
+            _moduleEvaluationReadTracker?.RecordPropertyRead(
+                propertyName,
+                escapedValue);
+            if (IsPropertyReadTrackingRequested)
+            {
+                TrackPropertyRead(
+                    propertyName,
+                    propertyFound: true);
+            }
+
+            return true;
+        }
+
         /// <summary>
         /// Sets a property which does not come from the Xml.
         /// </summary>
@@ -124,6 +159,31 @@ namespace Microsoft.Build.Evaluation
             EvaluationModule module,
             TableRange properties) =>
             _wrapped.SetConstantProperties(module, properties);
+
+        public bool TryGetEscapedPropertyValue(
+            PropertyId propertyId,
+            string propertyName,
+            IElementLocation location,
+            out string escapedValue) =>
+            _wrapped.TryGetEscapedPropertyValue(
+                propertyId,
+                propertyName,
+                location,
+                out escapedValue);
+
+        public void SetCompiledProperty(
+            EvaluationModule module,
+            int propertyIndex,
+            string evaluatedValueEscaped,
+            LoggingContext loggingContext) =>
+            _wrapped.SetCompiledProperty(
+                module,
+                propertyIndex,
+                evaluatedValueEscaped,
+                loggingContext);
+
+        public bool TryApplyPropertyDelta(PropertyDelta delta) =>
+            _wrapped.TryApplyPropertyDelta(delta);
 
         /// <summary>
         /// Sets a property which comes from the Xml.
@@ -236,6 +296,13 @@ namespace Microsoft.Build.Evaluation
         /// <param name="property">The value of the property that was read (null if there is no value).</param>
         private void TrackPropertyRead(string name, P property)
         {
+            TrackPropertyRead(name, property is not null);
+        }
+
+        private void TrackPropertyRead(
+            string name,
+            bool propertyFound)
+        {
             // MSBuild looks up a property called "InnerBuildProperty". If that isn't present,
             // an empty string is returned and it then attempts to look up the value for that property
             // (which is an empty string). Thus this check.
@@ -250,7 +317,7 @@ namespace Microsoft.Build.Evaluation
             {
                 this.TrackEnvironmentVariableRead(name);
             }
-            else if (property == null)
+            else if (!propertyFound)
             {
                 this.TrackUninitializedPropertyRead(name);
             }

@@ -12,6 +12,7 @@ using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Shared;
 
 #nullable disable
 
@@ -250,6 +251,31 @@ namespace Microsoft.Build.Evaluation
                 EvaluationModule module,
                 TableRange properties) =>
                 _wrappedData.SetConstantProperties(module, properties);
+
+            public bool TryGetEscapedPropertyValue(
+                PropertyId propertyId,
+                string propertyName,
+                IElementLocation location,
+                out string escapedValue) =>
+                _wrappedData.TryGetEscapedPropertyValue(
+                    propertyId,
+                    propertyName,
+                    location,
+                    out escapedValue);
+
+            public void SetCompiledProperty(
+                EvaluationModule module,
+                int propertyIndex,
+                string evaluatedValueEscaped,
+                LoggingContext loggingContext) =>
+                _wrappedData.SetCompiledProperty(
+                    module,
+                    propertyIndex,
+                    evaluatedValueEscaped,
+                    loggingContext);
+
+            public bool TryApplyPropertyDelta(PropertyDelta delta) =>
+                _wrappedData.TryApplyPropertyDelta(delta);
 
             public P SetProperty(string name, string evaluatedValueEscaped, bool isGlobalProperty, bool mayBeReserved, LoggingContext loggingContext, bool isEnvironmentVariable = false, bool isCommandLineProperty = false)
             {

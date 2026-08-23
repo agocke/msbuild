@@ -4405,6 +4405,37 @@ namespace Microsoft.Build.Evaluation
                 }
             }
 
+            public bool TryGetEscapedPropertyValue(
+                PropertyId propertyId,
+                string propertyName,
+                IElementLocation location,
+                out string escapedValue)
+            {
+                ProjectProperty property = GetProperty(propertyName);
+                escapedValue = property is null
+                    ? null
+                    : ((IProperty)property)
+                        .GetEvaluatedValueEscaped(location);
+                return property is not null;
+            }
+
+            public void SetCompiledProperty(
+                EvaluationModule module,
+                int propertyIndex,
+                string evaluatedValueEscaped,
+                LoggingContext loggingContext)
+            {
+                PropertyTemplate template = module.Properties[propertyIndex];
+                SetProperty(
+                    (ProjectPropertyElement)module.GetSource(template.SourceId),
+                    evaluatedValueEscaped,
+                    loggingContext,
+                    preserveEvaluationHistory: false);
+            }
+
+            public bool TryApplyPropertyDelta(PropertyDelta delta) =>
+                false;
+
             /// <summary>
             /// Retrieves an existing target, if any.
             /// </summary>

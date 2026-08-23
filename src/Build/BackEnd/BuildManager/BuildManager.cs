@@ -1265,6 +1265,8 @@ namespace Microsoft.Build.Execution
                         _legacyThreadingData.MainThreadSubmissionId = -1;
                     }
 
+                    EvaluationPerformanceInstrumentation
+                        .WriteReportSnapshot();
                     Reset();
                     _buildManagerState = BuildManagerState.Idle;
 

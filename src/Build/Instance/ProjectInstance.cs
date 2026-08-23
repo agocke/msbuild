@@ -76,7 +76,12 @@ namespace Microsoft.Build.Execution
     /// Constructors are internal in order to direct users to Project class instead; these are only createable via Project objects.
     /// </comments>
     [DebuggerDisplay(@"{FullPath} #Targets={TargetsCount} DefaultTargets={(DefaultTargets == null) ? System.String.Empty : System.String.Join("";"", DefaultTargets.ToArray())} ToolsVersion={Toolset.ToolsVersion} InitialTargets={(InitialTargets == null) ? System.String.Empty : System.String.Join("";"", InitialTargets.ToArray())} #GlobalProperties={GlobalProperties.Count} #Properties={Properties.Count} #ItemTypes={ItemTypes.Count} #Items={Items.Count}")]
-    public class ProjectInstance : IPropertyProvider<ProjectPropertyInstance>, IItemProvider<ProjectItemInstance>, IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>, ITranslatable
+    public class ProjectInstance :
+        IPropertyProvider<ProjectPropertyInstance>,
+        IPropertyValueProvider,
+        IItemProvider<ProjectItemInstance>,
+        IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>,
+        ITranslatable
     {
         /// <summary>
         /// Targets in the project after overrides have been resolved.
@@ -121,6 +126,12 @@ namespace Microsoft.Build.Execution
         /// Properties in the project. This is a dictionary of name, value pairs.
         /// </summary>
         private PropertyDictionary<ProjectPropertyInstance> _properties;
+
+        /// <summary>
+        /// Compiled property values which have not crossed an object-model boundary.
+        /// </summary>
+        private CompactPropertyEnvironment _compactProperties;
+        private int _compactPropertyDeltaApplications;
 
         /// <summary>
         /// Properties originating from environment variables, gotten from the project collection
@@ -578,7 +589,7 @@ namespace Microsoft.Build.Execution
             this.Toolset = projectToInheritFrom.Toolset;
             this.SubToolsetVersion = projectToInheritFrom.SubToolsetVersion;
             _explicitToolsVersionSpecified = projectToInheritFrom._explicitToolsVersionSpecified;
-            _properties = new PropertyDictionary<ProjectPropertyInstance>(projectToInheritFrom._properties); // This brings along the reserved properties, which are important.
+            _properties = new PropertyDictionary<ProjectPropertyInstance>(projectToInheritFrom.PropertiesToBuildWith); // This brings along the reserved properties, which are important.
             _items = new ItemDictionary<ProjectItemInstance>(); // We don't want any of the items.  That would include things like ProjectReferences, which would just pollute our own.
             _actualTargets = new RetrievableEntryHashSet<ProjectTargetInstance>(StringComparer.OrdinalIgnoreCase);
             _targets = new ObjectModel.ReadOnlyDictionary<string, ProjectTargetInstance>(_actualTargets);
@@ -1172,6 +1183,7 @@ namespace Microsoft.Build.Execution
             [DebuggerStepThrough]
             get
             {
+                MaterializeCompactProperties();
                 return (_properties == null) ?
                     (ICollection<ProjectPropertyInstance>)ReadOnlyEmptyCollection<ProjectPropertyInstance>.Instance :
                     new ReadOnlyCollection<ProjectPropertyInstance>(_properties);
@@ -1516,7 +1528,10 @@ namespace Microsoft.Build.Execution
         {
             [DebuggerStepThrough]
             get
-            { return _properties; }
+            {
+                MaterializeCompactProperties();
+                return _properties;
+            }
         }
 
         /// <summary>
@@ -1699,7 +1714,10 @@ namespace Microsoft.Build.Execution
         {
             [DebuggerStepThrough]
             get
-            { return _properties; }
+            {
+                MaterializeCompactProperties();
+                return _properties;
+            }
         }
 
         internal ICollection<ProjectPropertyInstance> TestEnvironmentalProperties => new ReadOnlyCollection<ProjectPropertyInstance>(_environmentVariableProperties);
@@ -1830,7 +1848,13 @@ namespace Microsoft.Build.Execution
         void IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.
             InitializeForEvaluation(IToolsetProvider toolsetProvider, EvaluationContext evaluationContext, LoggingContext loggingContext)
         {
-            // All been done in the constructor.  We don't allow re-evaluation of project instances.
+            if (evaluationContext.UseCompiledModuleEffectBatches &&
+                evaluationContext.EvaluationModuleCache is not null)
+            {
+                _compactProperties = new CompactPropertyEnvironment(
+                    evaluationContext.EvaluationModuleCache
+                        .PropertyIdentities);
+            }
         }
 
         /// <summary>
@@ -1931,6 +1955,7 @@ namespace Microsoft.Build.Execution
         ProjectPropertyInstance IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.SetProperty(string name, string evaluatedValueEscaped, bool isGlobalProperty, bool mayBeReserved, LoggingContext loggingContext, bool isEnvironmentVariable, bool isCommandLineProperty)
         {
             // Mutability not verified as this is being populated during evaluation
+            _compactProperties?.Remove(name);
             ProjectPropertyInstance property = ProjectPropertyInstance.Create(name, evaluatedValueEscaped, mayBeReserved, _isImmutable, isEnvironmentVariable, loggingContext);
             _properties.Set(property);
             return property;
@@ -1948,6 +1973,7 @@ namespace Microsoft.Build.Execution
             bool preserveEvaluationHistory)
         {
             // Mutability not verified as this is being populated during evaluation
+            _compactProperties?.Remove(propertyElement.Name);
             ProjectPropertyInstance property = ProjectPropertyInstance.Create(propertyElement.Name, evaluatedValueEscaped, false /* may not be reserved */, _isImmutable);
             _properties.Set(property);
             return property;
@@ -1957,6 +1983,13 @@ namespace Microsoft.Build.Execution
             EvaluationModule module,
             TableRange properties)
         {
+            if (_compactProperties is not null)
+            {
+                ApplyCompactPropertyDelta(
+                    module.GetConstantPropertyDelta(properties));
+                return;
+            }
+
             for (int i = properties.Start;
                  i < properties.Start + properties.Count;
                  i++)
@@ -1971,6 +2004,73 @@ namespace Microsoft.Build.Execution
                         _isImmutable);
                 _properties.Set(property);
             }
+        }
+
+        bool IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.TryGetEscapedPropertyValue(
+            PropertyId propertyId,
+            string propertyName,
+            IElementLocation location,
+            out string escapedValue)
+        {
+            if (_compactProperties is not null &&
+                _compactProperties.TryGet(
+                    propertyId,
+                    out PropertyValueRef compactValue))
+            {
+                escapedValue = compactValue.EscapedValue;
+                return true;
+            }
+
+            ProjectPropertyInstance property =
+                _properties.GetProperty(propertyName);
+            escapedValue = property is null
+                ? null
+                : ((IProperty)property)
+                    .GetEvaluatedValueEscaped(location);
+            return property is not null;
+        }
+
+        void IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.SetCompiledProperty(
+            EvaluationModule module,
+            int propertyIndex,
+            string evaluatedValueEscaped,
+            LoggingContext loggingContext)
+        {
+            PropertyTemplate template = module.Properties[propertyIndex];
+            string propertyName =
+                module.GetStringValue(template.NameStringId);
+            if (_compactProperties is null)
+            {
+                ProjectPropertyInstance property =
+                    ProjectPropertyInstance.Create(
+                        propertyName,
+                        evaluatedValueEscaped,
+                        mayBeReserved: false,
+                        _isImmutable);
+                _properties.Set(property);
+                return;
+            }
+
+            _properties.Remove(propertyName);
+            _compactProperties.Set(
+                template.PropertyId,
+                propertyName,
+                new PropertyValueRef(
+                    evaluatedValueEscaped,
+                    new SourceId(module.Handle, template.SourceId),
+                    PropertyFlags.None));
+        }
+
+        bool IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.TryApplyPropertyDelta(
+            PropertyDelta delta)
+        {
+            if (_compactProperties is null)
+            {
+                return false;
+            }
+
+            ApplyCompactPropertyDelta(delta);
+            return true;
         }
 
         /// <summary>
@@ -2029,7 +2129,25 @@ namespace Microsoft.Build.Execution
         [DebuggerStepThrough]
         public ProjectPropertyInstance GetProperty(string name)
         {
-            return _properties[name];
+            ProjectPropertyInstance property = _properties[name];
+            if (property is not null ||
+                _compactProperties is null ||
+                !_compactProperties.TryGet(
+                    name,
+                    out PropertyId propertyId,
+                    out PropertyValueRef compactValue))
+            {
+                return property;
+            }
+
+            property = ProjectPropertyInstance.Create(
+                _compactProperties.GetName(propertyId),
+                compactValue.EscapedValue,
+                mayBeReserved: false,
+                _isImmutable);
+            _compactProperties.Remove(propertyId);
+            _properties.Set(property);
+            return property;
         }
 
         /// <summary>
@@ -2040,7 +2158,38 @@ namespace Microsoft.Build.Execution
         [DebuggerStepThrough]
         ProjectPropertyInstance IPropertyProvider<ProjectPropertyInstance>.GetProperty(string name, int startIndex, int endIndex)
         {
-            return _properties.GetProperty(name, startIndex, endIndex);
+            ProjectPropertyInstance property =
+                _properties.GetProperty(name, startIndex, endIndex);
+            if (property is not null || _compactProperties is null)
+            {
+                return property;
+            }
+
+            return GetProperty(
+                name.Substring(
+                    startIndex,
+                    endIndex - startIndex + 1));
+        }
+
+        bool IPropertyValueProvider.TryGetEscapedPropertyValue(
+            string name,
+            int startIndex,
+            int endIndex,
+            out string escapedValue)
+        {
+            if (_compactProperties is not null &&
+                _compactProperties.TryGet(
+                    name.Substring(
+                        startIndex,
+                        endIndex - startIndex + 1),
+                    out PropertyValueRef compactValue))
+            {
+                escapedValue = compactValue.EscapedValue;
+                return true;
+            }
+
+            escapedValue = null;
+            return false;
         }
 
         /// <summary>
@@ -2059,6 +2208,15 @@ namespace Microsoft.Build.Execution
         /// </remarks>
         public string GetPropertyValue(string name)
         {
+            if (_compactProperties is not null &&
+                _compactProperties.TryGet(
+                    name,
+                    out PropertyValueRef compactValue))
+            {
+                return EscapingUtilities.UnescapeAll(
+                    compactValue.EscapedValue);
+            }
+
             if (!_properties.TryGetPropertyUnescapedValue(name, out string unescapedValue))
             {
                 unescapedValue = String.Empty;
@@ -2069,6 +2227,17 @@ namespace Microsoft.Build.Execution
 
         internal string GetEngineRequiredPropertyValue(string name)
         {
+            if (_compactProperties is not null &&
+                _compactProperties.TryGet(
+                    name,
+                    out PropertyValueRef compactValue))
+            {
+                _loggingContext?.ProcessPropertyRead(
+                    new PropertyReadInfo(name, ElementLocation.EmptyLocation, false, PropertyReadContext.Other));
+                return EscapingUtilities.UnescapeAll(
+                    compactValue.EscapedValue);
+            }
+
             if (!_properties.TryGetPropertyUnescapedValue(name, out string unescapedValue))
             {
                 unescapedValue = String.Empty;
@@ -2094,6 +2263,7 @@ namespace Microsoft.Build.Execution
         {
             VerifyThrowNotImmutable();
 
+            _compactProperties?.Remove(name);
             ProjectPropertyInstance property = ProjectPropertyInstance.Create(name, evaluatedValue, false /* may not be reserved */, _isImmutable);
             _properties.Set(property);
 
@@ -2207,8 +2377,47 @@ namespace Microsoft.Build.Execution
         {
             VerifyThrowNotImmutable();
 
-            return _properties.Remove(name);
+            bool removedCompact =
+                _compactProperties?.Remove(name) == true;
+            return _properties.Remove(name) || removedCompact;
         }
+
+        internal int CompactPropertyCount =>
+            _compactProperties?.Count ?? 0;
+
+        internal int CompactPropertyDeltaApplications =>
+            _compactPropertyDeltaApplications;
+
+        private void ApplyCompactPropertyDelta(PropertyDelta delta)
+        {
+            foreach (PropertyDeltaEntry entry in delta.Entries)
+            {
+                _properties.Remove(entry.Name);
+            }
+
+            _compactProperties.Apply(delta);
+            _compactPropertyDeltaApplications++;
+        }
+
+        private void MaterializeCompactProperties()
+        {
+            if (_compactProperties is null)
+            {
+                return;
+            }
+
+            PropertyDeltaEntry[] entries =
+                _compactProperties.Drain();
+            foreach (PropertyDeltaEntry entry in entries)
+            {
+                _properties.Set(ProjectPropertyInstance.Create(
+                    entry.Name,
+                    entry.Value.EscapedValue,
+                    mayBeReserved: false,
+                    _isImmutable));
+            }
+        }
+
 
         /// <summary>
         /// Create an independent, deep clone of this object and everything in it.
@@ -2478,7 +2687,7 @@ namespace Microsoft.Build.Execution
 
             // Add all of the properties.
             ProjectPropertyGroupElement propertyGroupElement = rootElement.AddPropertyGroup();
-            foreach (ProjectPropertyInstance property in _properties)
+            foreach (ProjectPropertyInstance property in Properties)
             {
                 if (!ReservedPropertyNames.IsReservedProperty(property.Name))
                 {
@@ -2512,7 +2721,9 @@ namespace Microsoft.Build.Execution
         public void UpdateStateFrom(ProjectInstance projectState)
         {
             _globalProperties = new PropertyDictionary<ProjectPropertyInstance>(projectState._globalProperties);
-            _properties = new PropertyDictionary<ProjectPropertyInstance>(projectState._properties);
+            _properties = new PropertyDictionary<ProjectPropertyInstance>(
+                projectState.PropertiesToBuildWith);
+            _compactProperties = null;
             _items = new ItemDictionary<ProjectItemInstance>(projectState._items);
         }
 
@@ -2582,6 +2793,11 @@ namespace Microsoft.Build.Execution
 
         internal void TranslateMinimalState(ITranslator translator)
         {
+            if (translator.Mode == TranslationDirection.WriteToStream)
+            {
+                MaterializeCompactProperties();
+            }
+
             translator.TranslateDictionary(ref _globalProperties, ProjectPropertyInstance.FactoryForDeserialization);
             translator.TranslateDictionary(ref _properties, ProjectPropertyInstance.FactoryForDeserialization);
             translator.Translate(ref _requestedProjectStateFilter);
@@ -2622,6 +2838,11 @@ namespace Microsoft.Build.Execution
 
         private void TranslateProperties(ITranslator translator)
         {
+            if (translator.Mode == TranslationDirection.WriteToStream)
+            {
+                MaterializeCompactProperties();
+            }
+
             translator.TranslateDictionary(ref _environmentVariableProperties, ProjectPropertyInstance.FactoryForDeserialization);
             translator.TranslateDictionary(ref _globalProperties, ProjectPropertyInstance.FactoryForDeserialization);
             translator.TranslateDictionary(ref _properties, ProjectPropertyInstance.FactoryForDeserialization);

@@ -24,4 +24,17 @@ namespace Microsoft.Build.Evaluation
         /// </summary>
         T GetProperty(string name, int startIndex, int endIndex);
     }
+
+    /// <summary>
+    /// Optionally supplies escaped property values without materializing
+    /// property objects.
+    /// </summary>
+    internal interface IPropertyValueProvider
+    {
+        bool TryGetEscapedPropertyValue(
+            string name,
+            int startIndex,
+            int endIndex,
+            out string escapedValue);
+    }
 }

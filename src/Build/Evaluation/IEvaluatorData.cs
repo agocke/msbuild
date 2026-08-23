@@ -10,6 +10,7 @@ using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Shared;
 
 #nullable disable
 
@@ -290,6 +291,29 @@ namespace Microsoft.Build.Evaluation
             string evaluatedValueEscaped,
             BackEnd.Logging.LoggingContext loggingContext,
             bool preserveEvaluationHistory = true);
+
+        /// <summary>
+        /// Gets an escaped property value without requiring a property object.
+        /// </summary>
+        bool TryGetEscapedPropertyValue(
+            PropertyId propertyId,
+            string propertyName,
+            IElementLocation location,
+            out string escapedValue);
+
+        /// <summary>
+        /// Publishes one dynamically specialized compiled property effect.
+        /// </summary>
+        void SetCompiledProperty(
+            EvaluationModule module,
+            int propertyIndex,
+            string evaluatedValueEscaped,
+            BackEnd.Logging.LoggingContext loggingContext);
+
+        /// <summary>
+        /// Attempts to apply one immutable compiled property delta.
+        /// </summary>
+        bool TryApplyPropertyDelta(PropertyDelta delta);
 
         /// <summary>
         /// Publishes a contiguous range of constant compiled property effects

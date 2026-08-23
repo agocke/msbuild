@@ -8,8 +8,10 @@ using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Microsoft.Build.Construction;
+using Microsoft.Build.Exceptions;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
+using ReservedPropertyNames = Microsoft.Build.Internal.ReservedPropertyNames;
 
 #nullable disable
 
@@ -100,6 +102,9 @@ namespace Microsoft.Build.Evaluation
         private long _misses;
         private long _lowerings;
 
+        internal PropertyIdentityTable PropertyIdentities { get; } =
+            new PropertyIdentityTable();
+
         internal PropertyAssignmentOperation GetPropertyAssignment(
             ProjectPropertyElement element)
         {
@@ -127,6 +132,7 @@ namespace Microsoft.Build.Evaluation
                 Interlocked.Increment(ref _misses);
                 if (!EvaluationModule.TryCreate(
                         project,
+                        PropertyIdentities,
                         out EvaluationModule candidate))
                 {
                     continue;
@@ -406,17 +412,21 @@ namespace Microsoft.Build.Evaluation
     {
         internal PropertyGroupTemplate(
             int conditionId,
+            int compiledConditionId,
             TableRange properties,
             TableRange propertySegments,
             int sourceId)
         {
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             Properties = properties;
             PropertySegments = propertySegments;
             SourceId = sourceId;
         }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal TableRange Properties { get; }
 
@@ -435,40 +445,74 @@ namespace Microsoft.Build.Evaluation
     {
         internal PropertySegmentTemplate(
             PropertySegmentKind kind,
-            TableRange properties)
+            TableRange properties,
+            TableRange externalPropertyReads,
+            TableRange instructions = default)
         {
             Kind = kind;
             Properties = properties;
+            ExternalPropertyReads = externalPropertyReads;
+            Instructions = instructions;
         }
 
         internal PropertySegmentKind Kind { get; }
 
         internal TableRange Properties { get; }
+
+        internal TableRange ExternalPropertyReads { get; }
+
+        internal TableRange Instructions { get; }
+
+        internal ConstantPropertySegmentState ConstantState { get; private init; }
+
+        internal PropertySegmentTemplate WithInstructions(
+            TableRange instructions,
+            bool isConstant) =>
+            new PropertySegmentTemplate(
+                Kind,
+                Properties,
+                ExternalPropertyReads,
+                instructions)
+            {
+                ConstantState = isConstant
+                    ? new ConstantPropertySegmentState()
+                    : null,
+            };
     }
 
     internal readonly struct PropertyTemplate
     {
         internal PropertyTemplate(
+            PropertyId propertyId,
             int nameStringId,
             int conditionId,
+            int compiledConditionId,
             int valueExpressionId,
             int constantValueStringId,
             TableRange compiledValueParts,
+            bool requiresExpansion,
             bool isDeadStore,
             int sourceId)
         {
+            PropertyId = propertyId;
             NameStringId = nameStringId;
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             ValueExpressionId = valueExpressionId;
             ConstantValueStringId = constantValueStringId;
             CompiledValueParts = compiledValueParts;
+            RequiresExpansion = requiresExpansion;
             IsDeadStore = isDeadStore;
             SourceId = sourceId;
         }
 
+        internal PropertyId PropertyId { get; }
+
         internal int NameStringId { get; }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal int ValueExpressionId { get; }
 
@@ -476,17 +520,22 @@ namespace Microsoft.Build.Evaluation
 
         internal TableRange CompiledValueParts { get; }
 
+        internal bool RequiresExpansion { get; }
+
         internal bool IsDeadStore { get; }
 
         internal int SourceId { get; }
 
         internal PropertyTemplate AsDeadStore() =>
             new PropertyTemplate(
+                PropertyId,
                 NameStringId,
                 ConditionId,
+                CompiledConditionId,
                 ValueExpressionId,
                 ConstantValueStringId,
                 CompiledValueParts,
+                RequiresExpansion,
                 isDeadStore: true,
                 SourceId);
     }
@@ -495,6 +544,7 @@ namespace Microsoft.Build.Evaluation
     {
         Literal,
         PropertyReference,
+        ExternalPropertyReference,
     }
 
     internal readonly struct CompiledPropertyValuePart
@@ -510,6 +560,174 @@ namespace Microsoft.Build.Evaluation
         internal CompiledPropertyValuePartKind Kind { get; }
 
         internal int Value { get; }
+    }
+
+    internal enum PropertyInstructionKind : byte
+    {
+        BranchIfPropertyConditionFalse,
+        SetLiteral,
+        SetValue,
+        SetExpandedValue,
+        AppendLiteral,
+        AppendLocalProperty,
+        AppendExternalProperty,
+    }
+
+    internal enum CompiledConditionKind : byte
+    {
+        Equal,
+        NotEqual,
+    }
+
+    internal enum CompiledConditionInstructionKind : byte
+    {
+        BranchIfComparisonFalse,
+        BranchIfComparisonTrue,
+        ReturnComparison,
+        ReturnFalse,
+        ReturnTrue,
+    }
+
+    internal readonly struct CompiledConditionInstruction
+    {
+        internal CompiledConditionInstruction(
+            CompiledConditionInstructionKind kind,
+            int argument0 = 0,
+            int argument1 = 0)
+        {
+            Kind = kind;
+            Argument0 = argument0;
+            Argument1 = argument1;
+        }
+
+        internal CompiledConditionInstructionKind Kind { get; }
+
+        internal int Argument0 { get; }
+
+        internal int Argument1 { get; }
+    }
+
+    internal enum CompiledConditionOperandKind : byte
+    {
+        Literal,
+        Property,
+        ExpandedValue,
+    }
+
+    internal enum CompiledConditionValuePartKind : byte
+    {
+        Literal,
+        Property,
+    }
+
+    internal readonly struct CompiledConditionValuePart
+    {
+        internal CompiledConditionValuePart(
+            CompiledConditionValuePartKind kind,
+            int value)
+        {
+            Kind = kind;
+            Value = value;
+        }
+
+        internal CompiledConditionValuePartKind Kind { get; }
+
+        internal int Value { get; }
+    }
+
+    internal readonly struct CompiledConditionOperand
+    {
+        internal CompiledConditionOperand(
+            CompiledConditionOperandKind kind,
+            int value,
+            int count = 0)
+        {
+            Kind = kind;
+            Value = value;
+            Count = count;
+        }
+
+        internal CompiledConditionOperandKind Kind { get; }
+
+        internal int Value { get; }
+
+        internal int Count { get; }
+    }
+
+    internal readonly struct CompiledConditionComparison
+    {
+        internal CompiledConditionComparison(
+            CompiledConditionKind kind,
+            CompiledConditionOperand left,
+            CompiledConditionOperand right,
+            int leftRawStringId,
+            int rightRawStringId)
+        {
+            Kind = kind;
+            Left = left;
+            Right = right;
+            LeftRawStringId = leftRawStringId;
+            RightRawStringId = rightRawStringId;
+        }
+
+        internal CompiledConditionKind Kind { get; }
+
+        internal CompiledConditionOperand Left { get; }
+
+        internal CompiledConditionOperand Right { get; }
+
+        internal int LeftRawStringId { get; }
+
+        internal int RightRawStringId { get; }
+    }
+
+    internal readonly struct CompiledCondition
+    {
+        internal CompiledCondition(
+            TableRange instructions,
+            int sourceId)
+        {
+            Instructions = instructions;
+            SourceId = sourceId;
+        }
+
+        internal TableRange Instructions { get; }
+
+        internal int SourceId { get; }
+    }
+
+    internal readonly struct PropertyInstruction
+    {
+        internal PropertyInstruction(
+            PropertyInstructionKind kind,
+            int argument0,
+            int argument1 = 0)
+        {
+            Kind = kind;
+            Argument0 = argument0;
+            Argument1 = argument1;
+        }
+
+        internal PropertyInstructionKind Kind { get; }
+
+        internal int Argument0 { get; }
+
+        internal int Argument1 { get; }
+    }
+
+    internal readonly struct CompiledPropertyExternalRead
+    {
+        internal CompiledPropertyExternalRead(
+            PropertyId propertyId,
+            int nameStringId)
+        {
+            PropertyId = propertyId;
+            NameStringId = nameStringId;
+        }
+
+        internal PropertyId PropertyId { get; }
+
+        internal int NameStringId { get; }
     }
 
     internal readonly struct ImportGroupTemplate
@@ -811,6 +1029,9 @@ namespace Microsoft.Build.Evaluation
             _propertyGroupConditions;
         private readonly string[] _strings;
         private readonly ProjectElement[] _sources;
+        private readonly ConcurrentDictionary<long, PropertyDelta>
+            _constantPropertyDeltas =
+                new ConcurrentDictionary<long, PropertyDelta>();
         private int _handle;
 
         private EvaluationModule(
@@ -822,6 +1043,13 @@ namespace Microsoft.Build.Evaluation
             PropertySegmentTemplate[] propertySegments,
             PropertyTemplate[] properties,
             CompiledPropertyValuePart[] compiledPropertyValueParts,
+            PropertyInstruction[] propertyInstructions,
+            CompiledPropertyExternalRead[] compiledPropertyExternalReads,
+            CompiledCondition[] compiledConditions,
+            CompiledConditionInstruction[] compiledConditionInstructions,
+            CompiledConditionComparison[] compiledConditionComparisons,
+            CompiledPropertyExternalRead[] compiledConditionPropertyReads,
+            CompiledConditionValuePart[] compiledConditionValueParts,
             ImportGroupTemplate[] importGroups,
             ImportTemplate[] imports,
             ChooseTemplate[] chooses,
@@ -852,6 +1080,15 @@ namespace Microsoft.Build.Evaluation
             PropertySegments = propertySegments;
             Properties = properties;
             CompiledPropertyValueParts = compiledPropertyValueParts;
+            PropertyInstructions = propertyInstructions;
+            CompiledPropertyExternalReads = compiledPropertyExternalReads;
+            CompiledConditions = compiledConditions;
+            CompiledConditionInstructions = compiledConditionInstructions;
+            CompiledConditionComparisons = compiledConditionComparisons;
+            CompiledConditionPropertyReads =
+                compiledConditionPropertyReads;
+            CompiledConditionValueParts =
+                compiledConditionValueParts;
             ImportGroups = importGroups;
             Imports = imports;
             Chooses = chooses;
@@ -890,6 +1127,20 @@ namespace Microsoft.Build.Evaluation
         internal PropertyTemplate[] Properties { get; }
 
         internal CompiledPropertyValuePart[] CompiledPropertyValueParts { get; }
+
+        internal PropertyInstruction[] PropertyInstructions { get; }
+
+        internal CompiledPropertyExternalRead[] CompiledPropertyExternalReads { get; }
+
+        internal CompiledCondition[] CompiledConditions { get; }
+
+        internal CompiledConditionInstruction[] CompiledConditionInstructions { get; }
+
+        internal CompiledConditionComparison[] CompiledConditionComparisons { get; }
+
+        internal CompiledPropertyExternalRead[] CompiledConditionPropertyReads { get; }
+
+        internal CompiledConditionValuePart[] CompiledConditionValueParts { get; }
 
         internal ImportGroupTemplate[] ImportGroups { get; }
 
@@ -947,6 +1198,50 @@ namespace Microsoft.Build.Evaluation
 
         internal string GetStringValue(int stringId) => _strings[stringId];
 
+        internal PropertyDelta GetConstantPropertyDelta(TableRange properties)
+        {
+            long key = ((long)properties.Start << 32) |
+                       (uint)properties.Count;
+            return _constantPropertyDeltas.GetOrAdd(
+                key,
+                _ => CreateConstantPropertyDelta(properties));
+        }
+
+        internal PropertyDelta CreateConstantPropertyDelta(
+            TableRange properties)
+        {
+            int entryCount = 0;
+            for (int offset = 0; offset < properties.Count; offset++)
+            {
+                if (!Properties[properties.Start + offset].IsDeadStore)
+                {
+                    entryCount++;
+                }
+            }
+
+            var entries = new PropertyDeltaEntry[entryCount];
+            int entryIndex = 0;
+            for (int offset = 0; offset < properties.Count; offset++)
+            {
+                PropertyTemplate property =
+                    Properties[properties.Start + offset];
+                if (property.IsDeadStore)
+                {
+                    continue;
+                }
+
+                entries[entryIndex++] = new PropertyDeltaEntry(
+                    property.PropertyId,
+                    GetStringValue(property.NameStringId),
+                    new PropertyValueRef(
+                        GetStringValue(property.ConstantValueStringId),
+                        new SourceId(Handle, property.SourceId),
+                        PropertyFlags.None));
+            }
+
+            return new PropertyDelta(entries);
+        }
+
         internal PropertyAssignmentOperation GetPropertyAssignment(
             ProjectPropertyElement element)
         {
@@ -975,13 +1270,17 @@ namespace Microsoft.Build.Evaluation
 
         internal static bool TryCreate(
             ProjectRootElement source,
+            PropertyIdentityTable propertyIdentities,
             out EvaluationModule module)
         {
             int version = source.Version;
             using var measurement =
                 EvaluationPerformanceInstrumentation.Measure(
                     EvaluationPerformanceMetric.ModuleLowering);
-            module = new Builder(source, version).Build();
+            module = new Builder(
+                source,
+                version,
+                propertyIdentities).Build();
             if (source.Version != version)
             {
                 module = null;
@@ -1005,6 +1304,7 @@ namespace Microsoft.Build.Evaluation
         {
             private readonly ProjectRootElement _source;
             private readonly int _version;
+            private readonly PropertyIdentityTable _propertyIdentities;
             private readonly List<ModuleElement> _elements = new List<ModuleElement>();
             private readonly List<PropertyGroupTemplate> _propertyGroups =
                 new List<PropertyGroupTemplate>();
@@ -1015,6 +1315,26 @@ namespace Microsoft.Build.Evaluation
             private readonly List<CompiledPropertyValuePart>
                 _compiledPropertyValueParts =
                     new List<CompiledPropertyValuePart>();
+            private readonly List<PropertyInstruction>
+                _propertyInstructions =
+                    new List<PropertyInstruction>();
+            private readonly List<CompiledPropertyExternalRead>
+                _compiledPropertyExternalReads =
+                    new List<CompiledPropertyExternalRead>();
+            private readonly List<CompiledCondition> _compiledConditions =
+                new List<CompiledCondition> { default };
+            private readonly List<CompiledConditionInstruction>
+                _compiledConditionInstructions =
+                    new List<CompiledConditionInstruction>();
+            private readonly List<CompiledConditionComparison>
+                _compiledConditionComparisons =
+                    new List<CompiledConditionComparison>();
+            private readonly List<CompiledPropertyExternalRead>
+                _compiledConditionPropertyReads =
+                    new List<CompiledPropertyExternalRead>();
+            private readonly List<CompiledConditionValuePart>
+                _compiledConditionValueParts =
+                    new List<CompiledConditionValuePart>();
             private readonly List<ImportGroupTemplate> _importGroups =
                 new List<ImportGroupTemplate>();
             private readonly List<ImportTemplate> _imports =
@@ -1066,10 +1386,14 @@ namespace Microsoft.Build.Evaluation
                 ImmutableArray.CreateBuilder<ConditionOperation>();
             private bool _supportsReturns;
 
-            internal Builder(ProjectRootElement source, int version)
+            internal Builder(
+                ProjectRootElement source,
+                int version,
+                PropertyIdentityTable propertyIdentities)
             {
                 _source = source;
                 _version = version;
+                _propertyIdentities = propertyIdentities;
             }
 
             internal EvaluationModule Build()
@@ -1112,6 +1436,13 @@ namespace Microsoft.Build.Evaluation
                     _propertySegments.ToArray(),
                     _properties.ToArray(),
                     _compiledPropertyValueParts.ToArray(),
+                    _propertyInstructions.ToArray(),
+                    _compiledPropertyExternalReads.ToArray(),
+                    _compiledConditions.ToArray(),
+                    _compiledConditionInstructions.ToArray(),
+                    _compiledConditionComparisons.ToArray(),
+                    _compiledConditionPropertyReads.ToArray(),
+                    _compiledConditionValueParts.ToArray(),
                     _importGroups.ToArray(),
                     _imports.ToArray(),
                     _chooses.ToArray(),
@@ -1215,27 +1546,48 @@ namespace Microsoft.Build.Evaluation
             {
                 int sourceId = AddSource(propertyGroup);
                 int conditionId = AddCondition(propertyGroup.Condition, sourceId);
+                int compiledConditionId = AddCompiledCondition(
+                    propertyGroup.Condition,
+                    sourceId);
                 int propertyStart = _properties.Count;
                 int segmentStart = _propertySegments.Count;
                 int currentSegmentStart = propertyStart;
+                int currentExternalReadStart =
+                    _compiledPropertyExternalReads.Count;
                 PropertySegmentKind? currentSegmentKind = null;
                 var lastCompiledAssignments =
                     new Dictionary<string, int>(
                         StringComparer.OrdinalIgnoreCase);
                 var observedCompiledAssignments = new HashSet<int>();
+                var externalReads =
+                    new Dictionary<string, int>(
+                        StringComparer.OrdinalIgnoreCase);
                 foreach (ProjectPropertyElement property in propertyGroup.Properties)
                 {
+                    int propertySourceId = AddSource(property);
+                    int propertyConditionId = AddCondition(
+                        property.Condition,
+                        propertySourceId);
+                    int compiledPropertyConditionId =
+                        AddCompiledCondition(
+                            property.Condition,
+                            propertySourceId);
                     int constantValueStringId = 0;
-                    TableRange compiledValueParts = default;
+                    List<CompiledPropertyValuePart> compiledValueParts = null;
                     List<int> referencedAssignments = null;
+                    bool requiresExpansion = false;
                     bool isCompiledEffect =
-                        string.IsNullOrEmpty(property.Condition) &&
-                        TryCompilePropertyValue(
+                        compiledPropertyConditionId >= 0;
+                    if (isCompiledEffect &&
+                        !TryCompilePropertyValue(
                             property.Value,
                             lastCompiledAssignments,
                             out constantValueStringId,
                             out compiledValueParts,
-                            out referencedAssignments);
+                            out referencedAssignments))
+                    {
+                        requiresExpansion = true;
+                    }
                     PropertySegmentKind segmentKind =
                         isCompiledEffect
                             ? PropertySegmentKind.CompiledEffectBatch
@@ -1247,12 +1599,25 @@ namespace Microsoft.Build.Evaluation
                             currentSegmentKind.Value,
                             new TableRange(
                                 currentSegmentStart,
-                                _properties.Count - currentSegmentStart)));
+                                _properties.Count - currentSegmentStart),
+                            new TableRange(
+                                currentExternalReadStart,
+                                _compiledPropertyExternalReads.Count -
+                                currentExternalReadStart)));
                         currentSegmentStart = _properties.Count;
+                        currentExternalReadStart =
+                            _compiledPropertyExternalReads.Count;
+                        externalReads.Clear();
                     }
 
                     currentSegmentKind = segmentKind;
-                    if (isCompiledEffect)
+                    TableRange compiledValuePartRange =
+                        isCompiledEffect && !requiresExpansion
+                            ? AddCompiledPropertyValueParts(
+                                compiledValueParts,
+                                externalReads)
+                            : default;
+                    if (isCompiledEffect && !requiresExpansion)
                     {
                         if (referencedAssignments is not null)
                         {
@@ -1267,6 +1632,9 @@ namespace Microsoft.Build.Evaluation
                         if (lastCompiledAssignments.TryGetValue(
                                 property.Name,
                                 out int previousAssignment) &&
+                            compiledPropertyConditionId == 0 &&
+                            _properties[previousAssignment]
+                                .CompiledConditionId == 0 &&
                             !observedCompiledAssignments.Contains(
                                 previousAssignment))
                         {
@@ -1283,16 +1651,15 @@ namespace Microsoft.Build.Evaluation
                         observedCompiledAssignments.Clear();
                     }
 
-                    int propertySourceId = AddSource(property);
-                    int propertyConditionId = AddCondition(
-                        property.Condition,
-                        propertySourceId);
                     _properties.Add(new PropertyTemplate(
+                        _propertyIdentities.GetOrCreate(property.Name),
                         GetStringId(property.Name),
                         propertyConditionId,
+                        compiledPropertyConditionId,
                         AddExpression(property.Value, propertySourceId),
                         constantValueStringId,
-                        compiledValueParts,
+                        compiledValuePartRange,
+                        requiresExpansion,
                         isDeadStore: false,
                         propertySourceId));
 
@@ -1307,7 +1674,29 @@ namespace Microsoft.Build.Evaluation
                         currentSegmentKind.Value,
                         new TableRange(
                             currentSegmentStart,
-                            _properties.Count - currentSegmentStart)));
+                            _properties.Count - currentSegmentStart),
+                        new TableRange(
+                            currentExternalReadStart,
+                            _compiledPropertyExternalReads.Count -
+                            currentExternalReadStart)));
+                }
+
+                for (int i = segmentStart;
+                     i < _propertySegments.Count;
+                     i++)
+                {
+                    PropertySegmentTemplate segment =
+                        _propertySegments[i];
+                    if (segment.Kind ==
+                        PropertySegmentKind.CompiledEffectBatch)
+                    {
+                        _propertySegments[i] =
+                            segment.WithInstructions(
+                                AddPropertyInstructions(
+                                    segment.Properties,
+                                    out bool isConstant),
+                                isConstant);
+                    }
                 }
 
                 ConditionOperation conditionOperation =
@@ -1316,6 +1705,7 @@ namespace Microsoft.Build.Evaluation
                 _propertyGroupConditions.Add(propertyGroup, conditionOperation);
                 _propertyGroups.Add(new PropertyGroupTemplate(
                     conditionId,
+                    compiledConditionId,
                     new TableRange(
                         propertyStart,
                         _properties.Count - propertyStart),
@@ -1326,11 +1716,429 @@ namespace Microsoft.Build.Evaluation
                 return _propertyGroups.Count - 1;
             }
 
+            private int AddCompiledCondition(
+                string condition,
+                int sourceId)
+            {
+                if (string.IsNullOrEmpty(condition))
+                {
+                    return 0;
+                }
+
+                GenericExpressionNode expression;
+                try
+                {
+                    expression = new Parser().Parse(
+                        condition,
+                        ParserOptions.AllowProperties,
+                        _sources[sourceId].ConditionLocation);
+                }
+                catch (InvalidProjectFileException)
+                {
+                    return -1;
+                }
+
+                if (expression.PotentialAndOrConflict())
+                {
+                    return -1;
+                }
+
+                int comparisonStart = _compiledConditionComparisons.Count;
+                int propertyReadStart =
+                    _compiledConditionPropertyReads.Count;
+                int valuePartStart =
+                    _compiledConditionValueParts.Count;
+                var instructions =
+                    new List<CompiledConditionInstruction>();
+                bool compiled;
+                if (expression is EqualExpressionNode or
+                    NotEqualExpressionNode)
+                {
+                    compiled = TryAddCompiledConditionComparison(
+                        expression,
+                        out int comparisonId);
+                    if (compiled)
+                    {
+                        instructions.Add(
+                            new CompiledConditionInstruction(
+                                CompiledConditionInstructionKind
+                                    .ReturnComparison,
+                                comparisonId));
+                    }
+                }
+                else
+                {
+                    var falseBranches = new List<int>();
+                    compiled = TryEmitBranchIfFalse(
+                        expression,
+                        instructions,
+                        falseBranches);
+                    if (compiled)
+                    {
+                        instructions.Add(
+                            new CompiledConditionInstruction(
+                                CompiledConditionInstructionKind
+                                    .ReturnTrue));
+                        int falseTarget = instructions.Count;
+                        instructions.Add(
+                            new CompiledConditionInstruction(
+                                CompiledConditionInstructionKind
+                                    .ReturnFalse));
+                        PatchConditionBranches(
+                            instructions,
+                            falseBranches,
+                            falseTarget);
+                    }
+                }
+
+                if (!compiled)
+                {
+                    _compiledConditionComparisons.RemoveRange(
+                        comparisonStart,
+                        _compiledConditionComparisons.Count -
+                        comparisonStart);
+                    _compiledConditionPropertyReads.RemoveRange(
+                        propertyReadStart,
+                        _compiledConditionPropertyReads.Count -
+                        propertyReadStart);
+                    _compiledConditionValueParts.RemoveRange(
+                        valuePartStart,
+                        _compiledConditionValueParts.Count -
+                        valuePartStart);
+                    return -1;
+                }
+
+                int instructionStart =
+                    _compiledConditionInstructions.Count;
+                _compiledConditionInstructions.AddRange(instructions);
+                _compiledConditions.Add(new CompiledCondition(
+                    new TableRange(
+                        instructionStart,
+                        instructions.Count),
+                    sourceId));
+                return _compiledConditions.Count - 1;
+            }
+
+            private bool TryEmitBranchIfFalse(
+                GenericExpressionNode expression,
+                List<CompiledConditionInstruction> instructions,
+                List<int> targetBranches)
+            {
+                if (expression is AndExpressionNode and)
+                {
+                    return TryEmitBranchIfFalse(
+                            and.LeftChild,
+                            instructions,
+                            targetBranches) &&
+                        TryEmitBranchIfFalse(
+                            and.RightChild,
+                            instructions,
+                            targetBranches);
+                }
+
+                if (expression is OrExpressionNode or)
+                {
+                    var trueBranches = new List<int>();
+                    if (!TryEmitBranchIfTrue(
+                            or.LeftChild,
+                            instructions,
+                            trueBranches) ||
+                        !TryEmitBranchIfFalse(
+                            or.RightChild,
+                            instructions,
+                            targetBranches))
+                    {
+                        return false;
+                    }
+
+                    PatchConditionBranches(
+                        instructions,
+                        trueBranches,
+                        instructions.Count);
+                    return true;
+                }
+
+                if (!TryAddCompiledConditionComparison(
+                        expression,
+                        out int comparisonId))
+                {
+                    return false;
+                }
+
+                targetBranches.Add(instructions.Count);
+                instructions.Add(new CompiledConditionInstruction(
+                    CompiledConditionInstructionKind
+                        .BranchIfComparisonFalse,
+                    comparisonId));
+                return true;
+            }
+
+            private bool TryEmitBranchIfTrue(
+                GenericExpressionNode expression,
+                List<CompiledConditionInstruction> instructions,
+                List<int> targetBranches)
+            {
+                if (expression is OrExpressionNode or)
+                {
+                    return TryEmitBranchIfTrue(
+                            or.LeftChild,
+                            instructions,
+                            targetBranches) &&
+                        TryEmitBranchIfTrue(
+                            or.RightChild,
+                            instructions,
+                            targetBranches);
+                }
+
+                if (expression is AndExpressionNode and)
+                {
+                    var falseBranches = new List<int>();
+                    if (!TryEmitBranchIfFalse(
+                            and.LeftChild,
+                            instructions,
+                            falseBranches) ||
+                        !TryEmitBranchIfTrue(
+                            and.RightChild,
+                            instructions,
+                            targetBranches))
+                    {
+                        return false;
+                    }
+
+                    PatchConditionBranches(
+                        instructions,
+                        falseBranches,
+                        instructions.Count);
+                    return true;
+                }
+
+                if (!TryAddCompiledConditionComparison(
+                        expression,
+                        out int comparisonId))
+                {
+                    return false;
+                }
+
+                targetBranches.Add(instructions.Count);
+                instructions.Add(new CompiledConditionInstruction(
+                    CompiledConditionInstructionKind
+                        .BranchIfComparisonTrue,
+                    comparisonId));
+                return true;
+            }
+
+            private static void PatchConditionBranches(
+                List<CompiledConditionInstruction> instructions,
+                List<int> branches,
+                int target)
+            {
+                foreach (int branch in branches)
+                {
+                    CompiledConditionInstruction instruction =
+                        instructions[branch];
+                    instructions[branch] =
+                        new CompiledConditionInstruction(
+                            instruction.Kind,
+                            instruction.Argument0,
+                            target - branch);
+                }
+            }
+
+            private bool TryAddCompiledConditionComparison(
+                GenericExpressionNode expression,
+                out int comparisonId)
+            {
+                CompiledConditionKind kind;
+                if (expression is EqualExpressionNode equal)
+                {
+                    kind = CompiledConditionKind.Equal;
+                    expression = equal;
+                }
+                else if (expression is NotEqualExpressionNode notEqual)
+                {
+                    kind = CompiledConditionKind.NotEqual;
+                    expression = notEqual;
+                }
+                else
+                {
+                    comparisonId = 0;
+                    return false;
+                }
+
+                var comparison = (OperatorExpressionNode)expression;
+                if (comparison.LeftChild is not StringExpressionNode left ||
+                    comparison.RightChild is not StringExpressionNode right ||
+                    !TryCompileConditionOperand(left, out CompiledConditionOperand leftOperand) ||
+                    !TryCompileConditionOperand(right, out CompiledConditionOperand rightOperand))
+                {
+                    comparisonId = 0;
+                    return false;
+                }
+
+                _compiledConditionComparisons.Add(
+                    new CompiledConditionComparison(
+                        kind,
+                        leftOperand,
+                        rightOperand,
+                        GetStringId(left.UnexpandedValue),
+                        GetStringId(right.UnexpandedValue)));
+                comparisonId =
+                    _compiledConditionComparisons.Count - 1;
+                return true;
+            }
+
+            private bool TryCompileConditionOperand(
+                StringExpressionNode operand,
+                out CompiledConditionOperand compiledOperand)
+            {
+                string value = operand.UnexpandedValue;
+                if (ConditionEvaluator.TryGetSingleProperty(
+                        value.AsSpan(),
+                        0,
+                        value.Length,
+                        out ReadOnlySpan<char> propertyNameSpan))
+                {
+                    string propertyName = propertyNameSpan.ToString();
+                    if (!IsValidPropertyName(propertyName) ||
+                        IsContextualPropertyName(propertyName) ||
+                        propertyName.Equals(
+                            "MSBuildToolsVersion",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        compiledOperand = default;
+                        return false;
+                    }
+
+                    int readIndex =
+                        _compiledConditionPropertyReads.Count;
+                    _compiledConditionPropertyReads.Add(
+                        new CompiledPropertyExternalRead(
+                            _propertyIdentities.GetOrCreate(
+                                propertyName),
+                            GetStringId(propertyName)));
+                    compiledOperand = new CompiledConditionOperand(
+                        CompiledConditionOperandKind.Property,
+                        readIndex);
+                    return true;
+                }
+
+                if (operand.IsExpandable)
+                {
+                    return TryCompileExpandedConditionOperand(
+                        value,
+                        out compiledOperand);
+                }
+
+                compiledOperand = new CompiledConditionOperand(
+                    CompiledConditionOperandKind.Literal,
+                    GetStringId(value));
+                return true;
+            }
+
+            private bool TryCompileExpandedConditionOperand(
+                string value,
+                out CompiledConditionOperand compiledOperand)
+            {
+                if (value.Contains("@(", StringComparison.Ordinal) ||
+                    value.Contains("%(", StringComparison.Ordinal))
+                {
+                    compiledOperand = default;
+                    return false;
+                }
+
+                int partStart = _compiledConditionValueParts.Count;
+                int sourceIndex = 0;
+                int propertyStart = value.IndexOf(
+                    "$(",
+                    StringComparison.Ordinal);
+                while (propertyStart >= 0)
+                {
+                    if (propertyStart > sourceIndex)
+                    {
+                        _compiledConditionValueParts.Add(
+                            new CompiledConditionValuePart(
+                                CompiledConditionValuePartKind.Literal,
+                                GetStringId(value.Substring(
+                                    sourceIndex,
+                                    propertyStart - sourceIndex))));
+                    }
+
+                    int propertyEnd = value.IndexOf(
+                        ')',
+                        propertyStart + 2);
+                    if (propertyEnd < 0)
+                    {
+                        _compiledConditionValueParts.RemoveRange(
+                            partStart,
+                            _compiledConditionValueParts.Count -
+                            partStart);
+                        compiledOperand = default;
+                        return false;
+                    }
+
+                    string propertyName = value.Substring(
+                        propertyStart + 2,
+                        propertyEnd - propertyStart - 2);
+                    if (!IsValidPropertyName(propertyName) ||
+                        IsContextualPropertyName(propertyName) ||
+                        propertyName.Equals(
+                            "MSBuildToolsVersion",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        _compiledConditionValueParts.RemoveRange(
+                            partStart,
+                            _compiledConditionValueParts.Count -
+                            partStart);
+                        compiledOperand = default;
+                        return false;
+                    }
+
+                    int readIndex =
+                        _compiledConditionPropertyReads.Count;
+                    _compiledConditionPropertyReads.Add(
+                        new CompiledPropertyExternalRead(
+                            _propertyIdentities.GetOrCreate(
+                                propertyName),
+                            GetStringId(propertyName)));
+                    _compiledConditionValueParts.Add(
+                        new CompiledConditionValuePart(
+                            CompiledConditionValuePartKind.Property,
+                            readIndex));
+                    sourceIndex = propertyEnd + 1;
+                    propertyStart = value.IndexOf(
+                        "$(",
+                        sourceIndex,
+                        StringComparison.Ordinal);
+                }
+
+                if (sourceIndex < value.Length)
+                {
+                    _compiledConditionValueParts.Add(
+                        new CompiledConditionValuePart(
+                            CompiledConditionValuePartKind.Literal,
+                            GetStringId(value.Substring(sourceIndex))));
+                }
+
+                int partCount =
+                    _compiledConditionValueParts.Count - partStart;
+                if (partCount == 0)
+                {
+                    compiledOperand = default;
+                    return false;
+                }
+
+                compiledOperand = new CompiledConditionOperand(
+                    CompiledConditionOperandKind.ExpandedValue,
+                    partStart,
+                    partCount);
+                return true;
+            }
+
             private bool TryCompilePropertyValue(
                 string value,
                 Dictionary<string, int> locallyDefinedProperties,
                 out int constantValueStringId,
-                out TableRange compiledValueParts,
+                out List<CompiledPropertyValuePart> compiledValueParts,
                 out List<int> referencedAssignments)
             {
                 int propertyStart = value.IndexOf(
@@ -1340,7 +2148,7 @@ namespace Microsoft.Build.Evaluation
                 {
                     constantValueStringId = GetStringId(
                         FileUtilities.MaybeAdjustFilePath(value));
-                    compiledValueParts = default;
+                    compiledValueParts = null;
                     referencedAssignments = null;
                     return true;
                 }
@@ -1365,7 +2173,7 @@ namespace Microsoft.Build.Evaluation
                     if (propertyEnd < 0)
                     {
                         constantValueStringId = 0;
-                        compiledValueParts = default;
+                        compiledValueParts = null;
                         referencedAssignments = null;
                         return false;
                     }
@@ -1374,20 +2182,30 @@ namespace Microsoft.Build.Evaluation
                         propertyStart + 2,
                         propertyEnd - propertyStart - 2);
                     if (!IsValidPropertyName(propertyName) ||
-                        !locallyDefinedProperties.TryGetValue(
-                            propertyName,
-                            out int referencedAssignment))
+                        IsContextualPropertyName(propertyName))
                     {
                         constantValueStringId = 0;
-                        compiledValueParts = default;
+                        compiledValueParts = null;
                         referencedAssignments = null;
                         return false;
                     }
 
-                    references.Add(referencedAssignment);
-                    parts.Add(new CompiledPropertyValuePart(
-                        CompiledPropertyValuePartKind.PropertyReference,
-                        referencedAssignment));
+                    if (locallyDefinedProperties.TryGetValue(
+                            propertyName,
+                            out int referencedAssignment))
+                    {
+                        references.Add(referencedAssignment);
+                        parts.Add(new CompiledPropertyValuePart(
+                            CompiledPropertyValuePartKind.PropertyReference,
+                            referencedAssignment));
+                    }
+                    else
+                    {
+                        parts.Add(new CompiledPropertyValuePart(
+                            CompiledPropertyValuePartKind
+                                .ExternalPropertyReference,
+                            GetStringId(propertyName)));
+                    }
                     sourceIndex = propertyEnd + 1;
                     propertyStart = value.IndexOf(
                         "$(",
@@ -1404,17 +2222,151 @@ namespace Microsoft.Build.Evaluation
                                 value.Substring(sourceIndex)))));
                 }
 
-                int start = _compiledPropertyValueParts.Count;
-                _compiledPropertyValueParts.AddRange(parts);
                 constantValueStringId = 0;
-                compiledValueParts = new TableRange(start, parts.Count);
+                compiledValueParts = parts;
                 referencedAssignments = references;
                 return true;
+            }
+
+            private TableRange AddCompiledPropertyValueParts(
+                List<CompiledPropertyValuePart> parts,
+                Dictionary<string, int> externalReads)
+            {
+                if (parts is null)
+                {
+                    return default;
+                }
+
+                int start = _compiledPropertyValueParts.Count;
+                foreach (CompiledPropertyValuePart part in parts)
+                {
+                    if (part.Kind !=
+                        CompiledPropertyValuePartKind
+                            .ExternalPropertyReference)
+                    {
+                        _compiledPropertyValueParts.Add(part);
+                        continue;
+                    }
+
+                    string propertyName = _strings[part.Value];
+                    if (!externalReads.TryGetValue(
+                            propertyName,
+                            out int readIndex))
+                    {
+                        readIndex = _compiledPropertyExternalReads.Count;
+                        externalReads.Add(propertyName, readIndex);
+                        _compiledPropertyExternalReads.Add(
+                            new CompiledPropertyExternalRead(
+                                _propertyIdentities.GetOrCreate(propertyName),
+                                part.Value));
+                    }
+
+                    _compiledPropertyValueParts.Add(
+                        new CompiledPropertyValuePart(
+                            CompiledPropertyValuePartKind
+                                .ExternalPropertyReference,
+                            readIndex));
+                }
+
+                return new TableRange(start, parts.Count);
+            }
+
+            private TableRange AddPropertyInstructions(
+                TableRange properties,
+                out bool isConstant)
+            {
+                int start = _propertyInstructions.Count;
+                isConstant = true;
+                for (int propertyIndex = properties.Start;
+                     propertyIndex <
+                     properties.Start + properties.Count;
+                     propertyIndex++)
+                {
+                    PropertyTemplate property =
+                        _properties[propertyIndex];
+                    if (property.IsDeadStore)
+                    {
+                        continue;
+                    }
+
+                    if (property.CompiledConditionId > 0)
+                    {
+                        isConstant = false;
+                        _propertyInstructions.Add(
+                            new PropertyInstruction(
+                                PropertyInstructionKind
+                                    .BranchIfPropertyConditionFalse,
+                                propertyIndex,
+                                property.RequiresExpansion
+                                    ? 1
+                                    : 1 +
+                                      property.CompiledValueParts.Count));
+                    }
+
+                    if (property.RequiresExpansion)
+                    {
+                        isConstant = false;
+                        _propertyInstructions.Add(
+                            new PropertyInstruction(
+                                PropertyInstructionKind
+                                    .SetExpandedValue,
+                                propertyIndex));
+                        continue;
+                    }
+
+                    if (property.CompiledValueParts.Count == 0)
+                    {
+                        _propertyInstructions.Add(
+                            new PropertyInstruction(
+                                PropertyInstructionKind.SetLiteral,
+                                propertyIndex,
+                                property.ConstantValueStringId));
+                        continue;
+                    }
+
+                    isConstant = false;
+                    _propertyInstructions.Add(
+                        new PropertyInstruction(
+                            PropertyInstructionKind.SetValue,
+                            propertyIndex,
+                            property.CompiledValueParts.Count));
+                    for (int partIndex =
+                             property.CompiledValueParts.Start;
+                         partIndex <
+                         property.CompiledValueParts.Start +
+                         property.CompiledValueParts.Count;
+                         partIndex++)
+                    {
+                        CompiledPropertyValuePart part =
+                            _compiledPropertyValueParts[partIndex];
+                        _propertyInstructions.Add(
+                            new PropertyInstruction(
+                                part.Kind switch
+                                {
+                                    CompiledPropertyValuePartKind.Literal =>
+                                        PropertyInstructionKind.AppendLiteral,
+                                    CompiledPropertyValuePartKind.PropertyReference =>
+                                        PropertyInstructionKind.AppendLocalProperty,
+                                    CompiledPropertyValuePartKind.ExternalPropertyReference =>
+                                        PropertyInstructionKind.AppendExternalProperty,
+                                    _ => throw new InternalErrorException(
+                                        "Unknown compiled property value part."),
+                                },
+                                part.Value));
+                    }
+                }
+
+                return new TableRange(
+                    start,
+                    _propertyInstructions.Count - start);
             }
 
             private static bool IsValidPropertyName(string propertyName)
             {
                 if (propertyName.Length == 0 ||
+                    propertyName.StartsWith(
+                        "Registry:",
+                        StringComparison.OrdinalIgnoreCase) ||
                     !XmlUtilities.IsValidInitialElementNameCharacter(
                         propertyName[0]))
                 {
@@ -1432,6 +2384,27 @@ namespace Microsoft.Build.Evaluation
 
                 return true;
             }
+
+            private static bool IsContextualPropertyName(
+                string propertyName) =>
+                propertyName.Equals(
+                    ReservedPropertyNames.thisFileDirectory,
+                    StringComparison.OrdinalIgnoreCase) ||
+                propertyName.Equals(
+                    ReservedPropertyNames.thisFileDirectoryNoRoot,
+                    StringComparison.OrdinalIgnoreCase) ||
+                propertyName.Equals(
+                    ReservedPropertyNames.thisFile,
+                    StringComparison.OrdinalIgnoreCase) ||
+                propertyName.Equals(
+                    ReservedPropertyNames.thisFileExtension,
+                    StringComparison.OrdinalIgnoreCase) ||
+                propertyName.Equals(
+                    ReservedPropertyNames.thisFileFullPath,
+                    StringComparison.OrdinalIgnoreCase) ||
+                propertyName.Equals(
+                    ReservedPropertyNames.thisFileName,
+                    StringComparison.OrdinalIgnoreCase);
 
             private int AddImportGroup(ProjectImportGroupElement importGroup)
             {

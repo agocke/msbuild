@@ -30,6 +30,10 @@ namespace Microsoft.Build.Evaluation
             _expandable = expandable;
         }
 
+        internal string UnexpandedValue => _value;
+
+        internal bool IsExpandable => _expandable;
+
         internal override bool TryBoolEvaluate(ConditionEvaluator.IConditionEvaluationState state, out bool result)
         {
             return ConversionUtilities.TryConvertStringToBool(GetExpandedValue(state), out result);
