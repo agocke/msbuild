@@ -17,7 +17,8 @@ namespace Microsoft.Build.Evaluation
         /// Requires evaluation to be deterministic and side-effect-free. Project source, imports,
         /// <c>Exists</c> conditions, and item globs remain available through MSBuild's declarative
         /// evaluation operations. Environment variables are not imported as initial properties,
-        /// and arbitrary property-function I/O and ambient nondeterminism are rejected.
+        /// arbitrary property-function I/O and ambient nondeterminism are rejected, and SDK
+        /// references resolve only through an immutable <see cref="SdkResolutionLock"/>.
         /// </summary>
         Pure,
     }

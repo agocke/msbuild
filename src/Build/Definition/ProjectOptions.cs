@@ -107,7 +107,7 @@ namespace Microsoft.Build.Definition
             if (EvaluationContext != null)
             {
                 ErrorUtilities.VerifyThrowArgument(
-                    EvaluationMode == ProjectEvaluationMode.Classic || EvaluationContext.EvaluationMode == EvaluationMode,
+                    EvaluationContext.EvaluationMode == EvaluationMode,
                     "EvaluationModeDoesNotMatchContext");
 
                 return EvaluationContext;

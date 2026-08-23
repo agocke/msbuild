@@ -235,6 +235,68 @@ namespace Microsoft.Build.Execution
 
         internal bool IsLoaded => RootElementCache != null;
 
+        internal readonly struct UsingTaskRegistration
+        {
+            internal UsingTaskRegistration(
+                ProjectUsingTaskElement element,
+                string directoryOfImportingFile,
+                string condition,
+                string taskName,
+                string taskFactory,
+                string assemblyFile,
+                string assemblyName,
+                string runtime,
+                string architecture,
+                string overrideUsingTask)
+            {
+                Element = element;
+                DirectoryOfImportingFile = directoryOfImportingFile;
+                Condition = condition;
+                TaskName = taskName;
+                TaskFactory = taskFactory;
+                AssemblyFile = assemblyFile;
+                AssemblyName = assemblyName;
+                Runtime = runtime;
+                Architecture = architecture;
+                Override = overrideUsingTask;
+            }
+
+            internal ProjectUsingTaskElement Element { get; }
+
+            internal string DirectoryOfImportingFile { get; }
+
+            internal string Condition { get; }
+
+            internal string TaskName { get; }
+
+            internal string TaskFactory { get; }
+
+            internal string AssemblyFile { get; }
+
+            internal string AssemblyName { get; }
+
+            internal string Runtime { get; }
+
+            internal string Architecture { get; }
+
+            internal string Override { get; }
+
+            internal static UsingTaskRegistration FromElement(
+                ProjectUsingTaskElement element,
+                string directoryOfImportingFile) =>
+                new UsingTaskRegistration(
+                    element,
+                    directoryOfImportingFile,
+                    element.Condition,
+                    element.TaskName,
+                    element.TaskFactory,
+                    element.AssemblyFile,
+                    element.AssemblyName,
+                    element.Runtime,
+                    element.Architecture,
+                    element.Override);
+        }
+
         /// <summary>
         /// Evaluate the usingtask and add the result into the data passed in
         /// </summary>
@@ -254,8 +316,35 @@ namespace Microsoft.Build.Execution
             {
                 RegisterTasksFromUsingTaskElement(
                     loggingContext,
-                    registration.directoryOfImportingFile,
-                    registration.projectUsingTaskXml,
+                    UsingTaskRegistration.FromElement(
+                        registration.projectUsingTaskXml,
+                        registration.directoryOfImportingFile),
+                    taskRegistry,
+                    expander,
+                    expanderOptions,
+                    fileSystem);
+            }
+#if DEBUG
+            taskRegistry._isInitialized = true;
+            taskRegistry._taskRegistrations ??= TaskRegistry.CreateRegisteredTaskDictionary();
+#endif
+        }
+
+        internal static void InitializeTaskRegistryFromUsingTaskRegistrations<P, I>(
+            LoggingContext loggingContext,
+            IEnumerable<UsingTaskRegistration> registrations,
+            TaskRegistry taskRegistry,
+            Expander<P, I> expander,
+            ExpanderOptions expanderOptions,
+            IFileSystem fileSystem)
+            where P : class, IProperty
+            where I : class, IItem
+        {
+            foreach (UsingTaskRegistration registration in registrations)
+            {
+                RegisterTasksFromUsingTaskElement(
+                    loggingContext,
+                    registration,
                     taskRegistry,
                     expander,
                     expanderOptions,
@@ -275,8 +364,7 @@ namespace Microsoft.Build.Execution
         private static void RegisterTasksFromUsingTaskElement
             <P, I>(
             LoggingContext loggingContext,
-            string directoryOfImportingFile,
-            ProjectUsingTaskElement projectUsingTaskXml,
+            in UsingTaskRegistration registration,
             TaskRegistry taskRegistry,
             Expander<P, I> expander,
             ExpanderOptions expanderOptions,
@@ -284,13 +372,20 @@ namespace Microsoft.Build.Execution
             where P : class, IProperty
             where I : class, IItem
         {
+            string directoryOfImportingFile =
+                registration.DirectoryOfImportingFile;
+            ProjectUsingTaskElement projectUsingTaskXml =
+                registration.Element;
+            using var measurement =
+                EvaluationPerformanceInstrumentation.Measure(
+                    EvaluationPerformanceMetric.UsingTaskRegistration);
             Assumed.NotNull(directoryOfImportingFile);
 #if DEBUG
             Assumed.False(taskRegistry._isInitialized, "Attempt to modify TaskRegistry after it was initialized.");
 #endif
 
             if (!ConditionEvaluator.EvaluateCondition(
-                    projectUsingTaskXml.Condition,
+                    registration.Condition,
                     ParserOptions.AllowPropertiesAndItemLists,
                     expander,
                     expanderOptions,
@@ -305,31 +400,43 @@ namespace Microsoft.Build.Execution
             string assemblyFile = null;
             string assemblyName = null;
 
-            string taskName = expander.ExpandIntoStringLeaveEscaped(projectUsingTaskXml.TaskName, expanderOptions, projectUsingTaskXml.TaskNameLocation);
+            string taskName = expander.ExpandIntoStringLeaveEscaped(
+                registration.TaskName,
+                expanderOptions,
+                projectUsingTaskXml.TaskNameLocation);
 
             ProjectErrorUtilities.VerifyThrowInvalidProject(
                 taskName.Length > 0,
                 projectUsingTaskXml.TaskNameLocation,
                 "InvalidEvaluatedAttributeValue",
                 taskName,
-                projectUsingTaskXml.TaskName,
+                registration.TaskName,
                 XMakeAttributes.name,
                 XMakeElements.usingTask);
 
-            string taskFactory = expander.ExpandIntoStringLeaveEscaped(projectUsingTaskXml.TaskFactory, expanderOptions, projectUsingTaskXml.TaskFactoryLocation);
+            string taskFactory = expander.ExpandIntoStringLeaveEscaped(
+                registration.TaskFactory,
+                expanderOptions,
+                projectUsingTaskXml.TaskFactoryLocation);
 
             if (String.IsNullOrEmpty(taskFactory) || taskFactory.Equals(RegisteredTaskRecord.AssemblyTaskFactory, StringComparison.OrdinalIgnoreCase) || taskFactory.Equals(RegisteredTaskRecord.TaskHostFactory, StringComparison.OrdinalIgnoreCase))
             {
                 ProjectXmlUtilities.VerifyThrowProjectNoChildElements(projectUsingTaskXml.XmlElement, projectUsingTaskXml.ContainingProject.ProjectRootElementCache.ParserIgnoreConfiguration);
             }
 
-            if (projectUsingTaskXml.AssemblyFile.Length > 0)
+            if (registration.AssemblyFile.Length > 0)
             {
-                assemblyFile = expander.ExpandIntoStringLeaveEscaped(projectUsingTaskXml.AssemblyFile, expanderOptions, projectUsingTaskXml.AssemblyFileLocation);
+                assemblyFile = expander.ExpandIntoStringLeaveEscaped(
+                    registration.AssemblyFile,
+                    expanderOptions,
+                    projectUsingTaskXml.AssemblyFileLocation);
             }
             else
             {
-                assemblyName = expander.ExpandIntoStringLeaveEscaped(projectUsingTaskXml.AssemblyName, expanderOptions, projectUsingTaskXml.AssemblyNameLocation);
+                assemblyName = expander.ExpandIntoStringLeaveEscaped(
+                    registration.AssemblyName,
+                    expanderOptions,
+                    projectUsingTaskXml.AssemblyNameLocation);
             }
 
             ProjectErrorUtilities.VerifyThrowInvalidProject(
@@ -337,7 +444,7 @@ namespace Microsoft.Build.Execution
                 projectUsingTaskXml.AssemblyFileLocation,
                 "InvalidEvaluatedAttributeValue",
                 assemblyFile,
-                projectUsingTaskXml.AssemblyFile,
+                registration.AssemblyFile,
                 XMakeAttributes.assemblyFile,
                 XMakeElements.usingTask);
 
@@ -346,7 +453,7 @@ namespace Microsoft.Build.Execution
                 projectUsingTaskXml.AssemblyNameLocation,
                 "InvalidEvaluatedAttributeValue",
                 assemblyName,
-                projectUsingTaskXml.AssemblyName,
+                registration.AssemblyName,
                 XMakeAttributes.assemblyName,
                 XMakeElements.usingTask);
 
@@ -420,9 +527,18 @@ namespace Microsoft.Build.Execution
             }
 
             TaskHostParameters taskFactoryParameters = TaskHostParameters.Empty;
-            string runtime = expander.ExpandIntoStringLeaveEscaped(projectUsingTaskXml.Runtime, expanderOptions, projectUsingTaskXml.RuntimeLocation);
-            string architecture = expander.ExpandIntoStringLeaveEscaped(projectUsingTaskXml.Architecture, expanderOptions, projectUsingTaskXml.ArchitectureLocation);
-            string overrideUsingTask = expander.ExpandIntoStringLeaveEscaped(projectUsingTaskXml.Override, expanderOptions, projectUsingTaskXml.OverrideLocation);
+            string runtime = expander.ExpandIntoStringLeaveEscaped(
+                registration.Runtime,
+                expanderOptions,
+                projectUsingTaskXml.RuntimeLocation);
+            string architecture = expander.ExpandIntoStringLeaveEscaped(
+                registration.Architecture,
+                expanderOptions,
+                projectUsingTaskXml.ArchitectureLocation);
+            string overrideUsingTask = expander.ExpandIntoStringLeaveEscaped(
+                registration.Override,
+                expanderOptions,
+                projectUsingTaskXml.OverrideLocation);
 
             if ((runtime != string.Empty) || (architecture != string.Empty))
             {

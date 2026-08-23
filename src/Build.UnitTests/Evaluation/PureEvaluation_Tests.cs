@@ -70,8 +70,10 @@ namespace Microsoft.Build.Engine.UnitTests.Evaluation
         [InlineData("$([System.Guid]::NewGuid())")]
         [InlineData("$([System.IO.Path]::GetRandomFileName())")]
         [InlineData("$([System.IO.Path]::GetFullPath('relative'))")]
+        [InlineData("$([System.IO.Directory]::GetParent('a/b').FullName)")]
         [InlineData("$([System.Environment]::GetEnvironmentVariable('PATH'))")]
         [InlineData("$([System.IO.File]::ReadAllText('input.txt'))")]
+        [InlineData("$([Microsoft.Build.Utilities.ToolLocationHelper]::GetPlatformSDKLocation('Windows', '10.0'))")]
         [InlineData("$(Registry:HKEY_CURRENT_USER\\Software@TestValue)")]
         public void PureEvaluationRejectsAmbientPropertyFunctions(string expression)
         {
@@ -143,7 +145,7 @@ namespace Microsoft.Build.Engine.UnitTests.Evaluation
                 """
                 <Project>
                   <PropertyGroup>
-                    <Parent>$([System.IO.Directory]::GetParent('one/two').FullName)</Parent>
+                    <Parent>$([System.IO.Directory]::GetParent('$(MSBuildProjectDirectory)/one/two').FullName)</Parent>
                   </PropertyGroup>
                 </Project>
                 """,
@@ -167,6 +169,45 @@ namespace Microsoft.Build.Engine.UnitTests.Evaluation
 
             project.GetPropertyValue("FullPath").ShouldBe(
                 Path.Combine(project.DirectoryPath, "child"));
+        }
+
+        [Fact]
+        public void PureEvaluationAllowsFullPathOfFullyQualifiedInput()
+        {
+            string path = Path.Combine(
+                Path.GetPathRoot(_env.DefaultTestDirectory.Path)!,
+                "one",
+                "..",
+                "two");
+            Project project = Evaluate(
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <FullPath>$([System.IO.Path]::GetFullPath('{path}'))</FullPath>
+                  </PropertyGroup>
+                </Project>
+                """,
+                ProjectEvaluationMode.Pure);
+
+            project.GetPropertyValue("FullPath").ShouldBe(
+                Path.GetFullPath(path));
+        }
+
+        [Theory]
+        [InlineData("GetPlatformSDKLocation")]
+        [InlineData("GetPlatformSDKDisplayName")]
+        public void PureEvaluationAllowsEmptyPlatformSdkQueries(
+            string method)
+        {
+            _ = Evaluate(
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Value>$([Microsoft.Build.Utilities.ToolLocationHelper]::{method}('', ''))</Value>
+                  </PropertyGroup>
+                </Project>
+                """,
+                ProjectEvaluationMode.Pure);
         }
 
         [Fact]

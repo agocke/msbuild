@@ -26,7 +26,7 @@ namespace Microsoft.Build.Evaluation
     /// <typeparam name="D">The type of item definitions to be produced.</typeparam>
     internal class PropertyTrackingEvaluatorDataWrapper<P, I, M, D> : IEvaluatorData<P, I, M, D>
         where P : class, IProperty, IEquatable<P>, IValued
-        where I : class, IItem
+        where I : class, IItem<M>
         where M : class, IMetadatum
         where D : class, IItemDefinition<M>
     {
@@ -34,6 +34,7 @@ namespace Microsoft.Build.Evaluation
         private readonly HashSet<string> _overwrittenEnvironmentVariables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly EvaluationLoggingContext _evaluationLoggingContext;
         private readonly PropertyTrackingSetting _settings;
+        private readonly ModuleEvaluationReadTracker? _moduleEvaluationReadTracker;
 
         /// <summary>
         /// Creates an instance of the PropertyTrackingEvaluatorDataWrapper class.
@@ -41,7 +42,12 @@ namespace Microsoft.Build.Evaluation
         /// <param name="dataToWrap">The underlying <see cref="IEvaluatorData{P,I,M,D}"/> to wrap for property tracking.</param>
         /// <param name="evaluationLoggingContext">The <see cref="EvaluationLoggingContext"/> used to log relevant events.</param>
         /// <param name="settingValue">Property tracking setting value</param>
-        public PropertyTrackingEvaluatorDataWrapper(IEvaluatorData<P, I, M, D> dataToWrap, EvaluationLoggingContext evaluationLoggingContext, int settingValue)
+        /// <param name="moduleEvaluationReadTracker">Optional tracker for module evaluation sharing measurements.</param>
+        public PropertyTrackingEvaluatorDataWrapper(
+            IEvaluatorData<P, I, M, D> dataToWrap,
+            EvaluationLoggingContext evaluationLoggingContext,
+            int settingValue,
+            ModuleEvaluationReadTracker? moduleEvaluationReadTracker = null)
         {
             Assumed.NotNull(dataToWrap);
             Assumed.NotNull(evaluationLoggingContext);
@@ -49,6 +55,7 @@ namespace Microsoft.Build.Evaluation
             _wrapped = dataToWrap;
             _evaluationLoggingContext = evaluationLoggingContext;
             _settings = (PropertyTrackingSetting)settingValue;
+            _moduleEvaluationReadTracker = moduleEvaluationReadTracker;
         }
 
         #region IEvaluatorData<> members with tracking-related code in them.
@@ -61,6 +68,7 @@ namespace Microsoft.Build.Evaluation
         public P GetProperty(string name)
         {
             P prop = _wrapped.GetProperty(name);
+            _moduleEvaluationReadTracker?.RecordPropertyRead(name, prop);
             if (IsPropertyReadTrackingRequested)
             {
                 this.TrackPropertyRead(name, prop);
@@ -76,6 +84,9 @@ namespace Microsoft.Build.Evaluation
         public P GetProperty(string name, int startIndex, int endIndex)
         {
             P prop = _wrapped.GetProperty(name, startIndex, endIndex);
+            _moduleEvaluationReadTracker?.RecordPropertyRead(
+                name.Substring(startIndex, endIndex - startIndex + 1),
+                prop);
             if (IsPropertyReadTrackingRequested)
             {
                 this.TrackPropertyRead(name.Substring(startIndex, endIndex - startIndex + 1), prop);
@@ -134,7 +145,12 @@ namespace Microsoft.Build.Evaluation
         #endregion
 
         #region IEvaluatorData<> members that are forwarded directly to wrapped object.
-        public ICollection<I> GetItems(string itemType) => _wrapped.GetItems(itemType);
+        public ICollection<I> GetItems(string itemType)
+        {
+            ICollection<I> items = _wrapped.GetItems(itemType);
+            _moduleEvaluationReadTracker?.RecordItems<I, M>(itemType, items);
+            return items;
+        }
         public int EvaluationId { get => _wrapped.EvaluationId; set => _wrapped.EvaluationId = value; }
         public string Directory => _wrapped.Directory;
         public TaskRegistry TaskRegistry { get => _wrapped.TaskRegistry; set => _wrapped.TaskRegistry = value; }

@@ -77,6 +77,12 @@ namespace Microsoft.Build.BackEnd.SdkResolution
 
         public Construction.ElementLocation ElementLocation { get; set; }
 
+        internal string ResolverName { get; set; }
+
+        internal string ResolverIdentity { get; set; }
+
+        internal bool IsMissingFromLock { get; set; }
+
         public IEnumerable<string> Errors { get; }
 
         public IEnumerable<string> Warnings { get; }

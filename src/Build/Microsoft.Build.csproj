@@ -207,6 +207,9 @@
     <Compile Include="Evaluation\IItemTypeDefinition.cs" />
     <Compile Include="Evaluation\IntrinsicFunctionOverload.cs" />
     <Compile Include="Evaluation\PropertiesUseTracker.cs" />
+    <Compile Include="Evaluation\EvaluationModule.cs" />
+    <Compile Include="Evaluation\EvaluationPerformanceInstrumentation.cs" />
+    <Compile Include="Evaluation\ModuleEvaluationSharingMetrics.cs" />
     <Compile Include="Evaluation\PropertyFunctionReceiver.cs" />
     <Compile Include="Evaluation\ToolsetElement.cs" />
     <Compile Include="FileAccess\DesiredAccess.cs" />
@@ -300,6 +303,8 @@
     <Compile Include="BackEnd\Components\SdkResolution\OutOfProcNodeSdkResolverServiceFactory.cs" />
     <Compile Include="BackEnd\Components\SdkResolution\SdkLogger.cs" />
     <Compile Include="BackEnd\Components\SdkResolution\CachingSdkResolverService.cs" />
+    <Compile Include="BackEnd\Components\SdkResolution\LockedSdkResolverService.cs" />
+    <Compile Include="BackEnd\Components\SdkResolution\RecordingSdkResolverService.cs" />
     <Compile Include="BackEnd\Components\SdkResolution\SdkResolverContext.cs" />
     <Compile Include="BackEnd\Components\SdkResolution\SdkResolverLoader.cs" />
     <Compile Include="BackEnd\Components\SdkResolution\SdkResolverManifest.cs" />
@@ -322,6 +327,8 @@
     <Compile Include="Definition\ToolsetLocalReader.cs" />
     <Compile Include="Evaluation\Context\EvaluationContext.cs" />
     <Compile Include="Definition\ProjectEvaluationMode.cs" />
+    <Compile Include="Definition\SdkResolutionLock.cs" />
+    <Compile Include="Definition\SdkResolutionLockBuilder.cs" />
     <Compile Include="Evaluation\Profiler\EvaluationLocationMarkdownPrettyPrinter.cs" />
     <Compile Include="Evaluation\Profiler\EvaluationLocationPrettyPrinterBase.cs" />
     <Compile Include="Evaluation\Profiler\EvaluationLocationTabSeparatedPrettyPrinter.cs" />

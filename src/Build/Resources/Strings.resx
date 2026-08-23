@@ -650,6 +650,13 @@
   <data name="EvaluationModeDoesNotMatchContext" xml:space="preserve">
     <value>The evaluation mode specified by ProjectOptions does not match the supplied EvaluationContext.</value>
   </data>
+  <data name="EvaluationContextDoesNotSupportCustomProjectInstanceFactory" xml:space="preserve">
+    <value>A ProjectGraph EvaluationContext cannot be combined with a custom project instance factory.</value>
+  </data>
+  <data name="PureEvaluationSdkNotInLock" xml:space="preserve">
+    <value>MSB4287: Pure evaluation cannot resolve SDK "{0}" for project "{1}" because the request is absent from the SDK resolution lock. Run SDK acquisition first and supply the resulting lock.</value>
+    <comment>{StrBegin="MSB4287: "}{0} is the SDK reference and {1} is the project path.</comment>
+  </data>
   <data name="PureEvaluationDoesNotSupportCustomProjectInstanceFactory" xml:space="preserve">
     <value>Pure evaluation cannot be combined with a custom ProjectInstance factory because MSBuild cannot enforce the evaluation policy inside the callback.</value>
   </data>

@@ -556,6 +556,11 @@
         <target state="translated">MSB4258: произошла ошибка при записи выходного файла кэша результатов в пути "{0}": {1}</target>
         <note />
       </trans-unit>
+      <trans-unit id="EvaluationContextDoesNotSupportCustomProjectInstanceFactory">
+        <source>A ProjectGraph EvaluationContext cannot be combined with a custom project instance factory.</source>
+        <target state="new">A ProjectGraph EvaluationContext cannot be combined with a custom project instance factory.</target>
+        <note />
+      </trans-unit>
       <trans-unit id="EvaluationModeDoesNotMatchContext">
         <source>The evaluation mode specified by ProjectOptions does not match the supplied EvaluationContext.</source>
         <target state="new">The evaluation mode specified by ProjectOptions does not match the supplied EvaluationContext.</target>
@@ -952,6 +957,11 @@
         <source>Pure evaluation cannot be combined with a custom ProjectInstance factory because MSBuild cannot enforce the evaluation policy inside the callback.</source>
         <target state="new">Pure evaluation cannot be combined with a custom ProjectInstance factory because MSBuild cannot enforce the evaluation policy inside the callback.</target>
         <note />
+      </trans-unit>
+      <trans-unit id="PureEvaluationSdkNotInLock">
+        <source>MSB4287: Pure evaluation cannot resolve SDK "{0}" for project "{1}" because the request is absent from the SDK resolution lock. Run SDK acquisition first and supply the resulting lock.</source>
+        <target state="new">MSB4287: Pure evaluation cannot resolve SDK "{0}" for project "{1}" because the request is absent from the SDK resolution lock. Run SDK acquisition first and supply the resulting lock.</target>
+        <note>{StrBegin="MSB4287: "}{0} is the SDK reference and {1} is the project path.</note>
       </trans-unit>
       <trans-unit id="ReflectiveLoggerLoadingNotSupported">
         <source>MSB4285: A logger could not be created from its assembly and class name because loading loggers by reflection is not supported in this trimmed or Native AOT host. Provide the logger to the engine as a constructed ILogger instance, or build with a JIT-based MSBuild.</source>

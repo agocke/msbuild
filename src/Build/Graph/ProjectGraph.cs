@@ -421,12 +421,12 @@ namespace Microsoft.Build.Graph
             int degreeOfParallelism,
             CancellationToken cancellationToken)
             : this(new ProjectGraphOptions
-                    {
-                        EntryPoints = entryPoints,
-                        ProjectCollection = projectCollection,
-                        ProjectInstanceFactoryFunc = projectInstanceFactory,
-                        DegreeOfParallelism = degreeOfParallelism
-                    },
+            {
+                EntryPoints = entryPoints,
+                ProjectCollection = projectCollection,
+                ProjectInstanceFactoryFunc = projectInstanceFactory,
+                DegreeOfParallelism = degreeOfParallelism
+            },
                   cancellationToken)
         {
         }
@@ -452,6 +452,22 @@ namespace Microsoft.Build.Graph
             {
                 throw new ArgumentOutOfRangeException(nameof(options.EvaluationMode), options.EvaluationMode, null);
             }
+
+            if (options.EvaluationContext is not null &&
+                options.EvaluationContext.EvaluationMode != options.EvaluationMode)
+            {
+                throw new ArgumentException(
+                    AssemblyResources.GetString("EvaluationModeDoesNotMatchContext"),
+                    nameof(options));
+            }
+
+            if (options.EvaluationContext is not null &&
+                options.ProjectInstanceFactoryFunc is not null)
+            {
+                throw new ArgumentException(
+                    AssemblyResources.GetString("EvaluationContextDoesNotSupportCustomProjectInstanceFactory"),
+                    nameof(options));
+            }
             if (options.EvaluationMode != ProjectEvaluationMode.Classic && options.ProjectInstanceFactoryFunc != null)
             {
                 throw new ArgumentException(
@@ -465,7 +481,10 @@ namespace Microsoft.Build.Graph
 
             if (projectInstanceFactory is null)
             {
-                _evaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared, options.EvaluationMode);
+                _evaluationContext = options.EvaluationContext ??
+                    EvaluationContext.Create(
+                        EvaluationContext.SharingPolicy.Shared,
+                        options.EvaluationMode);
                 projectInstanceFactory = DefaultProjectInstanceFactory;
             }
 

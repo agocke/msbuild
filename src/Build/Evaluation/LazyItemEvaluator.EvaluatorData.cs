@@ -23,11 +23,16 @@ namespace Microsoft.Build.Evaluation
         {
             private readonly IEvaluatorData<P, I, M, D> _wrappedData;
             private readonly IReadOnlyDictionary<string, LazyItemList> _itemsByType;
+            private readonly ModuleEvaluationReadTracker _moduleEvaluationReadTracker;
 
-            public EvaluatorData(IEvaluatorData<P, I, M, D> wrappedData, IReadOnlyDictionary<string, LazyItemList> itemsByType)
+            public EvaluatorData(
+                IEvaluatorData<P, I, M, D> wrappedData,
+                IReadOnlyDictionary<string, LazyItemList> itemsByType,
+                ModuleEvaluationReadTracker moduleEvaluationReadTracker)
             {
                 _wrappedData = wrappedData;
                 _itemsByType = itemsByType;
+                _moduleEvaluationReadTracker = moduleEvaluationReadTracker;
             }
 
             public IItemDictionary<I> Items => throw new NotImplementedException();
@@ -36,9 +41,11 @@ namespace Microsoft.Build.Evaluation
 
             public ICollection<I> GetItems(string itemType)
             {
-                return _itemsByType.TryGetValue(itemType, out LazyItemList items)
+                ICollection<I> result = _itemsByType.TryGetValue(itemType, out LazyItemList items)
                     ? items.GetMatchedItems(globsToIgnore: ImmutableHashSet<string>.Empty)
                     : Array.Empty<I>();
+                _moduleEvaluationReadTracker?.RecordItems<I, M>(itemType, result);
+                return result;
             }
 
             public IDictionary<string, List<TargetSpecification>> AfterTargets

@@ -44,7 +44,10 @@ namespace Microsoft.Build.Evaluation
 
                 _lazyEvaluator = lazyEvaluator;
 
-                _evaluatorData = new EvaluatorData(_lazyEvaluator._outerEvaluatorData, _referencedItemLists);
+                _evaluatorData = new EvaluatorData(
+                    _lazyEvaluator._outerEvaluatorData,
+                    _referencedItemLists,
+                    _lazyEvaluator._moduleEvaluationReadTracker);
                 _itemFactory = new ItemFactoryWrapper(_itemElement, _lazyEvaluator._itemFactory);
                 _expander = new Expander<P, I>(_evaluatorData, _evaluatorData, _lazyEvaluator.EvaluationContext, _lazyEvaluator._loggingContext);
 
@@ -56,8 +59,18 @@ namespace Microsoft.Build.Evaluation
             public void Apply(OrderedItemDataCollection.Builder listBuilder, ImmutableHashSet<string> globsToIgnore)
             {
                 MSBuildEventSource.Log.ApplyLazyItemOperationsStart(_itemElement.ItemType);
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric
+                               .LazyItemOperationApplication))
                 using (_lazyEvaluator._evaluationProfiler.TrackElement(_itemElement))
+                using (_lazyEvaluator._moduleEvaluationReadTracker.Track(
+                           _itemElement,
+                           "ItemOperationApplication",
+                           _itemElement.ItemType))
                 {
+                    _lazyEvaluator._moduleEvaluationReadTracker.RecordItems<I, M>(
+                        _itemElement.ItemType,
+                        listBuilder.Select(itemData => itemData.Item).ToArray());
                     ApplyImpl(listBuilder, globsToIgnore);
                 }
                 MSBuildEventSource.Log.ApplyLazyItemOperationsStop(_itemElement.ItemType);
@@ -161,9 +174,12 @@ namespace Microsoft.Build.Evaluation
                 }
             }
 
-            protected void DecorateItemsWithMetadata(IEnumerable<ItemBatchingContext> itemBatchingContexts, ImmutableArray<ProjectMetadataElement> metadata, bool? needToExpandMetadata = null)
+            protected void DecorateItemsWithMetadata(
+                IEnumerable<ItemBatchingContext> itemBatchingContexts,
+                DeferredMetadata metadata,
+                bool? needToExpandMetadata = null)
             {
-                if (metadata.Length > 0)
+                if (metadata.Count > 0)
                 {
                     ////////////////////////////////////////////////////
                     // UNDONE: Implement batching here.
@@ -202,16 +218,32 @@ namespace Microsoft.Build.Evaluation
                         {
                             _expander.Metadata = itemContext.GetMetadataTable();
 
-                            foreach (var metadataElement in metadata)
+                            for (int i = 0; i < metadata.Count; i++)
                             {
-                                if (!EvaluateCondition(metadataElement.Condition, metadataElement, metadataExpansionOptions, ParserOptions.AllowAll, _expander, _lazyEvaluator))
+                                ProjectMetadataElement metadataElement =
+                                    metadata.GetElement(i);
+                                if (!EvaluateCondition(
+                                        metadata.GetCondition(i),
+                                        metadataElement,
+                                        metadataExpansionOptions,
+                                        ParserOptions.AllowAll,
+                                        _expander,
+                                        _lazyEvaluator))
                                 {
                                     continue;
                                 }
 
-                                string evaluatedValue = _expander.ExpandIntoStringLeaveEscaped(metadataElement.Value, metadataExpansionOptions, metadataElement.Location);
+                                string evaluatedValue =
+                                    _expander.ExpandIntoStringLeaveEscaped(
+                                        metadata.GetValue(i),
+                                        metadataExpansionOptions,
+                                        metadataElement.Location);
 
-                                itemContext.OperationItem.SetMetadata(metadataElement, FileUtilities.MaybeAdjustFilePath(evaluatedValue, metadataElement.ContainingProject.DirectoryPath));
+                                itemContext.OperationItem.SetMetadata(
+                                    metadataElement,
+                                    FileUtilities.MaybeAdjustFilePath(
+                                        evaluatedValue,
+                                        metadata.GetDirectory(i)));
                             }
                         }
 
@@ -225,19 +257,25 @@ namespace Microsoft.Build.Evaluation
                     {
                         // Metadata expressions are allowed here.
                         // Temporarily gather and expand these in a table so they can reference other metadata elements above.
-                        EvaluatorMetadataTable metadataTable = new EvaluatorMetadataTable(_itemType, capacity: metadata.Length);
+                        EvaluatorMetadataTable metadataTable =
+                            new EvaluatorMetadataTable(
+                                _itemType,
+                                capacity: metadata.Count);
                         _expander.Metadata = metadataTable;
 
                         // Also keep a list of everything so we can get the predecessor objects correct.
-                        List<KeyValuePair<ProjectMetadataElement, string>> metadataList = new(metadata.Length);
+                        List<KeyValuePair<ProjectMetadataElement, string>>
+                            metadataList = new(metadata.Count);
 
-                        foreach (var metadataElement in metadata)
+                        for (int i = 0; i < metadata.Count; i++)
                         {
+                            ProjectMetadataElement metadataElement =
+                                metadata.GetElement(i);
                             // Because of the checking above, it should be safe to expand metadata in conditions; the condition
                             // will be true for either all the items or none
                             if (
                                 !EvaluateCondition(
-                                    metadataElement.Condition,
+                                    metadata.GetCondition(i),
                                     metadataElement,
                                     metadataExpansionOptions,
                                     ParserOptions.AllowAll,
@@ -247,8 +285,14 @@ namespace Microsoft.Build.Evaluation
                                 continue;
                             }
 
-                            string evaluatedValue = _expander.ExpandIntoStringLeaveEscaped(metadataElement.Value, metadataExpansionOptions, metadataElement.Location);
-                            evaluatedValue = FileUtilities.MaybeAdjustFilePath(evaluatedValue, metadataElement.ContainingProject.DirectoryPath);
+                            string evaluatedValue =
+                                _expander.ExpandIntoStringLeaveEscaped(
+                                    metadata.GetValue(i),
+                                    metadataExpansionOptions,
+                                    metadataElement.Location);
+                            evaluatedValue = FileUtilities.MaybeAdjustFilePath(
+                                evaluatedValue,
+                                metadata.GetDirectory(i));
 
                             metadataTable.SetValue(metadataElement, evaluatedValue);
                             metadataList.Add(new KeyValuePair<ProjectMetadataElement, string>(metadataElement, evaluatedValue));
@@ -269,16 +313,18 @@ namespace Microsoft.Build.Evaluation
                 }
             }
 
-            protected bool NeedToExpandMetadataForEachItem(ImmutableArray<ProjectMetadataElement> metadata, out ItemsAndMetadataPair itemsAndMetadataFound)
+            protected bool NeedToExpandMetadataForEachItem(
+                DeferredMetadata metadata,
+                out ItemsAndMetadataPair itemsAndMetadataFound)
             {
                 itemsAndMetadataFound = new ItemsAndMetadataPair(null, null);
 
-                foreach (var metadataElement in metadata)
+                for (int i = 0; i < metadata.Count; i++)
                 {
-                    string expression = metadataElement.Value;
+                    string expression = metadata.GetValue(i);
                     ExpressionShredder.GetReferencedItemNamesAndMetadata(expression, 0, expression.Length, ref itemsAndMetadataFound, ShredderOptions.All);
 
-                    expression = metadataElement.Condition;
+                    expression = metadata.GetCondition(i);
                     ExpressionShredder.GetReferencedItemNamesAndMetadata(expression, 0, expression.Length, ref itemsAndMetadataFound, ShredderOptions.All);
                 }
 

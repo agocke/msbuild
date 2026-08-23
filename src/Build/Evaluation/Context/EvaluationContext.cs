@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Threading;
 using Microsoft.Build.BackEnd.SdkResolution;
 using Microsoft.Build.FileSystem;
+using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
 
@@ -59,6 +60,10 @@ namespace Microsoft.Build.Evaluation.Context
         internal ISdkResolverService SdkResolverService { get; }
         internal IFileSystem FileSystem { get; }
         internal FileMatcher FileMatcher { get; }
+        internal ModuleEvaluationSharingCollector ModuleEvaluationSharingCollector { get; }
+        internal EvaluationModuleCache EvaluationModuleCache { get; }
+        internal PropertyAssignmentReplayCache PropertyAssignmentReplayCache { get; }
+        internal ConditionReplayCache ConditionReplayCache { get; }
 
         /// <summary>
         /// Key to file entry list. Example usages: cache glob expansion and intermediary directory expansions during glob expansion.
@@ -66,15 +71,26 @@ namespace Microsoft.Build.Evaluation.Context
         private ConcurrentDictionary<string, IReadOnlyList<string>> FileEntryExpansionCache { get; }
 
         private EvaluationContext(SharingPolicy policy, ProjectEvaluationMode evaluationMode, IFileSystem fileSystem, ISdkResolverService sdkResolverService = null,
-            ConcurrentDictionary<string, IReadOnlyList<string>> fileEntryExpansionCache = null)
+            ConcurrentDictionary<string, IReadOnlyList<string>> fileEntryExpansionCache = null,
+            ModuleEvaluationSharingCollector moduleEvaluationSharingCollector = null,
+            EvaluationModuleCache evaluationModuleCache = null,
+            PropertyAssignmentReplayCache propertyAssignmentReplayCache = null,
+            ConditionReplayCache conditionReplayCache = null)
         {
             Policy = policy;
             EvaluationMode = evaluationMode;
 
-            SdkResolverService = sdkResolverService ?? new CachingSdkResolverService();
+            SdkResolverService = sdkResolverService ??
+                (evaluationMode == ProjectEvaluationMode.Pure
+                    ? new LockedSdkResolverService(SdkResolutionLock.Empty)
+                    : new CachingSdkResolverService());
             FileEntryExpansionCache = fileEntryExpansionCache ?? new ConcurrentDictionary<string, IReadOnlyList<string>>();
             FileSystem = fileSystem ?? new CachingFileSystemWrapper(FileSystems.Default);
             FileMatcher = new FileMatcher(FileSystem, FileEntryExpansionCache);
+            ModuleEvaluationSharingCollector = moduleEvaluationSharingCollector;
+            EvaluationModuleCache = evaluationModuleCache;
+            PropertyAssignmentReplayCache = propertyAssignmentReplayCache;
+            ConditionReplayCache = conditionReplayCache;
         }
 
         /// <summary>
@@ -93,6 +109,28 @@ namespace Microsoft.Build.Evaluation.Context
         public static EvaluationContext Create(SharingPolicy policy, ProjectEvaluationMode evaluationMode)
         {
             return Create(policy, evaluationMode, fileSystem: null);
+        }
+
+        /// <summary>
+        /// Creates an evaluation context that resolves SDKs exclusively from an immutable lock.
+        /// </summary>
+        public static EvaluationContext CreateForLockedSdkResolution(
+            SharingPolicy policy,
+            SdkResolutionLock sdkResolutionLock)
+        {
+            ArgumentNullException.ThrowIfNull(sdkResolutionLock);
+            if (!Enum.IsDefined(typeof(SharingPolicy), policy))
+            {
+                throw new ArgumentOutOfRangeException(nameof(policy), policy, null);
+            }
+
+            var context = new EvaluationContext(
+                policy,
+                ProjectEvaluationMode.Pure,
+                fileSystem: null,
+                new LockedSdkResolverService(sdkResolutionLock));
+            TestOnlyHookOnCreate?.Invoke(context);
+            return context;
         }
 
         /// <summary>
@@ -128,11 +166,104 @@ namespace Microsoft.Build.Evaluation.Context
             var context = new EvaluationContext(
                 policy,
                 evaluationMode,
-                fileSystem);
+                fileSystem,
+                evaluationModuleCache:
+                    policy == SharingPolicy.Shared &&
+                    Traits.Instance.EnableCompiledModuleEvaluation
+                        ? new EvaluationModuleCache()
+                        : null);
 
             TestOnlyHookOnCreate?.Invoke(context);
 
             return context;
+        }
+
+        /// <summary>
+        /// Creates a shared evaluation context that measures observed-input variants for
+        /// individual evaluation operations.
+        /// </summary>
+        public static EvaluationContext CreateForModuleEvaluationSharingMeasurement(
+            ProjectEvaluationMode evaluationMode = ProjectEvaluationMode.Classic)
+        {
+            ErrorUtilities.VerifyThrowArgument(
+                Enum.IsDefined(typeof(ProjectEvaluationMode), evaluationMode),
+                "InvalidProjectEvaluationMode",
+                evaluationMode);
+
+            var context = new EvaluationContext(
+                SharingPolicy.Shared,
+                evaluationMode,
+                fileSystem: null,
+                moduleEvaluationSharingCollector: new ModuleEvaluationSharingCollector());
+            TestOnlyHookOnCreate?.Invoke(context);
+            return context;
+        }
+
+        internal static EvaluationContext CreateForCompiledModuleEvaluation(
+            ProjectEvaluationMode evaluationMode)
+        {
+            ErrorUtilities.VerifyThrowArgument(
+                Enum.IsDefined(typeof(ProjectEvaluationMode), evaluationMode),
+                "InvalidProjectEvaluationMode",
+                evaluationMode);
+
+            var context = new EvaluationContext(
+                SharingPolicy.Shared,
+                evaluationMode,
+                fileSystem: null,
+                moduleEvaluationSharingCollector:
+                    new ModuleEvaluationSharingCollector(),
+                evaluationModuleCache: new EvaluationModuleCache());
+            TestOnlyHookOnCreate?.Invoke(context);
+            return context;
+        }
+
+        /// <summary>
+        /// Creates a pure, shared evaluation context that reuses supported module
+        /// evaluation operations within the context's lifetime.
+        /// </summary>
+        public static EvaluationContext CreateForModuleEvaluationSharing()
+        {
+            return CreateForModuleEvaluationSharing(SdkResolutionLock.Empty);
+        }
+
+        /// <summary>
+        /// Creates a pure, shared evaluation context that reuses supported module
+        /// evaluation operations and resolves SDKs exclusively from an immutable lock.
+        /// </summary>
+        public static EvaluationContext CreateForModuleEvaluationSharing(
+            SdkResolutionLock sdkResolutionLock)
+        {
+            ArgumentNullException.ThrowIfNull(sdkResolutionLock);
+            var context = new EvaluationContext(
+                SharingPolicy.Shared,
+                ProjectEvaluationMode.Pure,
+                fileSystem: null,
+                new LockedSdkResolverService(sdkResolutionLock),
+                moduleEvaluationSharingCollector:
+                    new ModuleEvaluationSharingCollector(),
+                evaluationModuleCache: new EvaluationModuleCache(),
+                propertyAssignmentReplayCache:
+                    new PropertyAssignmentReplayCache(),
+                conditionReplayCache:
+                    new ConditionReplayCache());
+            TestOnlyHookOnCreate?.Invoke(context);
+            return context;
+        }
+
+        /// <summary>
+        /// Creates an immutable snapshot of module evaluation sharing measurements.
+        /// </summary>
+        public ModuleEvaluationSharingMetrics GetModuleEvaluationSharingMetrics()
+        {
+            if (ModuleEvaluationSharingCollector is null)
+            {
+                throw new InvalidOperationException(
+                    "This evaluation context was not created for module evaluation sharing measurement.");
+            }
+
+            return ModuleEvaluationSharingCollector.CreateSnapshot(
+                EvaluationModuleCache);
         }
 
         internal EvaluationContext ContextForNewProject()
@@ -150,7 +281,19 @@ namespace Microsoft.Build.Evaluation.Context
                         return this;
                     }
                     // Create a copy if this context has already been used. Mark it used.
-                    EvaluationContext context = new EvaluationContext(Policy, EvaluationMode, fileSystem: null, sdkResolverService: Policy == SharingPolicy.SharedSDKCache ? SdkResolverService : null)
+                    EvaluationContext context = new EvaluationContext(
+                        Policy,
+                        EvaluationMode,
+                        fileSystem: null,
+                        sdkResolverService:
+                            Policy == SharingPolicy.SharedSDKCache ||
+                            EvaluationMode == ProjectEvaluationMode.Pure
+                                ? SdkResolverService
+                                : null,
+                        moduleEvaluationSharingCollector: ModuleEvaluationSharingCollector,
+                        evaluationModuleCache: EvaluationModuleCache,
+                        propertyAssignmentReplayCache: PropertyAssignmentReplayCache,
+                        conditionReplayCache: ConditionReplayCache)
                     {
                         _used = 1,
                     };
@@ -169,10 +312,31 @@ namespace Microsoft.Build.Evaluation.Context
         /// <returns>The new evaluation context.</returns>
         internal EvaluationContext ContextWithFileSystem(IFileSystem fileSystem)
         {
-            return new EvaluationContext(Policy, EvaluationMode, fileSystem, SdkResolverService, FileEntryExpansionCache)
+            return new EvaluationContext(
+                Policy,
+                EvaluationMode,
+                fileSystem,
+                SdkResolverService,
+                FileEntryExpansionCache,
+                ModuleEvaluationSharingCollector,
+                EvaluationModuleCache,
+                PropertyAssignmentReplayCache,
+                ConditionReplayCache)
             {
                 _used = 1,
             };
+        }
+
+        internal static EvaluationContext CreateForSdkResolutionAcquisition(
+            RecordingSdkResolverService resolverService)
+        {
+            var context = new EvaluationContext(
+                SharingPolicy.Shared,
+                ProjectEvaluationMode.Pure,
+                fileSystem: null,
+                resolverService);
+            TestOnlyHookOnCreate?.Invoke(context);
+            return context;
         }
     }
 }

@@ -175,7 +175,7 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             List<SdkResolverManifest> matchingResolversManifests = new();
             foreach (SdkResolverManifest manifest in _specificResolversManifestsRegistry)
             {
-                WaitIfTestRequires(); 
+                WaitIfTestRequires();
                 try
                 {
                     if (manifest.ResolvableSdkRegex.IsMatch(sdk.Name))
@@ -263,7 +263,7 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             LogWarnings(loggingContext, sdkReferenceLocation, warnings);
 
             // No resolvers resolved the sdk.
-            return new SdkResult(sdk, null, null);
+            return new SdkResult(sdk, errors, warnings);
         }
 
         private List<SdkResolver> GetResolvers(IReadOnlyList<SdkResolverManifest> resolversManifests, LoggingContext loggingContext, ElementLocation sdkReferenceLocation, SdkReference sdk)
@@ -388,6 +388,9 @@ namespace Microsoft.Build.BackEnd.SdkResolution
 
                     // Associate the element location of the resolved SDK reference
                     result.ElementLocation = sdkReferenceLocation;
+                    result.ResolverName = sdkResolver.Name;
+                    result.ResolverIdentity =
+                        $"{sdkResolver.Name}|{sdkResolver.GetType().AssemblyQualifiedName}";
 
                     sdkResult = result;
                     return true;
@@ -450,7 +453,7 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             }
         }
 
-        private static void LogWarnings(LoggingContext loggingContext, ElementLocation location, IEnumerable<string> warnings)
+        internal static void LogWarnings(LoggingContext loggingContext, ElementLocation location, IEnumerable<string> warnings)
         {
             if (warnings == null)
             {

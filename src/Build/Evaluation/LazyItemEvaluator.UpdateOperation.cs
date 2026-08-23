@@ -5,7 +5,6 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
-using Microsoft.Build.Construction;
 using Microsoft.Build.Framework;
 
 #nullable disable
@@ -16,7 +15,7 @@ namespace Microsoft.Build.Evaluation
     {
         private class UpdateOperation : LazyItemOperation
         {
-            private readonly ImmutableArray<ProjectMetadataElement> _metadata;
+            private readonly DeferredMetadata _metadata;
             private ImmutableList<ItemBatchingContext>.Builder _itemsToUpdate = null;
             private ItemSpecMatchesItem _matchItemSpec = null;
             private bool? _needToExpandMetadataForEachItem = null;
@@ -24,7 +23,7 @@ namespace Microsoft.Build.Evaluation
             public UpdateOperation(OperationBuilderWithMetadata builder, LazyItemEvaluator<P, I, M, D> lazyEvaluator)
                 : base(builder, lazyEvaluator)
             {
-                _metadata = builder.Metadata.ToImmutable();
+                _metadata = builder.ToMetadata();
             }
 
             private readonly struct MatchResult
@@ -147,7 +146,9 @@ namespace Microsoft.Build.Evaluation
                 }
             }
 
-            private bool QualifiedMetadataReferencesExist(ImmutableArray<ProjectMetadataElement> metadata, out bool? needToExpandMetadataForEachItem)
+            private bool QualifiedMetadataReferencesExist(
+                DeferredMetadata metadata,
+                out bool? needToExpandMetadataForEachItem)
             {
                 needToExpandMetadataForEachItem = NeedToExpandMetadataForEachItem(metadata, out var itemsAndMetadataFound);
 

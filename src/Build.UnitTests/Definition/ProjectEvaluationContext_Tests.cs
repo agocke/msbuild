@@ -11,8 +11,10 @@ using Microsoft.Build.Construction;
 using Microsoft.Build.Definition;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Evaluation.Context;
+using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Graph;
 using Microsoft.Build.Shared.FileSystem;
 using Microsoft.Build.Unittest;
 using Shouldly;
@@ -91,6 +93,26 @@ namespace Microsoft.Build.UnitTests.Definition
 
                 previousContext = currentContext;
             }
+        }
+
+        [Theory]
+        [InlineData(EvaluationContext.SharingPolicy.Shared, true)]
+        [InlineData(EvaluationContext.SharingPolicy.SharedSDKCache, false)]
+        [InlineData(EvaluationContext.SharingPolicy.Isolated, false)]
+        public void CompiledModuleEvaluationOptInOnlyAffectsSharedContexts(
+            EvaluationContext.SharingPolicy policy,
+            bool expectModuleCache)
+        {
+            _env.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEvaluationEnvVarName,
+                "1");
+
+            EvaluationContext context = EvaluationContext.Create(policy);
+
+            (context.EvaluationModuleCache is not null)
+                .ShouldBe(expectModuleCache);
+            context.PropertyAssignmentReplayCache.ShouldBeNull();
+            context.ConditionReplayCache.ShouldBeNull();
         }
 
         [Fact]
@@ -296,6 +318,241 @@ namespace Microsoft.Build.UnitTests.Definition
             {
                 EvaluationContext.TestOnlyHookOnCreate = null;
             }
+        }
+
+        [Fact]
+        public void SdkResolutionAcquisitionCanBeReplayedByPureEvaluation()
+        {
+            string sdkDirectory = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "locked-sdk");
+            Directory.CreateDirectory(sdkDirectory);
+            File.WriteAllText(
+                Path.Combine(sdkDirectory, "Sdk.props"),
+                "<Project><PropertyGroup><ImportedFromLockedSdk>true</ImportedFromLockedSdk></PropertyGroup></Project>");
+            File.WriteAllText(
+                Path.Combine(sdkDirectory, "Sdk.targets"),
+                "<Project />");
+            string projectPath = _env.CreateFile(
+                "locked.proj",
+                "<Project Sdk=\"locked\"><PropertyGroup><Observed>$(ResolverProperty)</Observed></PropertyGroup></Project>").Path;
+
+            var resolver = new SdkUtilities.ConfigurableMockSdkResolver(
+                new SdkResult(
+                    new SdkReference("locked", "1.0.0", null),
+                    sdkDirectory,
+                    "1.0.0",
+                    warnings: null,
+                    propertiesToAdd: new Dictionary<string, string>
+                    {
+                        ["ResolverProperty"] = "from-lock",
+                    }));
+            var resolverService = new SdkResolverService();
+            resolverService.InitializeForTests(
+                resolverLoader: null,
+                resolvers: [resolver]);
+            var lockBuilder = new SdkResolutionLockBuilder(resolverService);
+
+            ProjectCollection acquisitionCollection =
+                _env.CreateProjectCollection().Collection;
+            Project acquired = Project.FromFile(
+                projectPath,
+                new ProjectOptions
+                {
+                    ProjectCollection = acquisitionCollection,
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    EvaluationContext = lockBuilder.CreateEvaluationContext(),
+                });
+
+            acquired.GetPropertyValue("Observed").ShouldBe("from-lock");
+
+            SdkResolutionLock sdkLock = lockBuilder.Build();
+            sdkLock.Entries.Count.ShouldBe(1);
+            sdkLock.Entries[0].ResolverName.ShouldBe(
+                nameof(SdkUtilities.ConfigurableMockSdkResolver));
+            sdkLock.Entries[0].ResolverIdentity.ShouldContain(
+                typeof(SdkUtilities.ConfigurableMockSdkResolver).FullName);
+            sdkLock.Identity.ShouldNotBeNullOrEmpty();
+            lockBuilder.Build().Identity.ShouldBe(sdkLock.Identity);
+            int acquisitionCalls = resolver.ResolvedCalls["locked"];
+
+            ProjectCollection pureCollection =
+                _env.CreateProjectCollection().Collection;
+            Project pure = Project.FromFile(
+                projectPath,
+                new ProjectOptions
+                {
+                    ProjectCollection = pureCollection,
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    EvaluationContext =
+                        EvaluationContext.CreateForLockedSdkResolution(
+                        EvaluationContext.SharingPolicy.Shared,
+                        sdkLock),
+                });
+
+            pure.GetPropertyValue("Observed").ShouldBe("from-lock");
+            pure.GetPropertyValue("ImportedFromLockedSdk").ShouldBe("true");
+            resolver.ResolvedCalls["locked"].ShouldBe(acquisitionCalls);
+        }
+
+        [Fact]
+        public void SdkAcquisitionUsesPureEvaluationSemantics()
+        {
+            string projectPath = _env.CreateFile(
+                "impure-acquisition.proj",
+                "<Project><PropertyGroup><Value>$([System.DateTime]::UtcNow)</Value></PropertyGroup></Project>").Path;
+            var lockBuilder = new SdkResolutionLockBuilder();
+
+            InvalidProjectFileException exception =
+                Should.Throw<InvalidProjectFileException>(
+                    () => Project.FromFile(
+                        projectPath,
+                        new ProjectOptions
+                        {
+                            ProjectCollection =
+                                _env.CreateProjectCollection().Collection,
+                            EvaluationMode = ProjectEvaluationMode.Pure,
+                            EvaluationContext =
+                                lockBuilder.CreateEvaluationContext(),
+                        }));
+
+            exception.ErrorCode.ShouldBe("MSB4286");
+        }
+
+        [Fact]
+        public void SdkAcquisitionRejectsConflictingResolverResults()
+        {
+            string firstSdkDirectory = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "first-sdk");
+            string secondSdkDirectory = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "second-sdk");
+            Directory.CreateDirectory(firstSdkDirectory);
+            Directory.CreateDirectory(secondSdkDirectory);
+            File.WriteAllText(
+                Path.Combine(firstSdkDirectory, "Sdk.props"),
+                "<Project />");
+            File.WriteAllText(
+                Path.Combine(secondSdkDirectory, "Sdk.targets"),
+                "<Project />");
+            string projectPath = _env.CreateFile(
+                "conflicting.proj",
+                "<Project Sdk=\"conflicting\" />").Path;
+            int calls = 0;
+            var resolver = new SdkUtilities.ConfigurableMockSdkResolver(
+                (_, _, factory) =>
+                    factory.IndicateSuccess(
+                        calls++ == 0 ? firstSdkDirectory : secondSdkDirectory,
+                        "1.0.0"));
+            var resolverService = new SdkResolverService();
+            resolverService.InitializeForTests(
+                resolverLoader: null,
+                resolvers: [resolver]);
+            var lockBuilder = new SdkResolutionLockBuilder(resolverService);
+
+            Project.FromFile(
+                projectPath,
+                new ProjectOptions
+                {
+                    ProjectCollection =
+                        _env.CreateProjectCollection().Collection,
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    EvaluationContext = lockBuilder.CreateEvaluationContext(),
+                });
+
+            InvalidOperationException exception =
+                Should.Throw<InvalidOperationException>(() => lockBuilder.Build());
+            exception.Message.ShouldContain("resolved to different results");
+        }
+
+        [Fact]
+        public void PureEvaluationFailsWhenSdkRequestIsMissingFromLock()
+        {
+            string projectPath = _env.CreateFile(
+                "missing.proj",
+                "<Project Sdk=\"missing\" />").Path;
+            var emptyLock = new SdkResolutionLock([]);
+
+            InvalidProjectFileException exception =
+                Should.Throw<InvalidProjectFileException>(
+                    () => Project.FromFile(
+                        projectPath,
+                        new ProjectOptions
+                        {
+                            ProjectCollection =
+                                _env.CreateProjectCollection().Collection,
+                            EvaluationMode = ProjectEvaluationMode.Pure,
+                            EvaluationContext =
+                                EvaluationContext.CreateForLockedSdkResolution(
+                                EvaluationContext.SharingPolicy.Shared,
+                                emptyLock),
+                        }));
+
+            exception.ErrorCode.ShouldBe("MSB4287");
+            exception.Message.ShouldContain("absent from the SDK resolution lock");
+        }
+
+        [Fact]
+        public void ProjectGraphCanAcquireAndReplaySdkResolutionLock()
+        {
+            string sdkDirectory = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "graph-sdk");
+            Directory.CreateDirectory(sdkDirectory);
+            File.WriteAllText(
+                Path.Combine(sdkDirectory, "Sdk.props"),
+                "<Project />");
+            File.WriteAllText(
+                Path.Combine(sdkDirectory, "Sdk.targets"),
+                "<Project />");
+            string childPath = _env.CreateFile(
+                "child.proj",
+                "<Project Sdk=\"locked\" />").Path;
+            string rootPath = _env.CreateFile(
+                "root.proj",
+                "<Project Sdk=\"locked\"><ItemGroup><ProjectReference Include=\"child.proj\" /></ItemGroup></Project>").Path;
+
+            var resolver = new SdkUtilities.ConfigurableMockSdkResolver(
+                new SdkResult(
+                    new SdkReference("locked", null, null),
+                    sdkDirectory,
+                    "1.0.0",
+                    warnings: null));
+            var resolverService = new SdkResolverService();
+            resolverService.InitializeForTests(
+                resolverLoader: null,
+                resolvers: [resolver]);
+            var lockBuilder = new SdkResolutionLockBuilder(resolverService);
+
+            ProjectGraph acquisitionGraph = new(
+                new ProjectGraphOptions
+                {
+                    EntryPoints = [new ProjectGraphEntryPoint(rootPath)],
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    EvaluationContext = lockBuilder.CreateEvaluationContext(),
+                });
+            acquisitionGraph.ProjectNodes.Count.ShouldBe(2);
+
+            SdkResolutionLock sdkLock = lockBuilder.Build();
+            sdkLock.Entries.Count.ShouldBe(1);
+            int acquisitionCalls = resolver.ResolvedCalls["locked"];
+
+            ProjectGraph pureGraph = new(
+                new ProjectGraphOptions
+                {
+                    EntryPoints = [new ProjectGraphEntryPoint(rootPath)],
+                    EvaluationMode = ProjectEvaluationMode.Pure,
+                    EvaluationContext =
+                        EvaluationContext.CreateForLockedSdkResolution(
+                        EvaluationContext.SharingPolicy.Shared,
+                        sdkLock),
+                });
+
+            pureGraph.ProjectNodes.Count.ShouldBe(2);
+            pureGraph.ProjectNodes.ShouldContain(
+                node => node.ProjectInstance.FullPath == childPath);
+            resolver.ResolvedCalls["locked"].ShouldBe(acquisitionCalls);
         }
 
         [Fact]

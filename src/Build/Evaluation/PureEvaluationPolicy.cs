@@ -87,15 +87,38 @@ namespace Microsoft.Build.Evaluation
             }
 
             if (receiverType == typeof(Environment)
-                || receiverType == typeof(File)
-                || string.Equals(receiverType.FullName, "Microsoft.Build.Utilities.ToolLocationHelper", StringComparison.Ordinal))
+                || receiverType == typeof(File))
             {
                 return false;
             }
 
+            if (string.Equals(
+                    receiverType.FullName,
+                    "Microsoft.Build.Utilities.ToolLocationHelper",
+                    StringComparison.Ordinal))
+            {
+                return arguments.Length == 2
+                    && arguments[1] is string version
+                    && version.Length == 0
+                    && (string.Equals(
+                            methodName,
+                            "GetPlatformSDKLocation",
+                            StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(
+                            methodName,
+                            "GetPlatformSDKDisplayName",
+                            StringComparison.OrdinalIgnoreCase));
+            }
+
             if (receiverType == typeof(Directory))
             {
-                return string.Equals(methodName, nameof(Directory.GetParent), StringComparison.OrdinalIgnoreCase);
+                return string.Equals(
+                        methodName,
+                        nameof(Directory.GetParent),
+                        StringComparison.OrdinalIgnoreCase)
+                    && arguments.Length == 1
+                    && arguments[0] is string path
+                    && IsPathFullyQualified(path);
             }
 
             if (receiverType == typeof(IntrinsicFunctions))
@@ -130,7 +153,10 @@ namespace Microsoft.Build.Evaluation
 
                 // The two-argument overload has an explicit base and is deterministic.
                 return string.Equals(methodName, nameof(Path.GetFullPath), StringComparison.OrdinalIgnoreCase)
-                    && arguments.Length == 2;
+                    && (arguments.Length == 2
+                        || (arguments.Length == 1
+                            && arguments[0] is string path
+                            && IsPathFullyQualified(path)));
             }
 
             if (receiverType == typeof(CultureInfo))
@@ -147,6 +173,15 @@ namespace Microsoft.Build.Evaluation
 
             return receiverType.FullName is string receiverTypeName
                 && s_pureStaticReceiverTypes.Contains(receiverTypeName);
+        }
+
+        private static bool IsPathFullyQualified(string path)
+        {
+#if NETFRAMEWORK
+            return Microsoft.IO.Path.IsPathFullyQualified(path);
+#else
+            return Path.IsPathFullyQualified(path);
+#endif
         }
     }
 }

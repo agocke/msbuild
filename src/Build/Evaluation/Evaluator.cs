@@ -4,6 +4,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -79,6 +80,7 @@ namespace Microsoft.Build.Evaluation
         /// Gathered during the first pass to avoid traversing again.
         /// </summary>
         private readonly List<ProjectItemGroupElement> _itemGroupElements;
+        private readonly List<DeferredElementRef> _moduleItemGroups;
 
         /// <summary>
         /// When <c>MSBuildProvideItemGlobs</c> requests glob information, the set of
@@ -98,6 +100,7 @@ namespace Microsoft.Build.Evaluation
         /// Gathered during the first pass to avoid traversing again.
         /// </summary>
         private readonly List<ProjectItemDefinitionGroupElement> _itemDefinitionGroupElements;
+        private readonly List<DeferredElementRef> _moduleItemDefinitionGroups;
 
         /// <summary>
         /// List of ProjectUsingTaskElement's traversing into imports.
@@ -106,12 +109,14 @@ namespace Microsoft.Build.Evaluation
         /// to handle any relative paths in the usingTask.
         /// </summary>
         private readonly List<KeyValuePair<string, ProjectUsingTaskElement>> _usingTaskElements;
+        private readonly List<DeferredElementRef> _moduleUsingTasks;
 
         /// <summary>
         /// List of ProjectTargetElement's traversing into imports.
         /// Gathered during the first pass to avoid traversing again.
         /// </summary>
         private readonly List<ProjectTargetElement> _targetElements;
+        private readonly List<DeferredElementRef> _moduleTargets;
 
         /// <summary>
         /// Paths to imports already seen and where they were imported from; used to flag duplicate imports
@@ -176,6 +181,7 @@ namespace Microsoft.Build.Evaluation
         /// The evaluation context to use.
         /// </summary>
         private readonly EvaluationContext _evaluationContext;
+        private readonly ModuleEvaluationReadTracker _moduleEvaluationReadTracker;
 
         /// <summary>
         /// The environment properties with which evaluation should take place.
@@ -255,9 +261,6 @@ namespace Microsoft.Build.Evaluation
                 buildEventContext,
                 string.IsNullOrEmpty(projectRootElement.ProjectFileLocation.File) ? "(null)" : projectRootElement.ProjectFileLocation.File);
 
-            // Wrap the IEvaluatorData<> object passed in.
-            data = new PropertyTrackingEvaluatorDataWrapper<P, I, M, D>(data, _evaluationLoggingContext, Traits.Instance.LogPropertyTracking);
-
             // If the host wishes to provide a directory cache for this evaluation, create a new EvaluationContext with the right file system.
             _evaluationContext = evaluationContext;
             IDirectoryCache directoryCache = directoryCacheFactory?.GetDirectoryCacheForEvaluation(_evaluationLoggingContext.BuildEventContext.EvaluationId);
@@ -267,16 +270,38 @@ namespace Microsoft.Build.Evaluation
                 _evaluationContext = evaluationContext.ContextWithFileSystem(fileSystem);
             }
 
+            _moduleEvaluationReadTracker = new ModuleEvaluationReadTracker(
+                _evaluationContext.ModuleEvaluationSharingCollector);
+
+            // Wrap the IEvaluatorData<> object passed in.
+            data = new PropertyTrackingEvaluatorDataWrapper<P, I, M, D>(
+                data,
+                _evaluationLoggingContext,
+                Traits.Instance.LogPropertyTracking,
+                _moduleEvaluationReadTracker);
+
             // Create containers for the evaluation results
             data.InitializeForEvaluation(toolsetProvider, _evaluationContext, _evaluationLoggingContext);
 
             _expander = new Expander<P, I>(data, data, _evaluationContext, _evaluationLoggingContext);
 
             _data = data;
-            _itemGroupElements = new List<ProjectItemGroupElement>();
-            _itemDefinitionGroupElements = new List<ProjectItemDefinitionGroupElement>();
-            _usingTaskElements = new List<KeyValuePair<string, ProjectUsingTaskElement>>();
-            _targetElements = new List<ProjectTargetElement>();
+            if (_evaluationContext.EvaluationModuleCache is null)
+            {
+                _itemGroupElements = new List<ProjectItemGroupElement>();
+                _itemDefinitionGroupElements =
+                    new List<ProjectItemDefinitionGroupElement>();
+                _usingTaskElements =
+                    new List<KeyValuePair<string, ProjectUsingTaskElement>>();
+                _targetElements = new List<ProjectTargetElement>();
+            }
+            else
+            {
+                _moduleItemGroups = new List<DeferredElementRef>();
+                _moduleItemDefinitionGroups = new List<DeferredElementRef>();
+                _moduleUsingTasks = new List<DeferredElementRef>();
+                _moduleTargets = new List<DeferredElementRef>();
+            }
             _importsSeen = new Dictionary<string, ProjectImportElement>(StringComparer.OrdinalIgnoreCase);
             _initialTargetsList = new List<string>();
             _projectSupportsReturnsAttribute = new Dictionary<ProjectRootElement, bool>();
@@ -663,6 +688,8 @@ namespace Microsoft.Build.Evaluation
         private void Evaluate()
         {
             string projectFile = string.IsNullOrEmpty(_projectRootElement.ProjectFileLocation.File) ? "(null)" : _projectRootElement.ProjectFileLocation.File;
+            using (EvaluationPerformanceInstrumentation.Measure(
+                       EvaluationPerformanceMetric.TotalEvaluation))
             using (_evaluationProfiler.TrackPass(EvaluationPass.TotalEvaluation))
             {
                 Assumed.Equal(_data.EvaluationId, BuildEventContext.InvalidEvaluationId, "There is no prior evaluation ID. The evaluator data needs to be reset at this point");
@@ -683,6 +710,8 @@ namespace Microsoft.Build.Evaluation
 
                 int globalPropertiesCount;
 
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric.InitialProperties))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.InitialProperties))
                 {
                     // Pass0: load initial properties
@@ -708,6 +737,8 @@ namespace Microsoft.Build.Evaluation
 
                 // Pass1: evaluate properties, load imports, and gather everything else
                 MSBuildEventSource.Log.EvaluatePass1Start(projectFile);
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric.PropertiesAndImports))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.Properties))
                 {
                     PerformDepthFirstPass(_projectRootElement);
@@ -733,13 +764,33 @@ namespace Microsoft.Build.Evaluation
                 // Pass2: evaluate item definitions
                 // Don't box via IEnumerator and foreach; cache count so not to evaluate via interface each iteration
                 MSBuildEventSource.Log.EvaluatePass2Start(projectFile);
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric.ItemDefinitions))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.ItemDefinitionGroups))
                 {
-                    foreach (var itemDefinitionGroupElement in _itemDefinitionGroupElements)
+                    if (_evaluationContext.EvaluationModuleCache is null)
                     {
-                        using (_evaluationProfiler.TrackElement(itemDefinitionGroupElement))
+                        foreach (var itemDefinitionGroupElement in _itemDefinitionGroupElements)
                         {
-                            EvaluateItemDefinitionGroupElement(itemDefinitionGroupElement);
+                            using (_evaluationProfiler.TrackElement(itemDefinitionGroupElement))
+                            {
+                                EvaluateItemDefinitionGroupElement(itemDefinitionGroupElement);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        foreach (DeferredElementRef reference in _moduleItemDefinitionGroups)
+                        {
+                            EvaluationModule module = GetDeferredModule(reference);
+                            ProjectItemDefinitionGroupElement itemDefinitionGroup =
+                                GetModuleItemDefinitionGroup(module, reference.LocalIndex);
+                            using (_evaluationProfiler.TrackElement(itemDefinitionGroup))
+                            {
+                                EvaluateItemDefinitionGroupElement(
+                                    module,
+                                    reference.LocalIndex);
+                            }
                         }
                     }
                 }
@@ -752,10 +803,18 @@ namespace Microsoft.Build.Evaluation
                 }
 
                 LazyItemEvaluator<P, I, M, D> lazyEvaluator = null;
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric.ItemOperationConstruction))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.Items))
                 {
                     // comment next line to turn off lazy Evaluation
-                    lazyEvaluator = new LazyItemEvaluator<P, I, M, D>(_data, _itemFactory, _evaluationLoggingContext, _evaluationProfiler, _evaluationContext);
+                    lazyEvaluator = new LazyItemEvaluator<P, I, M, D>(
+                        _data,
+                        _itemFactory,
+                        _evaluationLoggingContext,
+                        _evaluationProfiler,
+                        _evaluationContext,
+                        _moduleEvaluationReadTracker);
 
                     // Pass3: evaluate project items
                     MSBuildEventSource.Log.EvaluatePass3Start(projectFile);
@@ -764,15 +823,36 @@ namespace Microsoft.Build.Evaluation
 
                     DetectItemGlobRequest();
 
-                    foreach (ProjectItemGroupElement itemGroup in _itemGroupElements)
+                    if (_evaluationContext.EvaluationModuleCache is null)
                     {
-                        using (_evaluationProfiler.TrackElement(itemGroup))
+                        foreach (ProjectItemGroupElement itemGroup in _itemGroupElements)
                         {
-                            EvaluateItemGroupElement(itemGroup, lazyEvaluator);
+                            using (_evaluationProfiler.TrackElement(itemGroup))
+                            {
+                                EvaluateItemGroupElement(itemGroup, lazyEvaluator);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        foreach (DeferredElementRef reference in _moduleItemGroups)
+                        {
+                            EvaluationModule module = GetDeferredModule(reference);
+                            ProjectItemGroupElement itemGroup =
+                                GetModuleItemGroup(module, reference.LocalIndex);
+                            using (_evaluationProfiler.TrackElement(itemGroup))
+                            {
+                                EvaluateItemGroupElement(
+                                    module,
+                                    reference.LocalIndex,
+                                    lazyEvaluator);
+                            }
                         }
                     }
                 }
 
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric.LazyItemApplication))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.LazyItems))
                 {
                     // Tell the lazy evaluator to compute the items and add them to _data
@@ -810,16 +890,31 @@ namespace Microsoft.Build.Evaluation
 
                 // Pass4: evaluate using-tasks
                 MSBuildEventSource.Log.EvaluatePass4Start(projectFile);
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric.UsingTasks))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.UsingTasks))
                 {
                     // Evaluate the usingtask and add the result into the data passed in
-                    TaskRegistry.InitializeTaskRegistryFromUsingTaskElements<P, I>(
-                        _evaluationLoggingContext,
-                        _usingTaskElements.Select(p => (p.Value, p.Key)),
-                        _data.TaskRegistry,
-                        _expander,
-                        ExpanderOptions.ExpandPropertiesAndItems,
-                        _evaluationContext.FileSystem);
+                    if (_evaluationContext.EvaluationModuleCache is null)
+                    {
+                        TaskRegistry.InitializeTaskRegistryFromUsingTaskElements<P, I>(
+                            _evaluationLoggingContext,
+                            EnumerateUsingTaskRegistrations(),
+                            _data.TaskRegistry,
+                            _expander,
+                            ExpanderOptions.ExpandPropertiesAndItems,
+                            _evaluationContext.FileSystem);
+                    }
+                    else
+                    {
+                        TaskRegistry.InitializeTaskRegistryFromUsingTaskRegistrations<P, I>(
+                            _evaluationLoggingContext,
+                            EnumerateModuleUsingTaskRegistrations(),
+                            _data.TaskRegistry,
+                            _expander,
+                            ExpanderOptions.ExpandPropertiesAndItems,
+                            _evaluationContext.FileSystem);
+                    }
                 }
 
                 MSBuildEventSource.Log.EvaluatePass4Stop(projectFile);
@@ -838,33 +933,50 @@ namespace Microsoft.Build.Evaluation
                     _data.DefaultTargets = new List<string>(1);
                 }
 
-                var targetElementsCount = _targetElements.Count;
+                int targetElementsCount =
+                    _evaluationContext.EvaluationModuleCache is null
+                        ? _targetElements.Count
+                        : _moduleTargets.Count;
                 if (_data.DefaultTargets.Count == 0 && targetElementsCount > 0)
                 {
-                    _data.DefaultTargets.Add(_targetElements[0].Name);
+                    _data.DefaultTargets.Add(GetTargetEntry(0).Name);
                 }
 
                 Dictionary<string, List<TargetSpecification>> targetsWhichRunBeforeByTarget = new Dictionary<string, List<TargetSpecification>>(StringComparer.OrdinalIgnoreCase);
                 Dictionary<string, List<TargetSpecification>> targetsWhichRunAfterByTarget = new Dictionary<string, List<TargetSpecification>>(StringComparer.OrdinalIgnoreCase);
-                LinkedList<ProjectTargetElement> activeTargetsByEvaluationOrder = new LinkedList<ProjectTargetElement>();
-                Dictionary<string, LinkedListNode<ProjectTargetElement>> activeTargets = new Dictionary<string, LinkedListNode<ProjectTargetElement>>(StringComparer.OrdinalIgnoreCase);
+                LinkedList<TargetEvaluationEntry>
+                    activeTargetsByEvaluationOrder =
+                        new LinkedList<TargetEvaluationEntry>();
+                Dictionary<
+                    string,
+                    LinkedListNode<TargetEvaluationEntry>> activeTargets =
+                        new Dictionary<
+                            string,
+                            LinkedListNode<TargetEvaluationEntry>>(
+                                StringComparer.OrdinalIgnoreCase);
 
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric.Targets))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.Targets))
                 {
                     // Pass5: read targets (but don't evaluate them: that happens during build)
                     MSBuildEventSource.Log.EvaluatePass5Start(projectFile);
                     for (var i = 0; i < targetElementsCount; i++)
                     {
-                        var element = _targetElements[i];
-                        using (_evaluationProfiler.TrackElement(element))
+                        TargetEvaluationEntry target = GetTargetEntry(i);
+                        using (_evaluationProfiler.TrackElement(target.Element))
                         {
-                            ReadTargetElement(element, activeTargetsByEvaluationOrder, activeTargets);
+                            ReadTargetElement(
+                                target,
+                                activeTargetsByEvaluationOrder,
+                                activeTargets);
                         }
                     }
 
-                    foreach (ProjectTargetElement target in activeTargetsByEvaluationOrder)
+                    foreach (TargetEvaluationEntry target
+                             in activeTargetsByEvaluationOrder)
                     {
-                        using (_evaluationProfiler.TrackElement(target))
+                        using (_evaluationProfiler.TrackElement(target.Element))
                         {
                             AddBeforeAndAfterTargetMappings(target, activeTargets, targetsWhichRunBeforeByTarget, targetsWhichRunAfterByTarget);
                         }
@@ -951,6 +1063,14 @@ namespace Microsoft.Build.Evaluation
         /// </summary>
         private void PerformDepthFirstPass(ProjectRootElement currentProjectOrImport)
         {
+            if (_evaluationContext.EvaluationModuleCache is not null)
+            {
+                PerformModuleDepthFirstPass(
+                    _evaluationContext.EvaluationModuleCache.GetModule(
+                        currentProjectOrImport));
+                return;
+            }
+
             using (_evaluationProfiler.TrackFile(currentProjectOrImport.FullPath))
             {
                 // We accumulate InitialTargets from the project and each import
@@ -1032,15 +1152,180 @@ namespace Microsoft.Build.Evaluation
             }
         }
 
+        private void PerformModuleDepthFirstPass(EvaluationModule module)
+        {
+            using (_evaluationProfiler.TrackFile(module.Source.FullPath))
+            {
+                ApplyModuleHeader(module);
+                EvaluateModuleImports(module, module.Header.TopImplicitImports);
+                EvaluateModuleElements(
+                    module,
+                    module.Header.RootElements,
+                    trackElements: false);
+                EvaluateModuleImports(module, module.Header.BottomImplicitImports);
+            }
+        }
+
+        private void ApplyModuleHeader(EvaluationModule module)
+        {
+            ModuleHeader header = module.Header;
+            var root = (ProjectRootElement)module.GetSource(header.RootSourceId);
+            var initialTargets = _expander.ExpandIntoStringListLeaveEscaped(
+                module.GetExpressionValue(header.InitialTargetsExpressionId),
+                ExpanderOptions.ExpandProperties,
+                root.InitialTargetsLocation);
+            _initialTargetsList.AddRange(initialTargets);
+
+            if (!Traits.Instance.EscapeHatches.IgnoreTreatAsLocalProperty)
+            {
+                foreach (string propertyName in _expander.ExpandIntoStringListLeaveEscaped(
+                             module.GetExpressionValue(
+                                 header.TreatAsLocalPropertyExpressionId),
+                             ExpanderOptions.ExpandProperties,
+                             root.TreatAsLocalPropertyLocation))
+                {
+                    XmlUtilities.VerifyThrowProjectValidElementName(
+                        propertyName,
+                        root.Location);
+                    _data.GlobalPropertiesToTreatAsLocal.Add(propertyName);
+                }
+            }
+
+            UpdateDefaultTargets(
+                module.GetExpressionValue(header.DefaultTargetsExpressionId),
+                root.DefaultTargetsLocation);
+            _projectSupportsReturnsAttribute[root] = header.SupportsReturns;
+        }
+
+        private void EvaluateModuleImports(
+            EvaluationModule module,
+            TableRange imports)
+        {
+            for (int i = imports.Start; i < imports.Start + imports.Count; i++)
+            {
+                ProjectImportElement import = (ProjectImportElement)module.GetSource(
+                    module.Imports[i].SourceId);
+                EvaluateImportElement(module.Header.DirectoryPath, import);
+            }
+        }
+
+        private void EvaluateModuleElements(
+            EvaluationModule module,
+            TableRange elements,
+            bool trackElements)
+        {
+            for (int i = elements.Start; i < elements.Start + elements.Count; i++)
+            {
+                ModuleElement element = module.Elements[i];
+                if (trackElements)
+                {
+                    using (_evaluationProfiler.TrackElement(
+                               GetModuleElementSource(module, element)))
+                    {
+                        EvaluateModuleElement(module, element);
+                    }
+                }
+                else
+                {
+                    EvaluateModuleElement(module, element);
+                }
+            }
+        }
+
+        private ProjectElement GetModuleElementSource(
+            EvaluationModule module,
+            ModuleElement element)
+        {
+            return element.Kind switch
+            {
+                ModuleElementKind.PropertyGroup => module.GetSource(
+                    module.PropertyGroups[element.LocalIndex].SourceId),
+                ModuleElementKind.ItemGroup => module.GetSource(
+                    module.ItemGroups[element.LocalIndex].SourceId),
+                ModuleElementKind.ItemDefinitionGroup => module.GetSource(
+                    module.ItemDefinitionGroups[element.LocalIndex].SourceId),
+                ModuleElementKind.Target => module.GetSource(
+                    module.Targets[element.LocalIndex].SourceId),
+                ModuleElementKind.Import => module.GetSource(
+                    module.Imports[element.LocalIndex].SourceId),
+                ModuleElementKind.ImportGroup => module.GetSource(
+                    module.ImportGroups[element.LocalIndex].SourceId),
+                ModuleElementKind.UsingTask => module.GetSource(
+                    module.UsingTasks[element.LocalIndex].SourceId),
+                ModuleElementKind.Choose => module.GetSource(
+                    module.Chooses[element.LocalIndex].SourceId),
+                _ => Assumed.Unreachable<ProjectElement>(),
+            };
+        }
+
+        private void EvaluateModuleElement(
+            EvaluationModule module,
+            ModuleElement element)
+        {
+            switch (element.Kind)
+            {
+                case ModuleElementKind.PropertyGroup:
+                    EvaluatePropertyGroupElement(module, element.LocalIndex);
+                    break;
+                case ModuleElementKind.ItemGroup:
+                    _moduleItemGroups.Add(new DeferredElementRef(
+                        module.Handle,
+                        element.LocalIndex));
+                    break;
+                case ModuleElementKind.ItemDefinitionGroup:
+                    _moduleItemDefinitionGroups.Add(new DeferredElementRef(
+                        module.Handle,
+                        element.LocalIndex));
+                    break;
+                case ModuleElementKind.Target:
+                    _moduleTargets.Add(new DeferredElementRef(
+                        module.Handle,
+                        element.LocalIndex));
+                    break;
+                case ModuleElementKind.Import:
+                    EvaluateImportElement(
+                        module.Header.DirectoryPath,
+                        (ProjectImportElement)module.GetSource(
+                            module.Imports[element.LocalIndex].SourceId));
+                    break;
+                case ModuleElementKind.ImportGroup:
+                    EvaluateImportGroupElement(module, element.LocalIndex);
+                    break;
+                case ModuleElementKind.UsingTask:
+                    _moduleUsingTasks.Add(new DeferredElementRef(
+                        module.Handle,
+                        element.LocalIndex));
+                    break;
+                case ModuleElementKind.Choose:
+                    EvaluateChooseElement(module, element.LocalIndex);
+                    break;
+                default:
+                    InternalError.Throw("Unexpected module element type");
+                    break;
+            }
+        }
+
         /// <summary>
         /// Update the default targets value.
         /// We only take the first DefaultTargets value we encounter in a project or import.
         /// </summary>
         private void UpdateDefaultTargets(ProjectRootElement currentProjectOrImport)
         {
+            UpdateDefaultTargets(
+                currentProjectOrImport.DefaultTargets,
+                currentProjectOrImport.DefaultTargetsLocation);
+        }
+
+        private void UpdateDefaultTargets(
+            string defaultTargets,
+            ElementLocation defaultTargetsLocation)
+        {
             if (_data.DefaultTargets == null)
             {
-                string expanded = _expander.ExpandIntoStringLeaveEscaped(currentProjectOrImport.DefaultTargets, ExpanderOptions.ExpandProperties, currentProjectOrImport.DefaultTargetsLocation);
+                string expanded = _expander.ExpandIntoStringLeaveEscaped(
+                    defaultTargets,
+                    ExpanderOptions.ExpandProperties,
+                    defaultTargetsLocation);
 
                 if (expanded.Length > 0)
                 {
@@ -1068,7 +1353,7 @@ namespace Microsoft.Build.Evaluation
         {
             using (_evaluationProfiler.TrackElement(propertyGroupElement))
             {
-                if (EvaluateConditionCollectingConditionedProperties(propertyGroupElement, ExpanderOptions.ExpandProperties, ParserOptions.AllowProperties))
+                if (EvaluatePropertyGroupCondition(propertyGroupElement))
                 {
                     foreach (ProjectPropertyElement propertyElement in propertyGroupElement.Properties)
                     {
@@ -1076,6 +1361,114 @@ namespace Microsoft.Build.Evaluation
                     }
                 }
             }
+        }
+
+        private void EvaluatePropertyGroupElement(
+            EvaluationModule module,
+            int propertyGroupIndex)
+        {
+            PropertyGroupTemplate propertyGroup =
+                module.PropertyGroups[propertyGroupIndex];
+            var source = (ProjectPropertyGroupElement)module.GetSource(
+                propertyGroup.SourceId);
+            using (_evaluationProfiler.TrackElement(source))
+            {
+                if (!EvaluatePropertyGroupCondition(
+                        source,
+                        module.PropertyGroupConditionOperations[propertyGroupIndex]))
+                {
+                    return;
+                }
+
+                TableRange properties = propertyGroup.Properties;
+                for (int i = properties.Start; i < properties.Start + properties.Count; i++)
+                {
+                    EvaluatePropertyElement(
+                        (ProjectPropertyElement)module.GetSource(
+                            module.Properties[i].SourceId),
+                        module.PropertyAssignments[i]);
+                }
+            }
+        }
+
+        private bool EvaluatePropertyGroupCondition(
+            ProjectPropertyGroupElement propertyGroupElement)
+        {
+            ConditionOperation operation =
+                _evaluationContext.EvaluationModuleCache
+                    ?.GetPropertyGroupCondition(propertyGroupElement) ??
+                ConditionOperation.CreateForPropertyGroup(propertyGroupElement);
+            return EvaluatePropertyGroupCondition(
+                propertyGroupElement,
+                operation);
+        }
+
+        private bool EvaluatePropertyGroupCondition(
+            ProjectPropertyGroupElement propertyGroupElement,
+            ConditionOperation operation)
+        {
+            bool conditionResult;
+            ConditionReplayCache replayCache =
+                _evaluationContext.ConditionReplayCache;
+
+            if (replayCache is not null && operation.SupportsReplay)
+            {
+                using ConditionReplayCache.Lease lease =
+                    replayCache.Enter(operation.Id);
+                if (lease.TryFind(
+                        ReadPropertyReplayInput,
+                        out ConditionVariant variant))
+                {
+                    ApplyConditionedPropertiesDelta(
+                        variant.ConditionedProperties);
+                    conditionResult = variant.Result;
+                    _moduleEvaluationReadTracker.RecordReplay(
+                        operation.Id,
+                        variant.DependencyValues);
+                }
+                else
+                {
+                    Dictionary<string, int> conditionedPropertyCounts =
+                        CaptureConditionedPropertyCounts(
+                            propertyGroupElement.Condition);
+                    ModuleEvaluationReadTracker.Scope scope =
+                        _moduleEvaluationReadTracker.Track(operation.Id);
+                    using (scope)
+                    {
+                        RecordEvaluationDataReplayInputs();
+                        conditionResult =
+                            EvaluateConditionCollectingConditionedProperties(
+                                propertyGroupElement,
+                                ExpanderOptions.ExpandProperties,
+                                ParserOptions.AllowProperties);
+                    }
+
+                    lease.Add(
+                        scope.PropertyReads,
+                        conditionResult,
+                        CaptureConditionedPropertiesDelta(
+                            conditionedPropertyCounts));
+                }
+            }
+            else
+            {
+                if (replayCache is not null)
+                {
+                    _moduleEvaluationReadTracker.RecordScalarFallback(
+                        operation.Id);
+                }
+
+                using (_moduleEvaluationReadTracker.Track(operation.Id))
+                {
+                    conditionResult =
+                        EvaluateConditionCollectingConditionedProperties(
+                            propertyGroupElement,
+                            ExpanderOptions.ExpandProperties,
+                            ParserOptions.AllowProperties);
+                }
+            }
+
+            return conditionResult;
         }
 
         /// <summary>
@@ -1095,18 +1488,67 @@ namespace Microsoft.Build.Evaluation
             }
         }
 
+        private void EvaluateItemDefinitionGroupElement(
+            EvaluationModule module,
+            int localIndex)
+        {
+            ItemDefinitionGroupTemplate group =
+                module.ItemDefinitionGroups[localIndex];
+            ProjectItemDefinitionGroupElement source =
+                GetModuleItemDefinitionGroup(module, localIndex);
+            if (!EvaluateCondition(
+                    source,
+                    module.GetConditionValue(group.ConditionId),
+                    ExpanderOptions.ExpandProperties,
+                    ParserOptions.AllowProperties))
+            {
+                return;
+            }
+
+            for (int i = group.ItemDefinitions.Start;
+                 i < group.ItemDefinitions.Start + group.ItemDefinitions.Count;
+                 i++)
+            {
+                ItemDefinitionTemplate template = module.ItemDefinitions[i];
+                ProjectItemDefinitionElement itemDefinition =
+                    (ProjectItemDefinitionElement)module.GetSource(
+                        template.SourceId);
+                using (_evaluationProfiler.TrackElement(itemDefinition))
+                {
+                    EvaluateItemDefinitionElement(
+                        module,
+                        template,
+                        itemDefinition);
+                }
+            }
+        }
+
         /// <summary>
         /// Evaluate the items in the itemgroup and add the applicable ones to the data passed in
         /// </summary>
         private void EvaluateItemGroupElement(ProjectItemGroupElement itemGroupElement, LazyItemEvaluator<P, I, M, D> lazyEvaluator)
         {
-            bool itemGroupConditionResult = lazyEvaluator.EvaluateConditionWithCurrentState(itemGroupElement, ExpanderOptions.ExpandPropertiesAndItems, ParserOptions.AllowPropertiesAndItemLists);
+            bool itemGroupConditionResult;
+            using (_moduleEvaluationReadTracker.Track(
+                       itemGroupElement,
+                       "ItemGroupCondition",
+                       location: itemGroupElement.ConditionLocation))
+            {
+                itemGroupConditionResult = lazyEvaluator.EvaluateConditionWithCurrentState(
+                    itemGroupElement,
+                    ExpanderOptions.ExpandPropertiesAndItems,
+                    ParserOptions.AllowPropertiesAndItemLists);
+            }
 
             if (itemGroupConditionResult || (_data.ShouldEvaluateForDesignTime && _data.CanEvaluateElementsWithFalseConditions))
             {
                 foreach (ProjectItemElement itemElement in itemGroupElement.Items)
                 {
                     using (_evaluationProfiler.TrackElement(itemElement))
+                    using (_moduleEvaluationReadTracker.Track(
+                               itemElement,
+                               "ItemOperationDeclaration",
+                               itemElement.ItemType))
                     {
                         EvaluateItemElement(itemGroupConditionResult, itemElement, lazyEvaluator);
                     }
@@ -1114,39 +1556,226 @@ namespace Microsoft.Build.Evaluation
             }
         }
 
+        private void EvaluateItemGroupElement(
+            EvaluationModule module,
+            int localIndex,
+            LazyItemEvaluator<P, I, M, D> lazyEvaluator)
+        {
+            ItemGroupTemplate group = module.ItemGroups[localIndex];
+            ProjectItemGroupElement source = GetModuleItemGroup(module, localIndex);
+            bool itemGroupConditionResult;
+            using (_moduleEvaluationReadTracker.Track(
+                       source,
+                       "ItemGroupCondition",
+                       location: source.ConditionLocation))
+            {
+                itemGroupConditionResult =
+                    lazyEvaluator.EvaluateConditionWithCurrentState(
+                        module.GetConditionValue(group.ConditionId),
+                        source,
+                        ExpanderOptions.ExpandPropertiesAndItems,
+                        ParserOptions.AllowPropertiesAndItemLists);
+            }
+
+            if (!itemGroupConditionResult &&
+                !(_data.ShouldEvaluateForDesignTime &&
+                  _data.CanEvaluateElementsWithFalseConditions))
+            {
+                return;
+            }
+
+            for (int i = group.Items.Start;
+                 i < group.Items.Start + group.Items.Count;
+                 i++)
+            {
+                ItemTemplate template = module.Items[i];
+                ProjectItemElement item =
+                    (ProjectItemElement)module.GetSource(
+                        template.SourceId);
+                using (_evaluationProfiler.TrackElement(item))
+                using (_moduleEvaluationReadTracker.Track(
+                           item,
+                           "ItemOperationDeclaration",
+                           module.GetStringValue(template.ItemTypeStringId)))
+                {
+                    EvaluateItemElement(
+                        itemGroupConditionResult,
+                        module,
+                        template,
+                        item,
+                        lazyEvaluator);
+                }
+            }
+        }
+
+        private EvaluationModule GetDeferredModule(DeferredElementRef reference) =>
+            _evaluationContext.EvaluationModuleCache.GetModule(
+                reference.ModuleHandle);
+
+        private static ProjectItemGroupElement GetModuleItemGroup(
+            EvaluationModule module,
+            int localIndex) =>
+            (ProjectItemGroupElement)module.GetSource(
+                module.ItemGroups[localIndex].SourceId);
+
+        private static ProjectItemDefinitionGroupElement
+            GetModuleItemDefinitionGroup(
+                EvaluationModule module,
+                int localIndex) =>
+            (ProjectItemDefinitionGroupElement)module.GetSource(
+                module.ItemDefinitionGroups[localIndex].SourceId);
+
+        private IEnumerable<(
+            ProjectUsingTaskElement projectUsingTaskXml,
+            string directoryOfImportingFile)> EnumerateUsingTaskRegistrations()
+        {
+            foreach (KeyValuePair<string, ProjectUsingTaskElement> registration
+                     in _usingTaskElements)
+            {
+                yield return (registration.Value, registration.Key);
+            }
+        }
+
+        private IEnumerable<TaskRegistry.UsingTaskRegistration>
+            EnumerateModuleUsingTaskRegistrations()
+        {
+            foreach (DeferredElementRef reference in _moduleUsingTasks)
+            {
+                EvaluationModule module = GetDeferredModule(reference);
+                UsingTaskTemplate template =
+                    module.UsingTasks[reference.LocalIndex];
+                yield return new TaskRegistry.UsingTaskRegistration(
+                    (ProjectUsingTaskElement)module.GetSource(
+                        template.SourceId),
+                    module.Header.DirectoryPath,
+                    module.GetConditionValue(template.ConditionId),
+                    module.GetExpressionValue(
+                        template.TaskNameExpressionId),
+                    module.GetExpressionValue(
+                        template.TaskFactoryExpressionId),
+                    module.GetExpressionValue(
+                        template.AssemblyFileExpressionId),
+                    module.GetExpressionValue(
+                        template.AssemblyNameExpressionId),
+                    module.GetExpressionValue(
+                        template.RuntimeExpressionId),
+                    module.GetExpressionValue(
+                        template.ArchitectureExpressionId),
+                    module.GetExpressionValue(
+                        template.OverrideExpressionId));
+            }
+        }
+
+        private TargetEvaluationEntry GetTargetEntry(int index)
+        {
+            if (_evaluationContext.EvaluationModuleCache is null)
+            {
+                return new TargetEvaluationEntry(_targetElements[index]);
+            }
+
+            DeferredElementRef reference = _moduleTargets[index];
+            EvaluationModule module = GetDeferredModule(reference);
+            TargetTemplate template =
+                module.Targets[reference.LocalIndex];
+            return new TargetEvaluationEntry(
+                (ProjectTargetElement)module.GetSource(template.SourceId),
+                module.GetStringValue(template.NameStringId),
+                module.GetExpressionValue(
+                    template.BeforeTargetsExpressionId),
+                module.GetExpressionValue(
+                    template.AfterTargetsExpressionId));
+        }
+
+        private readonly struct TargetEvaluationEntry
+        {
+            internal TargetEvaluationEntry(ProjectTargetElement element)
+                : this(
+                    element,
+                    element.Name,
+                    element.BeforeTargets,
+                    element.AfterTargets)
+            {
+            }
+
+            internal TargetEvaluationEntry(
+                ProjectTargetElement element,
+                string name,
+                string beforeTargets,
+                string afterTargets)
+            {
+                Element = element;
+                Name = name;
+                BeforeTargets = beforeTargets;
+                AfterTargets = afterTargets;
+            }
+
+            internal ProjectTargetElement Element { get; }
+
+            internal string Name { get; }
+
+            internal string BeforeTargets { get; }
+
+            internal string AfterTargets { get; }
+        }
+
         /// <summary>
         /// Retrieve the matching ProjectTargetInstance from the cache and add it to the provided collection.
         /// If it is not cached already, read it and cache it.
         /// Do not evaluate anything: this occurs during build.
         /// </summary>
-        private void ReadTargetElement(ProjectTargetElement targetElement, LinkedList<ProjectTargetElement> activeTargetsByEvaluationOrder, Dictionary<string, LinkedListNode<ProjectTargetElement>> activeTargets)
+        private void ReadTargetElement(
+            TargetEvaluationEntry target,
+            LinkedList<TargetEvaluationEntry>
+                activeTargetsByEvaluationOrder,
+            Dictionary<string, LinkedListNode<TargetEvaluationEntry>>
+                activeTargets)
         {
+            ProjectTargetElement targetElement = target.Element;
             // If we already have read a target instance for this element, use that.
             ProjectTargetInstance targetInstance = targetElement.TargetInstance ?? ReadNewTargetElement(targetElement, _projectSupportsReturnsAttribute[(ProjectRootElement)targetElement.Parent], _evaluationProfiler);
 
-            string targetName = targetElement.Name;
+            string targetName = target.Name;
             ProjectTargetInstance otherTarget = _data.GetTarget(targetName);
             if (otherTarget != null)
             {
                 _evaluationLoggingContext.LogComment(MessageImportance.Low, "OverridingTarget", otherTarget.Name, otherTarget.Location.File, targetName, targetElement.Location.File);
             }
 
-            if (activeTargets.TryGetValue(targetName, out LinkedListNode<ProjectTargetElement> node))
+            if (activeTargets.TryGetValue(
+                    targetName,
+                    out LinkedListNode<TargetEvaluationEntry> node))
             {
                 activeTargetsByEvaluationOrder.Remove(node);
             }
 
-            activeTargets[targetName] = activeTargetsByEvaluationOrder.AddLast(targetElement);
+            activeTargets[targetName] =
+                activeTargetsByEvaluationOrder.AddLast(target);
             _data.AddTarget(targetInstance);
         }
 
         /// <summary>
         /// Updates the evaluation maps for BeforeTargets and AfterTargets
         /// </summary>
-        private void AddBeforeAndAfterTargetMappings(ProjectTargetElement targetElement, Dictionary<string, LinkedListNode<ProjectTargetElement>> activeTargets, Dictionary<string, List<TargetSpecification>> targetsWhichRunBeforeByTarget, Dictionary<string, List<TargetSpecification>> targetsWhichRunAfterByTarget)
+        private void AddBeforeAndAfterTargetMappings(
+            TargetEvaluationEntry target,
+            Dictionary<string, LinkedListNode<TargetEvaluationEntry>>
+                activeTargets,
+            Dictionary<string, List<TargetSpecification>>
+                targetsWhichRunBeforeByTarget,
+            Dictionary<string, List<TargetSpecification>>
+                targetsWhichRunAfterByTarget)
         {
-            var beforeTargets = _expander.ExpandIntoStringListLeaveEscaped(targetElement.BeforeTargets, ExpanderOptions.ExpandPropertiesAndItems, targetElement.BeforeTargetsLocation);
-            var afterTargets = _expander.ExpandIntoStringListLeaveEscaped(targetElement.AfterTargets, ExpanderOptions.ExpandPropertiesAndItems, targetElement.AfterTargetsLocation);
+            ProjectTargetElement targetElement = target.Element;
+            var beforeTargets =
+                _expander.ExpandIntoStringListLeaveEscaped(
+                    target.BeforeTargets,
+                    ExpanderOptions.ExpandPropertiesAndItems,
+                    targetElement.BeforeTargetsLocation);
+            var afterTargets =
+                _expander.ExpandIntoStringListLeaveEscaped(
+                    target.AfterTargets,
+                    ExpanderOptions.ExpandPropertiesAndItems,
+                    targetElement.AfterTargetsLocation);
 
             foreach (string beforeTarget in beforeTargets)
             {
@@ -1161,7 +1790,10 @@ namespace Microsoft.Build.Evaluation
                         targetsWhichRunBeforeByTarget[unescapedBeforeTarget] = beforeTargetsForTarget;
                     }
 
-                    beforeTargetsForTarget.Add(new TargetSpecification(targetElement.Name, targetElement.BeforeTargetsLocation));
+                    beforeTargetsForTarget.Add(
+                        new TargetSpecification(
+                            target.Name,
+                            targetElement.BeforeTargetsLocation));
                 }
                 else
                 {
@@ -1184,7 +1816,10 @@ namespace Microsoft.Build.Evaluation
                         targetsWhichRunAfterByTarget[unescapedAfterTarget] = afterTargetsForTarget;
                     }
 
-                    afterTargetsForTarget.Add(new TargetSpecification(targetElement.Name, targetElement.AfterTargetsLocation));
+                    afterTargetsForTarget.Add(
+                        new TargetSpecification(
+                            target.Name,
+                            targetElement.AfterTargetsLocation));
                 }
                 else
                 {
@@ -1372,36 +2007,276 @@ namespace Microsoft.Build.Evaluation
         /// </summary>
         private void EvaluatePropertyElement(ProjectPropertyElement propertyElement)
         {
+            PropertyAssignmentOperation operation =
+                _evaluationContext.EvaluationModuleCache?.GetPropertyAssignment(
+                    propertyElement) ??
+                new PropertyAssignmentOperation(propertyElement);
+            EvaluatePropertyElement(propertyElement, operation);
+        }
+
+        private void EvaluatePropertyElement(
+            ProjectPropertyElement propertyElement,
+            PropertyAssignmentOperation operation)
+        {
             using (_evaluationProfiler.TrackElement(propertyElement))
             {
-                // Global properties cannot be overridden.  We silently ignore them if we try.  Legacy behavior.
-                // That is, unless this global property has been explicitly labeled as one that we want to treat as overridable for the duration
-                // of this project (or import).
-                if (
-                        ((IDictionary<string, ProjectPropertyInstance>)_data.GlobalPropertiesDictionary).ContainsKey(propertyElement.Name) &&
-                        !_data.GlobalPropertiesToTreatAsLocal.Contains(propertyElement.Name))
+                PropertyAssignmentReplayCache replayCache =
+                    _evaluationContext.PropertyAssignmentReplayCache;
+
+                if (replayCache is not null &&
+                    operation.SupportsReplay &&
+                    !IsNonOverridableGlobalProperty(propertyElement.Name))
                 {
-                    _evaluationLoggingContext.LogComment(MessageImportance.Low, "OM_GlobalProperty", propertyElement.Name);
+                    using PropertyAssignmentReplayCache.Lease lease =
+                        replayCache.Enter(operation.Id);
+                    if (lease.TryFind(ReadPropertyReplayInput, out PropertyAssignmentVariant variant))
+                    {
+                        ApplyConditionedPropertiesDelta(
+                            variant.ConditionedProperties);
+                        _expander.PropertiesUseTracker.PropertyReadContext =
+                            PropertyReadContext.PropertyEvaluation;
+                        _expander.PropertiesUseTracker.CurrentlyEvaluatingPropertyElementName =
+                            propertyElement.Name;
+                        if (variant.Assigned)
+                        {
+                            _data.SetProperty(
+                                propertyElement,
+                                variant.EvaluatedValueEscaped,
+                                _evaluationLoggingContext);
+                        }
+
+                        _moduleEvaluationReadTracker.RecordReplay(
+                            operation.Id,
+                            variant.DependencyValues);
+                        return;
+                    }
+
+                    ModuleEvaluationReadTracker.Scope scope =
+                        _moduleEvaluationReadTracker.Track(operation.Id);
+                    Dictionary<string, int> conditionedPropertyCounts =
+                        CaptureConditionedPropertyCounts(
+                            propertyElement.Condition);
+                    string evaluatedValue;
+                    bool assigned;
+                    using (scope)
+                    {
+                        RecordEvaluationDataReplayInputs();
+                        assigned = TryEvaluatePropertyElement(
+                            propertyElement,
+                            out evaluatedValue);
+                    }
+
+                    lease.Add(
+                        scope.PropertyReads,
+                        assigned,
+                        evaluatedValue,
+                        CaptureConditionedPropertiesDelta(
+                            conditionedPropertyCounts));
+
                     return;
                 }
 
-                _expander.PropertiesUseTracker.PropertyReadContext = PropertyReadContext.ConditionEvaluation;
-                if (!EvaluateConditionCollectingConditionedProperties(propertyElement, ExpanderOptions.ExpandProperties, ParserOptions.AllowProperties))
+                if (replayCache is not null)
                 {
-                    return;
+                    _moduleEvaluationReadTracker.RecordScalarFallback(operation.Id);
                 }
 
-                _expander.PropertiesUseTracker.PropertyReadContext = PropertyReadContext.PropertyEvaluation;
+                using (_moduleEvaluationReadTracker.Track(operation.Id))
+                {
+                    _ = TryEvaluatePropertyElement(propertyElement, out _);
+                }
+            }
+        }
 
-                // Set the name of the property we are currently evaluating so when we are checking to see if we want to add the property to the list of usedUninitialized properties we can not add the property if
-                // it is the same as what we are setting the value on. Note: This needs to be set before we expand the property we are currently setting.
-                _expander.PropertiesUseTracker.CurrentlyEvaluatingPropertyElementName = propertyElement.Name;
+        private bool TryEvaluatePropertyElement(
+            ProjectPropertyElement propertyElement,
+            out string evaluatedValue)
+        {
+            evaluatedValue = null;
+            string globalOverrideObservation = GetGlobalOverrideObservation(
+                propertyElement.Name,
+                out bool isNonOverridableGlobal);
+            _moduleEvaluationReadTracker.RecordPropertyRead(
+                $"$GlobalOverride:{propertyElement.Name}",
+                globalOverrideObservation);
 
-                string evaluatedValue = _expander.ExpandIntoStringLeaveEscaped(propertyElement.Value, ExpanderOptions.ExpandProperties, propertyElement.Location);
+            // Global properties cannot be overridden unless explicitly treated as local.
+            if (isNonOverridableGlobal)
+            {
+                _evaluationLoggingContext.LogComment(
+                    MessageImportance.Low,
+                    "OM_GlobalProperty",
+                    propertyElement.Name);
+                return false;
+            }
 
-                _expander.PropertiesUseTracker.CheckPreexistingUndefinedUsage(propertyElement, evaluatedValue, _evaluationLoggingContext);
+            _expander.PropertiesUseTracker.PropertyReadContext =
+                PropertyReadContext.ConditionEvaluation;
+            if (!EvaluateConditionCollectingConditionedProperties(
+                    propertyElement,
+                    ExpanderOptions.ExpandProperties,
+                    ParserOptions.AllowProperties))
+            {
+                return false;
+            }
 
-                _data.SetProperty(propertyElement, evaluatedValue, _evaluationLoggingContext);
+            _expander.PropertiesUseTracker.PropertyReadContext =
+                PropertyReadContext.PropertyEvaluation;
+
+            // Set this before expansion so undefined-property diagnostics do not
+            // report a self-reference as an unrelated uninitialized property.
+            _expander.PropertiesUseTracker.CurrentlyEvaluatingPropertyElementName =
+                propertyElement.Name;
+
+            evaluatedValue = _expander.ExpandIntoStringLeaveEscaped(
+                propertyElement.Value,
+                ExpanderOptions.ExpandProperties,
+                propertyElement.Location);
+
+            _expander.PropertiesUseTracker.CheckPreexistingUndefinedUsage(
+                propertyElement,
+                evaluatedValue,
+                _evaluationLoggingContext);
+
+            _data.SetProperty(
+                propertyElement,
+                evaluatedValue,
+                _evaluationLoggingContext);
+            return true;
+        }
+
+        private bool IsNonOverridableGlobalProperty(string propertyName)
+        {
+            _ = GetGlobalOverrideObservation(
+                propertyName,
+                out bool isNonOverridableGlobal);
+            return isNonOverridableGlobal;
+        }
+
+        private string GetGlobalOverrideObservation(
+            string propertyName,
+            out bool isNonOverridableGlobal)
+        {
+            bool isGlobalProperty =
+                ((IDictionary<string, ProjectPropertyInstance>)
+                    _data.GlobalPropertiesDictionary)
+                .TryGetValue(propertyName, out ProjectPropertyInstance globalProperty);
+            bool treatAsLocal =
+                _data.GlobalPropertiesToTreatAsLocal.Contains(propertyName);
+            isNonOverridableGlobal = isGlobalProperty && !treatAsLocal;
+            return isGlobalProperty
+                ? $"{(treatAsLocal ? "Local" : "Global")}:{((IProperty)globalProperty).EvaluatedValueEscaped}"
+                : "Absent";
+        }
+
+        private string ReadPropertyReplayInput(string propertyName)
+        {
+            const string collectConditionedProperties =
+                "$EvaluationData:CollectConditionedProperties";
+            if (propertyName.Equals(
+                    collectConditionedProperties,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return _data.ShouldEvaluateForDesignTime
+                    ? bool.TrueString
+                    : bool.FalseString;
+            }
+
+            const string globalOverridePrefix = "$GlobalOverride:";
+            if (propertyName.StartsWith(
+                    globalOverridePrefix,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return GetGlobalOverrideObservation(
+                    propertyName.Substring(globalOverridePrefix.Length),
+                    out _);
+            }
+
+            return ((IDictionary<string, P>)_data.Properties)
+                .TryGetValue(propertyName, out P property)
+                ? property.EscapedValue
+                : null;
+        }
+
+        private void RecordEvaluationDataReplayInputs()
+        {
+            _moduleEvaluationReadTracker.RecordPropertyRead(
+                "$EvaluationData:CollectConditionedProperties",
+                _data.ShouldEvaluateForDesignTime
+                    ? bool.TrueString
+                    : bool.FalseString);
+        }
+
+        private Dictionary<string, int> CaptureConditionedPropertyCounts(
+            string condition)
+        {
+            if (string.IsNullOrEmpty(condition) ||
+                !_data.ShouldEvaluateForDesignTime)
+            {
+                return null;
+            }
+
+            var counts = new Dictionary<string, int>(
+                _data.ConditionedProperties.Count,
+                StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, List<string>> property in
+                     _data.ConditionedProperties)
+            {
+                counts.Add(property.Key, property.Value.Count);
+            }
+
+            return counts;
+        }
+
+        private ConditionedPropertiesDelta CaptureConditionedPropertiesDelta(
+            Dictionary<string, int> initialCounts)
+        {
+            if (initialCounts is null)
+            {
+                return ConditionedPropertiesDelta.Empty;
+            }
+
+            var changes =
+                ImmutableArray.CreateBuilder<ConditionedPropertyValues>();
+            foreach (KeyValuePair<string, List<string>> property in
+                     _data.ConditionedProperties)
+            {
+                initialCounts.TryGetValue(property.Key, out int initialCount);
+                if (property.Value.Count > initialCount)
+                {
+                    changes.Add(new ConditionedPropertyValues(
+                        property.Key,
+                        property.Value
+                            .Skip(initialCount)
+                            .ToImmutableArray()));
+                }
+            }
+
+            return changes.Count == 0
+                ? ConditionedPropertiesDelta.Empty
+                : new ConditionedPropertiesDelta(changes.ToImmutable());
+        }
+
+        private void ApplyConditionedPropertiesDelta(
+            ConditionedPropertiesDelta delta)
+        {
+            foreach (ConditionedPropertyValues property in delta.Values)
+            {
+                if (!_data.ConditionedProperties.TryGetValue(
+                        property.Name,
+                        out List<string> values))
+                {
+                    values = new List<string>();
+                    _data.ConditionedProperties.Add(property.Name, values);
+                }
+
+                foreach (string value in property.Values)
+                {
+                    if (!values.Contains(value))
+                    {
+                        values.Add(value);
+                    }
+                }
             }
         }
 
@@ -1417,6 +2292,43 @@ namespace Microsoft.Build.Evaluation
             var conditionResult = itemGroupConditionResult && itemConditionResult;
 
             lazyEvaluator.ProcessItemElement(_projectRootElement.DirectoryPath, itemElement, conditionResult);
+
+            if (conditionResult)
+            {
+                RecordEvaluatedItemElement(itemElement);
+            }
+        }
+
+        private void EvaluateItemElement(
+            bool itemGroupConditionResult,
+            EvaluationModule module,
+            ItemTemplate template,
+            ProjectItemElement itemElement,
+            LazyItemEvaluator<P, I, M, D> lazyEvaluator)
+        {
+            bool itemConditionResult =
+                lazyEvaluator.EvaluateConditionWithCurrentState(
+                    module.GetConditionValue(template.ConditionId),
+                    itemElement,
+                    ExpanderOptions.ExpandPropertiesAndItems,
+                    ParserOptions.AllowPropertiesAndItemLists);
+
+            if (!itemConditionResult &&
+                !(_data.ShouldEvaluateForDesignTime &&
+                  _data.CanEvaluateElementsWithFalseConditions))
+            {
+                return;
+            }
+
+            bool conditionResult =
+                itemGroupConditionResult && itemConditionResult;
+
+            lazyEvaluator.ProcessItemElement(
+                _projectRootElement.DirectoryPath,
+                module,
+                template,
+                itemElement,
+                conditionResult);
 
             if (conditionResult)
             {
@@ -1473,6 +2385,84 @@ namespace Microsoft.Build.Evaluation
             _expander.Metadata = null;
         }
 
+        private void EvaluateItemDefinitionElement(
+            EvaluationModule module,
+            ItemDefinitionTemplate template,
+            ProjectItemDefinitionElement itemDefinitionElement)
+        {
+            string itemType =
+                module.GetStringValue(template.ItemTypeStringId);
+            IItemDefinition<M> itemDefinition =
+                _data.GetItemDefinition(itemType);
+
+            if (itemDefinition != null)
+            {
+                _expander.Metadata = itemDefinition;
+            }
+            else
+            {
+                _expander.Metadata =
+                    new EvaluatorMetadataTable(itemType);
+            }
+
+            if (EvaluateCondition(
+                    itemDefinitionElement,
+                    module.GetConditionValue(template.ConditionId),
+                    ExpanderOptions.ExpandPropertiesAndMetadata,
+                    ParserOptions.AllowPropertiesAndCustomMetadata))
+            {
+                if (itemDefinition == null)
+                {
+                    itemDefinition = _data.AddItemDefinition(itemType);
+                    _expander.Metadata = itemDefinition;
+                }
+
+                int metadataEnd =
+                    template.Metadata.Start + template.Metadata.Count;
+                for (int i = template.Metadata.Start; i < metadataEnd; i++)
+                {
+                    MetadataTemplate metadataTemplate = module.Metadata[i];
+                    ProjectMetadataElement metadataElement =
+                        (ProjectMetadataElement)module.GetSource(
+                            metadataTemplate.SourceId);
+                    if (!EvaluateCondition(
+                            metadataElement,
+                            module.GetConditionValue(
+                                metadataTemplate.ConditionId),
+                            ExpanderOptions.ExpandPropertiesAndMetadata,
+                            ParserOptions.AllowPropertiesAndCustomMetadata))
+                    {
+                        continue;
+                    }
+
+                    string evaluatedValue =
+                        _expander.ExpandIntoStringLeaveEscaped(
+                            module.GetExpressionValue(
+                                metadataTemplate.ValueExpressionId),
+                            ExpanderOptions
+                                .ExpandPropertiesAndCustomMetadata,
+                            itemDefinitionElement.Location);
+
+                    M predecessor =
+                        itemDefinition.GetMetadata(
+                            module.GetStringValue(
+                                metadataTemplate.NameStringId));
+                    M metadatum = itemDefinition.SetMetadata(
+                        metadataElement,
+                        evaluatedValue,
+                        predecessor);
+
+                    if (_data.ShouldEvaluateForDesignTime)
+                    {
+                        _data.AddToAllEvaluatedItemDefinitionMetadataList(
+                            metadatum);
+                    }
+                }
+            }
+
+            _expander.Metadata = null;
+        }
+
         /// <summary>
         /// Evaluates an import element.
         /// If the condition is true, loads the import and continues the pass.
@@ -1484,7 +2474,18 @@ namespace Microsoft.Build.Evaluation
         {
             using (_evaluationProfiler.TrackElement(importElement))
             {
-                List<ProjectRootElement> importedProjectRootElements = ExpandAndLoadImports(directoryOfImportingFile, importElement, out var sdkResult);
+                List<ProjectRootElement> importedProjectRootElements;
+                SdkResult sdkResult;
+                using (_moduleEvaluationReadTracker.Track(
+                           importElement,
+                           "Import",
+                           importElement.Project))
+                {
+                    importedProjectRootElements = ExpandAndLoadImports(
+                        directoryOfImportingFile,
+                        importElement,
+                        out sdkResult);
+                }
 
                 if (importedProjectRootElements != null)
                 {
@@ -1512,12 +2513,54 @@ namespace Microsoft.Build.Evaluation
         {
             using (_evaluationProfiler.TrackElement(importGroupElement))
             {
-                if (EvaluateConditionCollectingConditionedProperties(importGroupElement, ExpanderOptions.ExpandProperties, ParserOptions.AllowProperties, _projectRootElementCache))
+                bool conditionResult;
+                using (_moduleEvaluationReadTracker.Track(
+                           importGroupElement,
+                           "ImportGroupCondition",
+                           location: importGroupElement.ConditionLocation))
+                {
+                    conditionResult = EvaluateConditionCollectingConditionedProperties(
+                        importGroupElement,
+                        ExpanderOptions.ExpandProperties,
+                        ParserOptions.AllowProperties,
+                        _projectRootElementCache);
+                }
+
+                if (conditionResult)
                 {
                     foreach (ProjectImportElement importElement in importGroupElement.Imports)
                     {
                         EvaluateImportElement(directoryOfImportingFile, importElement);
                     }
+                }
+            }
+        }
+
+        private void EvaluateImportGroupElement(
+            EvaluationModule module,
+            int importGroupIndex)
+        {
+            ImportGroupTemplate importGroup = module.ImportGroups[importGroupIndex];
+            var source = (ProjectImportGroupElement)module.GetSource(
+                importGroup.SourceId);
+            using (_evaluationProfiler.TrackElement(source))
+            {
+                bool conditionResult;
+                using (_moduleEvaluationReadTracker.Track(
+                           source,
+                           "ImportGroupCondition",
+                           location: source.ConditionLocation))
+                {
+                    conditionResult = EvaluateConditionCollectingConditionedProperties(
+                        source,
+                        ExpanderOptions.ExpandProperties,
+                        ParserOptions.AllowProperties,
+                        _projectRootElementCache);
+                }
+
+                if (conditionResult)
+                {
+                    EvaluateModuleImports(module, importGroup.Imports);
                 }
             }
         }
@@ -1536,7 +2579,19 @@ namespace Microsoft.Build.Evaluation
             {
                 foreach (ProjectWhenElement whenElement in chooseElement.WhenElements)
                 {
-                    if (EvaluateConditionCollectingConditionedProperties(whenElement, ExpanderOptions.ExpandProperties, ParserOptions.AllowProperties))
+                    bool conditionResult;
+                    using (_moduleEvaluationReadTracker.Track(
+                               whenElement,
+                               "ChooseWhenCondition",
+                               location: whenElement.ConditionLocation))
+                    {
+                        conditionResult = EvaluateConditionCollectingConditionedProperties(
+                            whenElement,
+                            ExpanderOptions.ExpandProperties,
+                            ParserOptions.AllowProperties);
+                    }
+
+                    if (conditionResult)
                     {
                         EvaluateWhenOrOtherwiseChildren(whenElement.ChildrenEnumerable);
                         return;
@@ -1547,6 +2602,52 @@ namespace Microsoft.Build.Evaluation
                 if (chooseElement.OtherwiseElement != null)
                 {
                     EvaluateWhenOrOtherwiseChildren(chooseElement.OtherwiseElement.ChildrenEnumerable);
+                }
+            }
+        }
+
+        private void EvaluateChooseElement(
+            EvaluationModule module,
+            int chooseIndex)
+        {
+            ChooseTemplate choose = module.Chooses[chooseIndex];
+            var source = (ProjectChooseElement)module.GetSource(choose.SourceId);
+            using (_evaluationProfiler.TrackElement(source))
+            {
+                TableRange arms = choose.Arms;
+                for (int i = arms.Start; i < arms.Start + arms.Count; i++)
+                {
+                    ChooseArmTemplate arm = module.ChooseArms[i];
+                    if (arm.IsOtherwise)
+                    {
+                        EvaluateModuleElements(
+                            module,
+                            arm.Children,
+                            trackElements: true);
+                        return;
+                    }
+
+                    var when = (ProjectWhenElement)module.GetSource(arm.SourceId);
+                    bool conditionResult;
+                    using (_moduleEvaluationReadTracker.Track(
+                               when,
+                               "ChooseWhenCondition",
+                               location: when.ConditionLocation))
+                    {
+                        conditionResult = EvaluateConditionCollectingConditionedProperties(
+                            when,
+                            ExpanderOptions.ExpandProperties,
+                            ParserOptions.AllowProperties);
+                    }
+
+                    if (conditionResult)
+                    {
+                        EvaluateModuleElements(
+                            module,
+                            arm.Children,
+                            trackElements: true);
+                        return;
+                    }
                 }
             }
         }
@@ -1906,6 +3007,16 @@ namespace Microsoft.Build.Evaluation
 
                 if (!sdkResult.Success)
                 {
+                    if (_evaluationContext.EvaluationMode == ProjectEvaluationMode.Pure &&
+                        sdkResult.IsMissingFromLock)
+                    {
+                        ProjectErrorUtilities.ThrowInvalidProject(
+                            importElement.SdkLocation,
+                            "PureEvaluationSdkNotInLock",
+                            sdkReference.ToString(),
+                            projectPath);
+                    }
+
                     if (_loadSettings.HasFlag(ProjectLoadSettings.IgnoreMissingImports) && !_loadSettings.HasFlag(ProjectLoadSettings.FailOnUnresolvedSdk))
                     {
                         ProjectImportedEventArgs eventArgs = new ProjectImportedEventArgs(
@@ -1977,7 +3088,8 @@ namespace Microsoft.Build.Evaluation
                 // TEMPORARY COMPAT SHIM: .NET SDK 10.0.100-preview.6 shipped with a resolver that didn't
                 // return environment variables. Take the _property_ it does set and promote it.
                 // REMOVE BY net10 RC.
-                if (sdkResult.PropertiesToAdd?.ContainsKey("DOTNET_EXPERIMENTAL_HOST_PATH") == true)
+                if (_evaluationContext.EvaluationMode != ProjectEvaluationMode.Pure &&
+                    sdkResult.PropertiesToAdd?.ContainsKey("DOTNET_EXPERIMENTAL_HOST_PATH") == true)
                 {
                     // "S:\sdk\.dotnet\sdk\10.0.100-preview.6.25315.102\Sdks\Microsoft.NET.Sdk\Sdk"
                     //                  ^5              ^4               ^3          ^2        ^1
@@ -2516,6 +3628,8 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
 
+            using (EvaluationPerformanceInstrumentation.Measure(
+                       EvaluationPerformanceMetric.ConditionEvaluation))
             using (_evaluationProfiler.TrackCondition(element.ConditionLocation, condition))
             {
                 bool result = ConditionEvaluator.EvaluateCondition(
@@ -2552,6 +3666,8 @@ namespace Microsoft.Build.Evaluation
                 return EvaluateCondition(element, condition, expanderOptions, parserOptions);
             }
 
+            using (EvaluationPerformanceInstrumentation.Measure(
+                       EvaluationPerformanceMetric.ConditionEvaluation))
             using (_evaluationProfiler.TrackCondition(element.ConditionLocation, condition))
             {
                 bool result = ConditionEvaluator.EvaluateConditionCollectingConditionedProperties(
