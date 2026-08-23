@@ -285,7 +285,19 @@ namespace Microsoft.Build.Evaluation
         /// <summary>
         /// Sets a property which comes from the Xml.
         /// </summary>
-        P SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, BackEnd.Logging.LoggingContext loggingContext);
+        P SetProperty(
+            ProjectPropertyElement propertyElement,
+            string evaluatedValueEscaped,
+            BackEnd.Logging.LoggingContext loggingContext,
+            bool preserveEvaluationHistory = true);
+
+        /// <summary>
+        /// Publishes a contiguous range of constant compiled property effects
+        /// without design-time history.
+        /// </summary>
+        void SetConstantProperties(
+            EvaluationModule module,
+            TableRange properties);
 
         /// <summary>
         /// Retrieves an existing target, if any.

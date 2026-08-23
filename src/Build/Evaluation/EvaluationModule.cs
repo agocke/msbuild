@@ -8,6 +8,8 @@ using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Microsoft.Build.Construction;
+using Microsoft.Build.Framework;
+using Microsoft.Build.Shared;
 
 #nullable disable
 
@@ -405,10 +407,12 @@ namespace Microsoft.Build.Evaluation
         internal PropertyGroupTemplate(
             int conditionId,
             TableRange properties,
+            TableRange propertySegments,
             int sourceId)
         {
             ConditionId = conditionId;
             Properties = properties;
+            PropertySegments = propertySegments;
             SourceId = sourceId;
         }
 
@@ -416,7 +420,30 @@ namespace Microsoft.Build.Evaluation
 
         internal TableRange Properties { get; }
 
+        internal TableRange PropertySegments { get; }
+
         internal int SourceId { get; }
+    }
+
+    internal enum PropertySegmentKind : byte
+    {
+        Scalar,
+        CompiledEffectBatch,
+    }
+
+    internal readonly struct PropertySegmentTemplate
+    {
+        internal PropertySegmentTemplate(
+            PropertySegmentKind kind,
+            TableRange properties)
+        {
+            Kind = kind;
+            Properties = properties;
+        }
+
+        internal PropertySegmentKind Kind { get; }
+
+        internal TableRange Properties { get; }
     }
 
     internal readonly struct PropertyTemplate
@@ -425,11 +452,17 @@ namespace Microsoft.Build.Evaluation
             int nameStringId,
             int conditionId,
             int valueExpressionId,
+            int constantValueStringId,
+            TableRange compiledValueParts,
+            bool isDeadStore,
             int sourceId)
         {
             NameStringId = nameStringId;
             ConditionId = conditionId;
             ValueExpressionId = valueExpressionId;
+            ConstantValueStringId = constantValueStringId;
+            CompiledValueParts = compiledValueParts;
+            IsDeadStore = isDeadStore;
             SourceId = sourceId;
         }
 
@@ -439,7 +472,44 @@ namespace Microsoft.Build.Evaluation
 
         internal int ValueExpressionId { get; }
 
+        internal int ConstantValueStringId { get; }
+
+        internal TableRange CompiledValueParts { get; }
+
+        internal bool IsDeadStore { get; }
+
         internal int SourceId { get; }
+
+        internal PropertyTemplate AsDeadStore() =>
+            new PropertyTemplate(
+                NameStringId,
+                ConditionId,
+                ValueExpressionId,
+                ConstantValueStringId,
+                CompiledValueParts,
+                isDeadStore: true,
+                SourceId);
+    }
+
+    internal enum CompiledPropertyValuePartKind : byte
+    {
+        Literal,
+        PropertyReference,
+    }
+
+    internal readonly struct CompiledPropertyValuePart
+    {
+        internal CompiledPropertyValuePart(
+            CompiledPropertyValuePartKind kind,
+            int value)
+        {
+            Kind = kind;
+            Value = value;
+        }
+
+        internal CompiledPropertyValuePartKind Kind { get; }
+
+        internal int Value { get; }
     }
 
     internal readonly struct ImportGroupTemplate
@@ -749,7 +819,9 @@ namespace Microsoft.Build.Evaluation
             ModuleHeader header,
             ModuleElement[] elements,
             PropertyGroupTemplate[] propertyGroups,
+            PropertySegmentTemplate[] propertySegments,
             PropertyTemplate[] properties,
+            CompiledPropertyValuePart[] compiledPropertyValueParts,
             ImportGroupTemplate[] importGroups,
             ImportTemplate[] imports,
             ChooseTemplate[] chooses,
@@ -777,7 +849,9 @@ namespace Microsoft.Build.Evaluation
             Header = header;
             Elements = elements;
             PropertyGroups = propertyGroups;
+            PropertySegments = propertySegments;
             Properties = properties;
+            CompiledPropertyValueParts = compiledPropertyValueParts;
             ImportGroups = importGroups;
             Imports = imports;
             Chooses = chooses;
@@ -811,7 +885,11 @@ namespace Microsoft.Build.Evaluation
 
         internal PropertyGroupTemplate[] PropertyGroups { get; }
 
+        internal PropertySegmentTemplate[] PropertySegments { get; }
+
         internal PropertyTemplate[] Properties { get; }
+
+        internal CompiledPropertyValuePart[] CompiledPropertyValueParts { get; }
 
         internal ImportGroupTemplate[] ImportGroups { get; }
 
@@ -930,8 +1008,13 @@ namespace Microsoft.Build.Evaluation
             private readonly List<ModuleElement> _elements = new List<ModuleElement>();
             private readonly List<PropertyGroupTemplate> _propertyGroups =
                 new List<PropertyGroupTemplate>();
+            private readonly List<PropertySegmentTemplate> _propertySegments =
+                new List<PropertySegmentTemplate>();
             private readonly List<PropertyTemplate> _properties =
                 new List<PropertyTemplate>();
+            private readonly List<CompiledPropertyValuePart>
+                _compiledPropertyValueParts =
+                    new List<CompiledPropertyValuePart>();
             private readonly List<ImportGroupTemplate> _importGroups =
                 new List<ImportGroupTemplate>();
             private readonly List<ImportTemplate> _imports =
@@ -1026,7 +1109,9 @@ namespace Microsoft.Build.Evaluation
                     header,
                     _elements.ToArray(),
                     _propertyGroups.ToArray(),
+                    _propertySegments.ToArray(),
                     _properties.ToArray(),
+                    _compiledPropertyValueParts.ToArray(),
                     _importGroups.ToArray(),
                     _imports.ToArray(),
                     _chooses.ToArray(),
@@ -1130,9 +1215,74 @@ namespace Microsoft.Build.Evaluation
             {
                 int sourceId = AddSource(propertyGroup);
                 int conditionId = AddCondition(propertyGroup.Condition, sourceId);
-                int start = _properties.Count;
+                int propertyStart = _properties.Count;
+                int segmentStart = _propertySegments.Count;
+                int currentSegmentStart = propertyStart;
+                PropertySegmentKind? currentSegmentKind = null;
+                var lastCompiledAssignments =
+                    new Dictionary<string, int>(
+                        StringComparer.OrdinalIgnoreCase);
+                var observedCompiledAssignments = new HashSet<int>();
                 foreach (ProjectPropertyElement property in propertyGroup.Properties)
                 {
+                    int constantValueStringId = 0;
+                    TableRange compiledValueParts = default;
+                    List<int> referencedAssignments = null;
+                    bool isCompiledEffect =
+                        string.IsNullOrEmpty(property.Condition) &&
+                        TryCompilePropertyValue(
+                            property.Value,
+                            lastCompiledAssignments,
+                            out constantValueStringId,
+                            out compiledValueParts,
+                            out referencedAssignments);
+                    PropertySegmentKind segmentKind =
+                        isCompiledEffect
+                            ? PropertySegmentKind.CompiledEffectBatch
+                            : PropertySegmentKind.Scalar;
+                    if (currentSegmentKind is not null &&
+                        currentSegmentKind != segmentKind)
+                    {
+                        _propertySegments.Add(new PropertySegmentTemplate(
+                            currentSegmentKind.Value,
+                            new TableRange(
+                                currentSegmentStart,
+                                _properties.Count - currentSegmentStart)));
+                        currentSegmentStart = _properties.Count;
+                    }
+
+                    currentSegmentKind = segmentKind;
+                    if (isCompiledEffect)
+                    {
+                        if (referencedAssignments is not null)
+                        {
+                            foreach (int referencedAssignment
+                                     in referencedAssignments)
+                            {
+                                observedCompiledAssignments.Add(
+                                    referencedAssignment);
+                            }
+                        }
+
+                        if (lastCompiledAssignments.TryGetValue(
+                                property.Name,
+                                out int previousAssignment) &&
+                            !observedCompiledAssignments.Contains(
+                                previousAssignment))
+                        {
+                            _properties[previousAssignment] =
+                                _properties[previousAssignment].AsDeadStore();
+                        }
+
+                        lastCompiledAssignments[property.Name] =
+                            _properties.Count;
+                    }
+                    else
+                    {
+                        lastCompiledAssignments.Clear();
+                        observedCompiledAssignments.Clear();
+                    }
+
                     int propertySourceId = AddSource(property);
                     int propertyConditionId = AddCondition(
                         property.Condition,
@@ -1141,11 +1291,23 @@ namespace Microsoft.Build.Evaluation
                         GetStringId(property.Name),
                         propertyConditionId,
                         AddExpression(property.Value, propertySourceId),
+                        constantValueStringId,
+                        compiledValueParts,
+                        isDeadStore: false,
                         propertySourceId));
 
                     var operation = new PropertyAssignmentOperation(property);
                     _propertyAssignments.Add(operation);
                     _propertyAssignmentsByElement.Add(property, operation);
+                }
+
+                if (currentSegmentKind is not null)
+                {
+                    _propertySegments.Add(new PropertySegmentTemplate(
+                        currentSegmentKind.Value,
+                        new TableRange(
+                            currentSegmentStart,
+                            _properties.Count - currentSegmentStart)));
                 }
 
                 ConditionOperation conditionOperation =
@@ -1154,9 +1316,121 @@ namespace Microsoft.Build.Evaluation
                 _propertyGroupConditions.Add(propertyGroup, conditionOperation);
                 _propertyGroups.Add(new PropertyGroupTemplate(
                     conditionId,
-                    new TableRange(start, _properties.Count - start),
+                    new TableRange(
+                        propertyStart,
+                        _properties.Count - propertyStart),
+                    new TableRange(
+                        segmentStart,
+                        _propertySegments.Count - segmentStart),
                     sourceId));
                 return _propertyGroups.Count - 1;
+            }
+
+            private bool TryCompilePropertyValue(
+                string value,
+                Dictionary<string, int> locallyDefinedProperties,
+                out int constantValueStringId,
+                out TableRange compiledValueParts,
+                out List<int> referencedAssignments)
+            {
+                int propertyStart = value.IndexOf(
+                    "$(",
+                    StringComparison.Ordinal);
+                if (propertyStart < 0)
+                {
+                    constantValueStringId = GetStringId(
+                        FileUtilities.MaybeAdjustFilePath(value));
+                    compiledValueParts = default;
+                    referencedAssignments = null;
+                    return true;
+                }
+
+                var parts = new List<CompiledPropertyValuePart>();
+                var references = new List<int>();
+                int sourceIndex = 0;
+                while (propertyStart >= 0)
+                {
+                    if (propertyStart > sourceIndex)
+                    {
+                        parts.Add(new CompiledPropertyValuePart(
+                            CompiledPropertyValuePartKind.Literal,
+                            GetStringId(
+                                FileUtilities.MaybeAdjustFilePath(
+                                    value.Substring(
+                                        sourceIndex,
+                                        propertyStart - sourceIndex)))));
+                    }
+
+                    int propertyEnd = value.IndexOf(')', propertyStart + 2);
+                    if (propertyEnd < 0)
+                    {
+                        constantValueStringId = 0;
+                        compiledValueParts = default;
+                        referencedAssignments = null;
+                        return false;
+                    }
+
+                    string propertyName = value.Substring(
+                        propertyStart + 2,
+                        propertyEnd - propertyStart - 2);
+                    if (!IsValidPropertyName(propertyName) ||
+                        !locallyDefinedProperties.TryGetValue(
+                            propertyName,
+                            out int referencedAssignment))
+                    {
+                        constantValueStringId = 0;
+                        compiledValueParts = default;
+                        referencedAssignments = null;
+                        return false;
+                    }
+
+                    references.Add(referencedAssignment);
+                    parts.Add(new CompiledPropertyValuePart(
+                        CompiledPropertyValuePartKind.PropertyReference,
+                        referencedAssignment));
+                    sourceIndex = propertyEnd + 1;
+                    propertyStart = value.IndexOf(
+                        "$(",
+                        sourceIndex,
+                        StringComparison.Ordinal);
+                }
+
+                if (sourceIndex < value.Length)
+                {
+                    parts.Add(new CompiledPropertyValuePart(
+                        CompiledPropertyValuePartKind.Literal,
+                        GetStringId(
+                            FileUtilities.MaybeAdjustFilePath(
+                                value.Substring(sourceIndex)))));
+                }
+
+                int start = _compiledPropertyValueParts.Count;
+                _compiledPropertyValueParts.AddRange(parts);
+                constantValueStringId = 0;
+                compiledValueParts = new TableRange(start, parts.Count);
+                referencedAssignments = references;
+                return true;
+            }
+
+            private static bool IsValidPropertyName(string propertyName)
+            {
+                if (propertyName.Length == 0 ||
+                    !XmlUtilities.IsValidInitialElementNameCharacter(
+                        propertyName[0]))
+                {
+                    return false;
+                }
+
+                for (int i = 1; i < propertyName.Length; i++)
+                {
+                    if (!XmlUtilities.IsValidSubsequentElementNameCharacter(
+                            propertyName[i]))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
             }
 
             private int AddImportGroup(ProjectImportGroupElement importGroup)
@@ -1406,8 +1680,13 @@ namespace Microsoft.Build.Evaluation
 
         internal EvaluationOperationId Id { get; }
 
-        internal bool SupportsReplay =>
-            EvaluationReplayEligibility.SupportsCondition(Source.Condition);
+        internal bool SupportsReplay(ProjectEvaluationMode evaluationMode) =>
+            EvaluationReplayEligibility.SupportsCondition(
+                Source.Condition,
+                evaluationMode) &&
+            EvaluationReplayEligibility.SupportsPropertyValue(
+                Source.Value,
+                evaluationMode);
     }
 
     internal sealed class ConditionOperation
@@ -1424,8 +1703,10 @@ namespace Microsoft.Build.Evaluation
 
         internal EvaluationOperationId Id { get; }
 
-        internal bool SupportsReplay =>
-            EvaluationReplayEligibility.SupportsCondition(Source.Condition);
+        internal bool SupportsReplay(ProjectEvaluationMode evaluationMode) =>
+            EvaluationReplayEligibility.SupportsCondition(
+                Source.Condition,
+                evaluationMode);
 
         internal static ConditionOperation CreateForPropertyGroup(
             ProjectPropertyGroupElement source)
@@ -1441,11 +1722,68 @@ namespace Microsoft.Build.Evaluation
 
     internal static class EvaluationReplayEligibility
     {
-        internal static bool SupportsCondition(string condition)
+        internal static bool SupportsCondition(
+            string condition,
+            ProjectEvaluationMode evaluationMode)
         {
             return condition?.IndexOf(
-                "Exists",
-                StringComparison.OrdinalIgnoreCase) < 0;
+                       "Exists",
+                       StringComparison.OrdinalIgnoreCase) < 0 &&
+                SupportsExpansion(condition, evaluationMode);
+        }
+
+        internal static bool SupportsPropertyValue(
+            string value,
+            ProjectEvaluationMode evaluationMode) =>
+            SupportsExpansion(value, evaluationMode);
+
+        private static bool SupportsExpansion(
+            string expression,
+            ProjectEvaluationMode evaluationMode)
+        {
+            if (evaluationMode == ProjectEvaluationMode.Pure ||
+                string.IsNullOrEmpty(expression))
+            {
+                return true;
+            }
+
+            // Classic evaluation permits ambient static and registry property
+            // functions whose results are not represented by property reads.
+            for (int propertyStart = expression.IndexOf(
+                     "$(",
+                     StringComparison.Ordinal);
+                 propertyStart >= 0;
+                 propertyStart = expression.IndexOf(
+                     "$(",
+                     propertyStart + 2,
+                     StringComparison.Ordinal))
+            {
+                int bodyStart = propertyStart + 2;
+                while (bodyStart < expression.Length &&
+                       char.IsWhiteSpace(expression[bodyStart]))
+                {
+                    bodyStart++;
+                }
+
+                if (bodyStart < expression.Length &&
+                    expression[bodyStart] == '[')
+                {
+                    return false;
+                }
+
+                const string registryPrefix = "Registry:";
+                if (bodyStart + registryPrefix.Length <= expression.Length &&
+                    expression.IndexOf(
+                        registryPrefix,
+                        bodyStart,
+                        registryPrefix.Length,
+                        StringComparison.OrdinalIgnoreCase) == bodyStart)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 
@@ -1453,83 +1791,129 @@ namespace Microsoft.Build.Evaluation
     {
         private readonly ConcurrentDictionary<EvaluationOperationId, CacheEntry> _entries =
             new ConcurrentDictionary<EvaluationOperationId, CacheEntry>();
+        private long _hits;
+        private long _misses;
+        private long _publicationContentions;
+        private long _publishedVariants;
 
-        internal Lease Enter(EvaluationOperationId operation)
+        internal bool TryFind(
+            EvaluationOperationId operation,
+            Func<string, string> readProperty,
+            out PropertyAssignmentVariant variant)
         {
             CacheEntry entry = _entries.GetOrAdd(
                 operation,
                 static _ => new CacheEntry());
-            return new Lease(entry);
+            foreach (PropertyAssignmentVariant candidate in entry.Snapshot)
+            {
+                if (candidate.Matches(readProperty))
+                {
+                    Interlocked.Increment(ref _hits);
+                    EvaluationPerformanceInstrumentation.RecordEvent(
+                        EvaluationPerformanceMetric.PropertyReplayCacheHit);
+                    variant = candidate;
+                    return true;
+                }
+            }
+
+            Interlocked.Increment(ref _misses);
+            EvaluationPerformanceInstrumentation.RecordEvent(
+                EvaluationPerformanceMetric.PropertyReplayCacheMiss);
+            variant = null;
+            return false;
         }
 
-        internal sealed class Lease : IDisposable
+        internal PropertyAssignmentVariant Publish(
+            EvaluationOperationId operation,
+            IReadOnlyDictionary<string, string> propertyReads,
+            bool assigned,
+            string evaluatedValueEscaped,
+            ConditionedPropertiesDelta conditionedProperties)
         {
-            private readonly CacheEntry _entry;
-            private bool _disposed;
-
-            internal Lease(CacheEntry entry)
+            var observations =
+                ImmutableArray.CreateBuilder<PropertyObservation>(
+                    propertyReads.Count);
+            foreach (KeyValuePair<string, string> read in propertyReads)
             {
-                _entry = entry;
-                System.Threading.Monitor.Enter(_entry.Lock);
+                observations.Add(new PropertyObservation(read.Key, read.Value));
             }
 
-            internal bool TryFind(
-                Func<string, string> readProperty,
-                out PropertyAssignmentVariant variant)
-            {
-                foreach (PropertyAssignmentVariant candidate in _entry.Variants)
-                {
-                    if (candidate.Matches(readProperty))
-                    {
-                        variant = candidate;
-                        return true;
-                    }
-                }
+            observations.Sort(PropertyObservationComparer.Instance);
+            var candidate = new PropertyAssignmentVariant(
+                observations.MoveToImmutable(),
+                assigned,
+                evaluatedValueEscaped,
+                conditionedProperties);
+            CacheEntry entry = _entries.GetOrAdd(
+                operation,
+                static _ => new CacheEntry());
+            PropertyAssignmentVariant published = entry.Publish(
+                candidate,
+                out bool added);
 
-                variant = null;
-                return false;
+            if (added)
+            {
+                Interlocked.Increment(ref _publishedVariants);
             }
 
-            internal PropertyAssignmentVariant Add(
-                IReadOnlyDictionary<string, string> propertyReads,
-                bool assigned,
-                string evaluatedValueEscaped,
-                ConditionedPropertiesDelta conditionedProperties)
+            if (!added)
             {
-                var observations =
-                    ImmutableArray.CreateBuilder<PropertyObservation>(
-                        propertyReads.Count);
-                foreach (KeyValuePair<string, string> read in propertyReads)
-                {
-                    observations.Add(new PropertyObservation(read.Key, read.Value));
-                }
-
-                observations.Sort(PropertyObservationComparer.Instance);
-                var variant = new PropertyAssignmentVariant(
-                    observations.MoveToImmutable(),
-                    assigned,
-                    evaluatedValueEscaped,
-                    conditionedProperties);
-                _entry.Variants.Add(variant);
-                return variant;
+                Interlocked.Increment(ref _publicationContentions);
+                EvaluationPerformanceInstrumentation.RecordEvent(
+                    EvaluationPerformanceMetric.PropertyReplayCacheContention);
             }
 
-            public void Dispose()
-            {
-                if (!_disposed)
-                {
-                    _disposed = true;
-                    System.Threading.Monitor.Exit(_entry.Lock);
-                }
-            }
+            return published;
         }
+
+        internal EvaluationReplayCacheMetrics GetMetrics() =>
+            new EvaluationReplayCacheMetrics(
+                Interlocked.Read(ref _hits),
+                Interlocked.Read(ref _misses),
+                Interlocked.Read(ref _publicationContentions),
+                Interlocked.Read(ref _publishedVariants));
 
         internal sealed class CacheEntry
         {
-            internal object Lock { get; } = new object();
+            private PropertyAssignmentVariant[] _variants =
+                Array.Empty<PropertyAssignmentVariant>();
 
-            internal List<PropertyAssignmentVariant> Variants { get; } =
-                new List<PropertyAssignmentVariant>();
+            internal PropertyAssignmentVariant[] Snapshot =>
+                Volatile.Read(ref _variants);
+
+            internal PropertyAssignmentVariant Publish(
+                PropertyAssignmentVariant candidate,
+                out bool added)
+            {
+                while (true)
+                {
+                    PropertyAssignmentVariant[] snapshot =
+                        Volatile.Read(ref _variants);
+                    foreach (PropertyAssignmentVariant existing in snapshot)
+                    {
+                        if (existing.HasSameInputs(candidate))
+                        {
+                            added = false;
+                            return existing;
+                        }
+                    }
+
+                    var updated =
+                        new PropertyAssignmentVariant[snapshot.Length + 1];
+                    Array.Copy(snapshot, updated, snapshot.Length);
+                    updated[snapshot.Length] = candidate;
+                    if (ReferenceEquals(
+                            Interlocked.CompareExchange(
+                                ref _variants,
+                                updated,
+                                snapshot),
+                            snapshot))
+                    {
+                        added = true;
+                        return candidate;
+                    }
+                }
+            }
         }
     }
 
@@ -1581,6 +1965,11 @@ namespace Microsoft.Build.Evaluation
             return true;
         }
 
+        internal bool HasSameInputs(PropertyAssignmentVariant other) =>
+            PropertyObservationComparer.HaveSameValues(
+                Dependencies,
+                other.Dependencies);
+
         internal IReadOnlyDictionary<string, string> DependencyValues =>
             _dependencyValues;
     }
@@ -1589,79 +1978,124 @@ namespace Microsoft.Build.Evaluation
     {
         private readonly ConcurrentDictionary<EvaluationOperationId, CacheEntry> _entries =
             new ConcurrentDictionary<EvaluationOperationId, CacheEntry>();
+        private long _hits;
+        private long _misses;
+        private long _publicationContentions;
+        private long _publishedVariants;
 
-        internal Lease Enter(EvaluationOperationId operation)
+        internal bool TryFind(
+            EvaluationOperationId operation,
+            Func<string, string> readProperty,
+            out ConditionVariant variant)
         {
             CacheEntry entry = _entries.GetOrAdd(
                 operation,
                 static _ => new CacheEntry());
-            return new Lease(entry);
+            foreach (ConditionVariant candidate in entry.Snapshot)
+            {
+                if (candidate.Matches(readProperty))
+                {
+                    Interlocked.Increment(ref _hits);
+                    EvaluationPerformanceInstrumentation.RecordEvent(
+                        EvaluationPerformanceMetric.ConditionReplayCacheHit);
+                    variant = candidate;
+                    return true;
+                }
+            }
+
+            Interlocked.Increment(ref _misses);
+            EvaluationPerformanceInstrumentation.RecordEvent(
+                EvaluationPerformanceMetric.ConditionReplayCacheMiss);
+            variant = null;
+            return false;
         }
 
-        internal sealed class Lease : IDisposable
+        internal void Publish(
+            EvaluationOperationId operation,
+            IReadOnlyDictionary<string, string> propertyReads,
+            bool result,
+            ConditionedPropertiesDelta conditionedProperties)
         {
-            private readonly CacheEntry _entry;
-            private bool _disposed;
-
-            internal Lease(CacheEntry entry)
+            var observations =
+                ImmutableArray.CreateBuilder<PropertyObservation>(
+                    propertyReads.Count);
+            foreach (KeyValuePair<string, string> read in propertyReads)
             {
-                _entry = entry;
-                System.Threading.Monitor.Enter(_entry.Lock);
+                observations.Add(new PropertyObservation(read.Key, read.Value));
             }
 
-            internal bool TryFind(
-                Func<string, string> readProperty,
-                out ConditionVariant variant)
-            {
-                foreach (ConditionVariant candidate in _entry.Variants)
-                {
-                    if (candidate.Matches(readProperty))
-                    {
-                        variant = candidate;
-                        return true;
-                    }
-                }
+            observations.Sort(PropertyObservationComparer.Instance);
+            var candidate = new ConditionVariant(
+                observations.MoveToImmutable(),
+                result,
+                conditionedProperties);
+            CacheEntry entry = _entries.GetOrAdd(
+                operation,
+                static _ => new CacheEntry());
+            entry.Publish(
+                candidate,
+                out bool added);
 
-                variant = null;
-                return false;
+            if (added)
+            {
+                Interlocked.Increment(ref _publishedVariants);
             }
 
-            internal void Add(
-                IReadOnlyDictionary<string, string> propertyReads,
-                bool result,
-                ConditionedPropertiesDelta conditionedProperties)
+            if (!added)
             {
-                var observations =
-                    ImmutableArray.CreateBuilder<PropertyObservation>(
-                        propertyReads.Count);
-                foreach (KeyValuePair<string, string> read in propertyReads)
-                {
-                    observations.Add(new PropertyObservation(read.Key, read.Value));
-                }
-
-                observations.Sort(PropertyObservationComparer.Instance);
-                _entry.Variants.Add(new ConditionVariant(
-                    observations.MoveToImmutable(),
-                    result,
-                    conditionedProperties));
-            }
-
-            public void Dispose()
-            {
-                if (!_disposed)
-                {
-                    _disposed = true;
-                    System.Threading.Monitor.Exit(_entry.Lock);
-                }
+                Interlocked.Increment(ref _publicationContentions);
+                EvaluationPerformanceInstrumentation.RecordEvent(
+                    EvaluationPerformanceMetric.ConditionReplayCacheContention);
             }
         }
+
+        internal EvaluationReplayCacheMetrics GetMetrics() =>
+            new EvaluationReplayCacheMetrics(
+                Interlocked.Read(ref _hits),
+                Interlocked.Read(ref _misses),
+                Interlocked.Read(ref _publicationContentions),
+                Interlocked.Read(ref _publishedVariants));
 
         internal sealed class CacheEntry
         {
-            internal object Lock { get; } = new object();
+            private ConditionVariant[] _variants =
+                Array.Empty<ConditionVariant>();
 
-            internal List<ConditionVariant> Variants { get; } =
-                new List<ConditionVariant>();
+            internal ConditionVariant[] Snapshot =>
+                Volatile.Read(ref _variants);
+
+            internal ConditionVariant Publish(
+                ConditionVariant candidate,
+                out bool added)
+            {
+                while (true)
+                {
+                    ConditionVariant[] snapshot =
+                        Volatile.Read(ref _variants);
+                    foreach (ConditionVariant existing in snapshot)
+                    {
+                        if (existing.HasSameInputs(candidate))
+                        {
+                            added = false;
+                            return existing;
+                        }
+                    }
+
+                    var updated = new ConditionVariant[snapshot.Length + 1];
+                    Array.Copy(snapshot, updated, snapshot.Length);
+                    updated[snapshot.Length] = candidate;
+                    if (ReferenceEquals(
+                            Interlocked.CompareExchange(
+                                ref _variants,
+                                updated,
+                                snapshot),
+                            snapshot))
+                    {
+                        added = true;
+                        return candidate;
+                    }
+                }
+            }
         }
     }
 
@@ -1709,6 +2143,11 @@ namespace Microsoft.Build.Evaluation
             return true;
         }
 
+        internal bool HasSameInputs(ConditionVariant other) =>
+            PropertyObservationComparer.HaveSameValues(
+                Dependencies,
+                other.Dependencies);
+
         internal IReadOnlyDictionary<string, string> DependencyValues =>
             _dependencyValues;
     }
@@ -1733,6 +2172,54 @@ namespace Microsoft.Build.Evaluation
 
         public int Compare(PropertyObservation x, PropertyObservation y) =>
             StringComparer.OrdinalIgnoreCase.Compare(x.Name, y.Name);
+
+        internal static bool HaveSameValues(
+            ImmutableArray<PropertyObservation> left,
+            ImmutableArray<PropertyObservation> right)
+        {
+            if (left.Length != right.Length)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < left.Length; i++)
+            {
+                if (!StringComparer.OrdinalIgnoreCase.Equals(
+                        left[i].Name,
+                        right[i].Name) ||
+                    !StringComparer.Ordinal.Equals(
+                        left[i].Value,
+                        right[i].Value))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    internal readonly struct EvaluationReplayCacheMetrics
+    {
+        internal EvaluationReplayCacheMetrics(
+            long hits,
+            long misses,
+            long publicationContentions,
+            long publishedVariants)
+        {
+            Hits = hits;
+            Misses = misses;
+            PublicationContentions = publicationContentions;
+            PublishedVariants = publishedVariants;
+        }
+
+        internal long Hits { get; }
+
+        internal long Misses { get; }
+
+        internal long PublicationContentions { get; }
+
+        internal long PublishedVariants { get; }
     }
 
     internal sealed class ConditionedPropertiesDelta

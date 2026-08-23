@@ -271,7 +271,9 @@ namespace Microsoft.Build.Evaluation
             }
 
             _moduleEvaluationReadTracker = new ModuleEvaluationReadTracker(
-                _evaluationContext.ModuleEvaluationSharingCollector);
+                _evaluationContext.ModuleEvaluationSharingCollector,
+                _evaluationContext.PropertyAssignmentReplayCache is not null ||
+                _evaluationContext.ConditionReplayCache is not null);
 
             // Wrap the IEvaluatorData<> object passed in.
             data = new PropertyTrackingEvaluatorDataWrapper<P, I, M, D>(
@@ -1380,15 +1382,217 @@ namespace Microsoft.Build.Evaluation
                     return;
                 }
 
-                TableRange properties = propertyGroup.Properties;
-                for (int i = properties.Start; i < properties.Start + properties.Count; i++)
+                if (!_evaluationContext.UseCompiledModuleEffectBatches)
                 {
-                    EvaluatePropertyElement(
-                        (ProjectPropertyElement)module.GetSource(
-                            module.Properties[i].SourceId),
-                        module.PropertyAssignments[i]);
+                    EvaluateScalarPropertyRange(
+                        module,
+                        propertyGroup.Properties);
+                    return;
+                }
+
+                TableRange segments = propertyGroup.PropertySegments;
+                for (int i = segments.Start;
+                     i < segments.Start + segments.Count;
+                     i++)
+                {
+                    PropertySegmentTemplate segment =
+                        module.PropertySegments[i];
+                    if (segment.Kind ==
+                        PropertySegmentKind.CompiledEffectBatch)
+                    {
+                        ApplyCompiledPropertyBatch(
+                            module,
+                            segment.Properties);
+                    }
+                    else
+                    {
+                        EvaluateScalarPropertyRange(
+                            module,
+                            segment.Properties);
+                    }
                 }
             }
+        }
+
+        private void EvaluateScalarPropertyRange(
+            EvaluationModule module,
+            TableRange properties)
+        {
+            for (int i = properties.Start;
+                 i < properties.Start + properties.Count;
+                 i++)
+            {
+                EvaluatePropertyElement(
+                    (ProjectPropertyElement)module.GetSource(
+                        module.Properties[i].SourceId),
+                    module.PropertyAssignments[i]);
+            }
+        }
+
+        private void ApplyCompiledPropertyBatch(
+            EvaluationModule module,
+            TableRange properties)
+        {
+            using var measurement =
+                EvaluationPerformanceInstrumentation.Measure(
+                    EvaluationPerformanceMetric.CompiledPropertyBatch);
+            int effectCount = 0;
+            int deadStores = 0;
+            int constantRunStart = -1;
+            for (int i = properties.Start;
+                 i < properties.Start + properties.Count;
+                 i++)
+            {
+                PropertyTemplate template = module.Properties[i];
+                if (template.IsDeadStore)
+                {
+                    PublishConstantPropertyRun(
+                        module,
+                        constantRunStart,
+                        i);
+                    constantRunStart = -1;
+                    deadStores++;
+                    continue;
+                }
+
+                var propertyElement =
+                    (ProjectPropertyElement)module.GetSource(
+                        template.SourceId);
+                using (_evaluationProfiler.TrackElement(propertyElement))
+                {
+                    if (IsNonOverridableGlobalProperty(
+                            propertyElement.Name))
+                    {
+                        PublishConstantPropertyRun(
+                            module,
+                            constantRunStart,
+                            i);
+                        constantRunStart = -1;
+                        _evaluationLoggingContext.LogComment(
+                            MessageImportance.Low,
+                            "OM_GlobalProperty",
+                            propertyElement.Name);
+                        continue;
+                    }
+
+                    _expander.PropertiesUseTracker.PropertyReadContext =
+                        PropertyReadContext.PropertyEvaluation;
+                    _expander.PropertiesUseTracker.CurrentlyEvaluatingPropertyElementName =
+                        propertyElement.Name;
+                    if (template.CompiledValueParts.Count == 0)
+                    {
+                        string evaluatedValue = module.GetStringValue(
+                            template.ConstantValueStringId);
+                        _expander.PropertiesUseTracker
+                            .CheckPreexistingUndefinedUsage(
+                                propertyElement,
+                                evaluatedValue,
+                                _evaluationLoggingContext);
+                        if (constantRunStart < 0)
+                        {
+                            constantRunStart = i;
+                        }
+                    }
+                    else
+                    {
+                        PublishConstantPropertyRun(
+                            module,
+                            constantRunStart,
+                            i);
+                        constantRunStart = -1;
+                        EvaluationPerformanceInstrumentation.RecordEvent(
+                            EvaluationPerformanceMetric.CompiledPropertyFold);
+                        string evaluatedValue =
+                            EvaluateCompiledPropertyValue(
+                                module,
+                                template.CompiledValueParts,
+                                propertyElement);
+                        _expander.PropertiesUseTracker
+                            .CheckPreexistingUndefinedUsage(
+                                propertyElement,
+                                evaluatedValue,
+                                _evaluationLoggingContext);
+                        _data.SetProperty(
+                            propertyElement,
+                            evaluatedValue,
+                            _evaluationLoggingContext,
+                            preserveEvaluationHistory: false);
+                    }
+
+                    effectCount++;
+                }
+            }
+
+            PublishConstantPropertyRun(
+                module,
+                constantRunStart,
+                properties.Start + properties.Count);
+            EvaluationPerformanceInstrumentation.RecordEvents(
+                EvaluationPerformanceMetric.CompiledPropertyEffect,
+                effectCount);
+            EvaluationPerformanceInstrumentation.RecordEvents(
+                EvaluationPerformanceMetric.CompiledPropertyDeadStore,
+                deadStores);
+        }
+
+        private void PublishConstantPropertyRun(
+            EvaluationModule module,
+            int start,
+            int end)
+        {
+            if (start >= 0)
+            {
+                _data.SetConstantProperties(
+                    module,
+                    new TableRange(start, end - start));
+            }
+        }
+
+        private string EvaluateCompiledPropertyValue(
+            EvaluationModule module,
+            TableRange parts,
+            ProjectPropertyElement propertyElement)
+        {
+            if (parts.Count == 1)
+            {
+                return FileUtilities.MaybeAdjustFilePath(
+                    EvaluateCompiledPropertyValuePart(
+                        module,
+                        module.CompiledPropertyValueParts[parts.Start],
+                        propertyElement));
+            }
+
+            var builder = new StringBuilder();
+            for (int i = parts.Start; i < parts.Start + parts.Count; i++)
+            {
+                builder.Append(EvaluateCompiledPropertyValuePart(
+                    module,
+                    module.CompiledPropertyValueParts[i],
+                    propertyElement));
+            }
+
+            return FileUtilities.MaybeAdjustFilePath(builder.ToString());
+        }
+
+        private string EvaluateCompiledPropertyValuePart(
+            EvaluationModule module,
+            CompiledPropertyValuePart part,
+            ProjectPropertyElement propertyElement)
+        {
+            if (part.Kind == CompiledPropertyValuePartKind.Literal)
+            {
+                return module.GetStringValue(part.Value);
+            }
+
+            PropertyTemplate referencedProperty =
+                module.Properties[part.Value];
+            string propertyName =
+                module.GetStringValue(referencedProperty.NameStringId);
+            P property = _data.GetProperty(propertyName);
+            return FileUtilities.MaybeAdjustFilePath(
+                property?.GetEvaluatedValueEscaped(
+                    propertyElement.Location) ??
+                string.Empty);
         }
 
         private bool EvaluatePropertyGroupCondition(
@@ -1411,11 +1615,11 @@ namespace Microsoft.Build.Evaluation
             ConditionReplayCache replayCache =
                 _evaluationContext.ConditionReplayCache;
 
-            if (replayCache is not null && operation.SupportsReplay)
+            if (replayCache is not null &&
+                operation.SupportsReplay(_evaluationContext.EvaluationMode))
             {
-                using ConditionReplayCache.Lease lease =
-                    replayCache.Enter(operation.Id);
-                if (lease.TryFind(
+                if (replayCache.TryFind(
+                        operation.Id,
                         ReadPropertyReplayInput,
                         out ConditionVariant variant))
                 {
@@ -1432,7 +1636,7 @@ namespace Microsoft.Build.Evaluation
                         CaptureConditionedPropertyCounts(
                             propertyGroupElement.Condition);
                     ModuleEvaluationReadTracker.Scope scope =
-                        _moduleEvaluationReadTracker.Track(operation.Id);
+                        _moduleEvaluationReadTracker.TrackReplay(operation.Id);
                     using (scope)
                     {
                         RecordEvaluationDataReplayInputs();
@@ -1443,7 +1647,8 @@ namespace Microsoft.Build.Evaluation
                                 ParserOptions.AllowProperties);
                     }
 
-                    lease.Add(
+                    replayCache.Publish(
+                        operation.Id,
                         scope.PropertyReads,
                         conditionResult,
                         CaptureConditionedPropertiesDelta(
@@ -2024,12 +2229,13 @@ namespace Microsoft.Build.Evaluation
                     _evaluationContext.PropertyAssignmentReplayCache;
 
                 if (replayCache is not null &&
-                    operation.SupportsReplay &&
+                    operation.SupportsReplay(_evaluationContext.EvaluationMode) &&
                     !IsNonOverridableGlobalProperty(propertyElement.Name))
                 {
-                    using PropertyAssignmentReplayCache.Lease lease =
-                        replayCache.Enter(operation.Id);
-                    if (lease.TryFind(ReadPropertyReplayInput, out PropertyAssignmentVariant variant))
+                    if (replayCache.TryFind(
+                            operation.Id,
+                            ReadPropertyReplayInput,
+                            out PropertyAssignmentVariant variant))
                     {
                         ApplyConditionedPropertiesDelta(
                             variant.ConditionedProperties);
@@ -2052,7 +2258,7 @@ namespace Microsoft.Build.Evaluation
                     }
 
                     ModuleEvaluationReadTracker.Scope scope =
-                        _moduleEvaluationReadTracker.Track(operation.Id);
+                        _moduleEvaluationReadTracker.TrackReplay(operation.Id);
                     Dictionary<string, int> conditionedPropertyCounts =
                         CaptureConditionedPropertyCounts(
                             propertyElement.Condition);
@@ -2066,7 +2272,8 @@ namespace Microsoft.Build.Evaluation
                             out evaluatedValue);
                     }
 
-                    lease.Add(
+                    replayCache.Publish(
+                        operation.Id,
                         scope.PropertyReads,
                         assigned,
                         evaluatedValue,

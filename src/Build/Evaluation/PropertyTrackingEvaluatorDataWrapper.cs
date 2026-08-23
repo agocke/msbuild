@@ -120,6 +120,11 @@ namespace Microsoft.Build.Evaluation
             return newProperty;
         }
 
+        public void SetConstantProperties(
+            EvaluationModule module,
+            TableRange properties) =>
+            _wrapped.SetConstantProperties(module, properties);
+
         /// <summary>
         /// Sets a property which comes from the Xml.
         /// Predecessor is any immediately previous property that was overridden by this one during evaluation.
@@ -127,10 +132,26 @@ namespace Microsoft.Build.Evaluation
         /// project file, and whose conditions evaluated to true.
         /// If there are none above this is null.
         /// </summary>
-        public P SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, LoggingContext loggingContext)
+        public P SetProperty(
+            ProjectPropertyElement propertyElement,
+            string evaluatedValueEscaped,
+            LoggingContext loggingContext,
+            bool preserveEvaluationHistory = true)
         {
+            if (!preserveEvaluationHistory)
+            {
+                return _wrapped.SetProperty(
+                    propertyElement,
+                    evaluatedValueEscaped,
+                    loggingContext,
+                    preserveEvaluationHistory: false);
+            }
+
             P? originalProperty = _wrapped.GetProperty(propertyElement.Name);
-            P newProperty = _wrapped.SetProperty(propertyElement, evaluatedValueEscaped, loggingContext);
+            P newProperty = _wrapped.SetProperty(
+                propertyElement,
+                evaluatedValueEscaped,
+                loggingContext);
 
             this.TrackPropertyWrite(
                 originalProperty,

@@ -36,6 +36,16 @@ namespace Microsoft.Build.Evaluation
         ItemSpecConstruction,
         MetadataAnalysis,
         UsingTaskRegistration,
+        PropertyReplayCacheHit,
+        PropertyReplayCacheMiss,
+        PropertyReplayCacheContention,
+        ConditionReplayCacheHit,
+        ConditionReplayCacheMiss,
+        ConditionReplayCacheContention,
+        CompiledPropertyBatch,
+        CompiledPropertyEffect,
+        CompiledPropertyFold,
+        CompiledPropertyDeadStore,
     }
 
     internal static class EvaluationPerformanceInstrumentation
@@ -88,6 +98,20 @@ namespace Microsoft.Build.Evaluation
                 Record(
                     metric,
                     Stopwatch.GetTimestamp() - startTimestamp);
+            }
+        }
+
+        internal static void RecordEvent(
+            EvaluationPerformanceMetric metric) =>
+            RecordEvents(metric, 1);
+
+        internal static void RecordEvents(
+            EvaluationPerformanceMetric metric,
+            int count)
+        {
+            if (Enabled && count != 0)
+            {
+                s_threadMetrics.Value.Counts[(int)metric] += count;
             }
         }
 
@@ -144,6 +168,16 @@ namespace Microsoft.Build.Evaluation
             report.Append("compiled_modules\t");
             report.AppendLine(
                 Traits.Instance.EnableCompiledModuleEvaluation
+                    ? "true"
+                    : "false");
+            report.Append("compiled_module_replay\t");
+            report.AppendLine(
+                Traits.Instance.EnableCompiledModuleReplay
+                    ? "true"
+                    : "false");
+            report.Append("compiled_module_effect_batching\t");
+            report.AppendLine(
+                Traits.Instance.EnableCompiledModuleEffectBatching
                     ? "true"
                     : "false");
             report.Append("command_line\t");

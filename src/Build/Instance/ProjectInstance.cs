@@ -1941,12 +1941,36 @@ namespace Microsoft.Build.Execution
         /// Predecessor is discarded as it is a design time only artefact.
         /// Only called during evaluation, so does not check for immutability.
         /// </summary>
-        ProjectPropertyInstance IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, LoggingContext loggingContext)
+        ProjectPropertyInstance IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.SetProperty(
+            ProjectPropertyElement propertyElement,
+            string evaluatedValueEscaped,
+            LoggingContext loggingContext,
+            bool preserveEvaluationHistory)
         {
             // Mutability not verified as this is being populated during evaluation
             ProjectPropertyInstance property = ProjectPropertyInstance.Create(propertyElement.Name, evaluatedValueEscaped, false /* may not be reserved */, _isImmutable);
             _properties.Set(property);
             return property;
+        }
+
+        void IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.SetConstantProperties(
+            EvaluationModule module,
+            TableRange properties)
+        {
+            for (int i = properties.Start;
+                 i < properties.Start + properties.Count;
+                 i++)
+            {
+                PropertyTemplate template = module.Properties[i];
+                ProjectPropertyInstance property =
+                    ProjectPropertyInstance.Create(
+                        module.GetStringValue(template.NameStringId),
+                        module.GetStringValue(
+                            template.ConstantValueStringId),
+                        mayBeReserved: false,
+                        _isImmutable);
+                _properties.Set(property);
+            }
         }
 
         /// <summary>

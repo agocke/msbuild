@@ -83,6 +83,26 @@ namespace Microsoft.Build.Framework
             "MSBUILDENABLECOMPILEDMODULEEVALUATION";
 
         /// <summary>
+        /// Enables property and property-group-condition replay for compiled evaluation modules.
+        /// </summary>
+        public readonly bool EnableCompiledModuleReplay =
+            Environment.GetEnvironmentVariable(EnableCompiledModuleReplayEnvVarName) == "1";
+
+        public const string EnableCompiledModuleReplayEnvVarName =
+            "MSBUILDENABLECOMPILEDMODULEREPLAY";
+
+        /// <summary>
+        /// Enables statically compiled property effects. This experimental
+        /// mode preserves final property state but not design-time property
+        /// history or per-assignment tracking.
+        /// </summary>
+        public readonly bool EnableCompiledModuleEffectBatching =
+            Environment.GetEnvironmentVariable(EnableCompiledModuleEffectBatchingEnvVarName) == "1";
+
+        public const string EnableCompiledModuleEffectBatchingEnvVarName =
+            "MSBUILDENABLECOMPILEDMODULEEFFECTBATCHING";
+
+        /// <summary>
         /// Enable restore first functionality in MSBuild.exe
         /// </summary>
         public readonly bool EnableRestoreFirst = Environment.GetEnvironmentVariable("MSBUILDENABLERESTOREFIRST") == "1";

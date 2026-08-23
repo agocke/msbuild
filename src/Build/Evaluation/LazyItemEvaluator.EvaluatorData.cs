@@ -233,10 +233,23 @@ namespace Microsoft.Build.Evaluation
                 _wrappedData.RecordImportWithDuplicates(importElement, import, versionEvaluated);
             }
 
-            public P SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, BackEnd.Logging.LoggingContext loggingContext)
+            public P SetProperty(
+                ProjectPropertyElement propertyElement,
+                string evaluatedValueEscaped,
+                BackEnd.Logging.LoggingContext loggingContext,
+                bool preserveEvaluationHistory = true)
             {
-                return _wrappedData.SetProperty(propertyElement, evaluatedValueEscaped, loggingContext);
+                return _wrappedData.SetProperty(
+                    propertyElement,
+                    evaluatedValueEscaped,
+                    loggingContext,
+                    preserveEvaluationHistory);
             }
+
+            public void SetConstantProperties(
+                EvaluationModule module,
+                TableRange properties) =>
+                _wrappedData.SetConstantProperties(module, properties);
 
             public P SetProperty(string name, string evaluatedValueEscaped, bool isGlobalProperty, bool mayBeReserved, LoggingContext loggingContext, bool isEnvironmentVariable = false, bool isCommandLineProperty = false)
             {

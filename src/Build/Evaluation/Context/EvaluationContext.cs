@@ -64,6 +64,7 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationModuleCache EvaluationModuleCache { get; }
         internal PropertyAssignmentReplayCache PropertyAssignmentReplayCache { get; }
         internal ConditionReplayCache ConditionReplayCache { get; }
+        internal bool UseCompiledModuleEffectBatches { get; }
 
         /// <summary>
         /// Key to file entry list. Example usages: cache glob expansion and intermediary directory expansions during glob expansion.
@@ -75,7 +76,8 @@ namespace Microsoft.Build.Evaluation.Context
             ModuleEvaluationSharingCollector moduleEvaluationSharingCollector = null,
             EvaluationModuleCache evaluationModuleCache = null,
             PropertyAssignmentReplayCache propertyAssignmentReplayCache = null,
-            ConditionReplayCache conditionReplayCache = null)
+            ConditionReplayCache conditionReplayCache = null,
+            bool useCompiledModuleEffectBatches = false)
         {
             Policy = policy;
             EvaluationMode = evaluationMode;
@@ -91,6 +93,7 @@ namespace Microsoft.Build.Evaluation.Context
             EvaluationModuleCache = evaluationModuleCache;
             PropertyAssignmentReplayCache = propertyAssignmentReplayCache;
             ConditionReplayCache = conditionReplayCache;
+            UseCompiledModuleEffectBatches = useCompiledModuleEffectBatches;
         }
 
         /// <summary>
@@ -171,7 +174,23 @@ namespace Microsoft.Build.Evaluation.Context
                     policy == SharingPolicy.Shared &&
                     Traits.Instance.EnableCompiledModuleEvaluation
                         ? new EvaluationModuleCache()
-                        : null);
+                        : null,
+                propertyAssignmentReplayCache:
+                    policy == SharingPolicy.Shared &&
+                    Traits.Instance.EnableCompiledModuleEvaluation &&
+                    Traits.Instance.EnableCompiledModuleReplay
+                        ? new PropertyAssignmentReplayCache()
+                        : null,
+                conditionReplayCache:
+                    policy == SharingPolicy.Shared &&
+                    Traits.Instance.EnableCompiledModuleEvaluation &&
+                    Traits.Instance.EnableCompiledModuleReplay
+                        ? new ConditionReplayCache()
+                        : null,
+                useCompiledModuleEffectBatches:
+                    policy == SharingPolicy.Shared &&
+                    Traits.Instance.EnableCompiledModuleEvaluation &&
+                    Traits.Instance.EnableCompiledModuleEffectBatching);
 
             TestOnlyHookOnCreate?.Invoke(context);
 
@@ -258,12 +277,23 @@ namespace Microsoft.Build.Evaluation.Context
         {
             if (ModuleEvaluationSharingCollector is null)
             {
-                throw new InvalidOperationException(
-                    "This evaluation context was not created for module evaluation sharing measurement.");
+                if (EvaluationModuleCache is null)
+                {
+                    throw new InvalidOperationException(
+                        "This evaluation context was not created for module evaluation sharing measurement.");
+                }
+
+                return new ModuleEvaluationSharingMetrics(
+                    Array.Empty<ModuleEvaluationOperationMetrics>(),
+                    EvaluationModuleCache.GetMetrics(),
+                    PropertyAssignmentReplayCache?.GetMetrics() ?? default,
+                    ConditionReplayCache?.GetMetrics() ?? default);
             }
 
             return ModuleEvaluationSharingCollector.CreateSnapshot(
-                EvaluationModuleCache);
+                EvaluationModuleCache,
+                PropertyAssignmentReplayCache,
+                ConditionReplayCache);
         }
 
         internal EvaluationContext ContextForNewProject()
@@ -293,7 +323,9 @@ namespace Microsoft.Build.Evaluation.Context
                         moduleEvaluationSharingCollector: ModuleEvaluationSharingCollector,
                         evaluationModuleCache: EvaluationModuleCache,
                         propertyAssignmentReplayCache: PropertyAssignmentReplayCache,
-                        conditionReplayCache: ConditionReplayCache)
+                        conditionReplayCache: ConditionReplayCache,
+                        useCompiledModuleEffectBatches:
+                            UseCompiledModuleEffectBatches)
                     {
                         _used = 1,
                     };
@@ -321,7 +353,8 @@ namespace Microsoft.Build.Evaluation.Context
                 ModuleEvaluationSharingCollector,
                 EvaluationModuleCache,
                 PropertyAssignmentReplayCache,
-                ConditionReplayCache)
+                ConditionReplayCache,
+                UseCompiledModuleEffectBatches)
             {
                 _used = 1,
             };

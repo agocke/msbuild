@@ -22,7 +22,9 @@ namespace Microsoft.Build.Evaluation
     {
         internal ModuleEvaluationSharingMetrics(
             IReadOnlyList<ModuleEvaluationOperationMetrics> operations,
-            ModuleEvaluationCacheMetrics moduleCacheMetrics)
+            ModuleEvaluationCacheMetrics moduleCacheMetrics,
+            EvaluationReplayCacheMetrics propertyReplayCacheMetrics,
+            EvaluationReplayCacheMetrics conditionReplayCacheMetrics)
         {
             Operations = operations;
             TotalExecutions = operations.Sum(operation => operation.Executions);
@@ -32,6 +34,18 @@ namespace Microsoft.Build.Evaluation
             ModuleCacheHits = moduleCacheMetrics.Hits;
             ModuleCacheMisses = moduleCacheMetrics.Misses;
             ModuleLowerings = moduleCacheMetrics.Lowerings;
+            PropertyReplayCacheHits = propertyReplayCacheMetrics.Hits;
+            PropertyReplayCacheMisses = propertyReplayCacheMetrics.Misses;
+            PropertyReplayCacheContentions =
+                propertyReplayCacheMetrics.PublicationContentions;
+            PropertyReplayCacheVariants =
+                propertyReplayCacheMetrics.PublishedVariants;
+            ConditionReplayCacheHits = conditionReplayCacheMetrics.Hits;
+            ConditionReplayCacheMisses = conditionReplayCacheMetrics.Misses;
+            ConditionReplayCacheContentions =
+                conditionReplayCacheMetrics.PublicationContentions;
+            ConditionReplayCacheVariants =
+                conditionReplayCacheMetrics.PublishedVariants;
         }
 
         /// <summary>
@@ -87,6 +101,32 @@ namespace Microsoft.Build.Evaluation
         /// context.
         /// </summary>
         public long ModuleLowerings { get; }
+
+        public long PropertyReplayCacheHits { get; }
+
+        public long PropertyReplayCacheMisses { get; }
+
+        public long PropertyReplayCacheContentions { get; }
+
+        public long PropertyReplayCacheVariants { get; }
+
+        public long ConditionReplayCacheHits { get; }
+
+        public long ConditionReplayCacheMisses { get; }
+
+        public long ConditionReplayCacheContentions { get; }
+
+        public long ConditionReplayCacheVariants { get; }
+
+        public long ReplayCacheHits =>
+            PropertyReplayCacheHits + ConditionReplayCacheHits;
+
+        public long ReplayCacheMisses =>
+            PropertyReplayCacheMisses + ConditionReplayCacheMisses;
+
+        public long ReplayCacheContentions =>
+            PropertyReplayCacheContentions +
+            ConditionReplayCacheContentions;
     }
 
     /// <summary>
@@ -175,7 +215,9 @@ namespace Microsoft.Build.Evaluation
         }
 
         internal ModuleEvaluationSharingMetrics CreateSnapshot(
-            EvaluationModuleCache moduleCache = null)
+            EvaluationModuleCache moduleCache = null,
+            PropertyAssignmentReplayCache propertyReplayCache = null,
+            ConditionReplayCache conditionReplayCache = null)
         {
             ModuleEvaluationOperationMetrics[] operations = _operations
                 .Select(pair => pair.Value.CreateSnapshot(pair.Key))
@@ -187,7 +229,9 @@ namespace Microsoft.Build.Evaluation
                 .ToArray();
             return new ModuleEvaluationSharingMetrics(
                 Array.AsReadOnly(operations),
-                moduleCache?.GetMetrics() ?? default);
+                moduleCache?.GetMetrics() ?? default,
+                propertyReplayCache?.GetMetrics() ?? default,
+                conditionReplayCache?.GetMetrics() ?? default);
         }
 
         private sealed class OperationAccumulator
@@ -307,11 +351,15 @@ namespace Microsoft.Build.Evaluation
     internal sealed class ModuleEvaluationReadTracker
     {
         private readonly ModuleEvaluationSharingCollector _collector;
+        private readonly bool _trackReplayInputs;
         private Scope _currentScope;
 
-        internal ModuleEvaluationReadTracker(ModuleEvaluationSharingCollector collector)
+        internal ModuleEvaluationReadTracker(
+            ModuleEvaluationSharingCollector collector,
+            bool trackReplayInputs)
         {
             _collector = collector;
+            _trackReplayInputs = trackReplayInputs;
         }
 
         internal Scope Track(
@@ -340,6 +388,21 @@ namespace Microsoft.Build.Evaluation
                 return null;
             }
 
+            return StartScope(operation);
+        }
+
+        internal Scope TrackReplay(EvaluationOperationId operation)
+        {
+            if (_collector is null && !_trackReplayInputs)
+            {
+                return null;
+            }
+
+            return StartScope(operation);
+        }
+
+        private Scope StartScope(EvaluationOperationId operation)
+        {
             var scope = new Scope(this, _currentScope, operation);
             _currentScope = scope;
             return scope;
@@ -417,7 +480,10 @@ namespace Microsoft.Build.Evaluation
             }
 
             _currentScope = scope.Parent;
-            _collector.Record(scope.Operation, scope.PropertyReads, scope.ItemReads);
+            _collector?.Record(
+                scope.Operation,
+                scope.PropertyReads,
+                scope.ItemReads);
         }
 
         internal sealed class Scope : IDisposable

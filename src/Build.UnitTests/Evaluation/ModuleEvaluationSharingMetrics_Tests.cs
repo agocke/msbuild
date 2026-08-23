@@ -12,6 +12,7 @@ using Microsoft.Build.Evaluation;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Engine.UnitTests.TestComparers;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Framework;
 using Microsoft.Build.Graph;
 using Microsoft.Build.Unittest;
 using Shouldly;
@@ -387,7 +388,7 @@ namespace Microsoft.Build.UnitTests.Evaluation
         }
 
         [Fact]
-        public void ProjectGraphCoordinatesPropertyReplay()
+        public void ProjectGraphPublishesDuplicateSafePropertyVariants()
         {
             using TestEnvironment environment = TestEnvironment.Create();
             var projectFile = environment.CreateFile(
@@ -428,14 +429,369 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     projectFile.Path,
                     "PropertyAssignment",
                     "Invariant")
-                .Replays.ShouldBe(2);
+                .DistinctVariants.ShouldBe(1);
             ModuleEvaluationOperationMetrics variant = FindOperation(
                 metrics,
                 projectFile.Path,
                 "PropertyAssignment",
                 "Variant");
             variant.DistinctVariants.ShouldBe(2);
-            variant.Replays.ShouldBe(1);
+            metrics.PropertyReplayCacheVariants.ShouldBe(3);
+        }
+
+        [Fact]
+        public void OrdinaryCompiledModuleContextReplaysSafeScalarOperations()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEvaluationEnvVarName,
+                "1");
+            environment.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleReplayEnvVarName,
+                "1");
+            var projectFile = environment.CreateFile(
+                "classic-replay.proj",
+                """
+                <Project>
+                  <PropertyGroup Condition="'$(Flavor)' == 'A'">
+                    <Invariant>constant</Invariant>
+                    <Variant>$(Flavor)</Variant>
+                  </PropertyGroup>
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.Create(
+                EvaluationContext.SharingPolicy.Shared);
+            ProjectCollection projectCollection =
+                environment.CreateProjectCollection().Collection;
+
+            Project first = Project.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = context,
+                    GlobalProperties = new Dictionary<string, string>
+                    {
+                        ["Flavor"] = "A",
+                        ["Irrelevant"] = "first",
+                    },
+                    ProjectCollection = projectCollection,
+                });
+            Project second = Project.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = context,
+                    GlobalProperties = new Dictionary<string, string>
+                    {
+                        ["Flavor"] = "A",
+                        ["Irrelevant"] = "second",
+                    },
+                    ProjectCollection = projectCollection,
+                });
+
+            second.GetPropertyValue("Invariant")
+                .ShouldBe(first.GetPropertyValue("Invariant"));
+            ModuleEvaluationSharingMetrics metrics =
+                context.GetModuleEvaluationSharingMetrics();
+            metrics.PropertyReplayCacheHits.ShouldBeGreaterThan(0);
+            metrics.PropertyReplayCacheMisses.ShouldBeGreaterThan(0);
+            metrics.ConditionReplayCacheHits.ShouldBeGreaterThan(0);
+            metrics.ConditionReplayCacheMisses.ShouldBeGreaterThan(0);
+        }
+
+        [Fact]
+        public void ClassicReplayRejectsAmbientStaticPropertyFunctions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEvaluationEnvVarName,
+                "1");
+            environment.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleReplayEnvVarName,
+                "1");
+            var projectFile = environment.CreateFile(
+                "ambient.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Value>$( [System.Guid]::NewGuid() )</Value>
+                  </PropertyGroup>
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.Create(
+                EvaluationContext.SharingPolicy.Shared);
+            ProjectCollection projectCollection =
+                environment.CreateProjectCollection().Collection;
+
+            Project first = Project.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = context,
+                    GlobalProperties = new Dictionary<string, string>
+                    {
+                        ["Configuration"] = "first",
+                    },
+                    ProjectCollection = projectCollection,
+                });
+            Project second = Project.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = context,
+                    GlobalProperties = new Dictionary<string, string>
+                    {
+                        ["Configuration"] = "second",
+                    },
+                    ProjectCollection = projectCollection,
+                });
+
+            second.GetPropertyValue("Value")
+                .ShouldNotBe(first.GetPropertyValue("Value"));
+            ModuleEvaluationSharingMetrics metrics =
+                context.GetModuleEvaluationSharingMetrics();
+            metrics.PropertyReplayCacheHits.ShouldBe(0);
+            metrics.PropertyReplayCacheMisses.ShouldBe(0);
+        }
+
+        [Fact]
+        public void ConcurrentPropertyReplayPublicationDeduplicatesVariants()
+        {
+            const int workerCount = 16;
+            var cache = new PropertyAssignmentReplayCache();
+            var operation = new EvaluationOperationId(
+                "module.proj",
+                1,
+                1,
+                1,
+                "PropertyAssignment",
+                "Value");
+            var reads = new Dictionary<string, string>
+            {
+                ["Flavor"] = "A",
+            };
+            using var barrier = new Barrier(workerCount);
+            Task<PropertyAssignmentVariant>[] tasks =
+                Enumerable.Range(0, workerCount)
+                    .Select(_ => Task.Factory.StartNew(
+                        () =>
+                        {
+                            cache.TryFind(
+                                    operation,
+                                    name => reads.TryGetValue(
+                                        name,
+                                        out string? value)
+                                            ? value
+                                            : null,
+                                    out PropertyAssignmentVariant _)
+                                .ShouldBeFalse();
+                            barrier.SignalAndWait();
+                            return cache.Publish(
+                                operation,
+                                reads,
+                                assigned: true,
+                                evaluatedValueEscaped: "value",
+                                ConditionedPropertiesDelta.Empty);
+                        },
+                        CancellationToken.None,
+                        TaskCreationOptions.LongRunning,
+                        TaskScheduler.Default))
+                    .ToArray();
+
+            PropertyAssignmentVariant[] variants =
+                Task.WhenAll(tasks).GetAwaiter().GetResult();
+
+            variants.ShouldAllBe(
+                variant => ReferenceEquals(variant, variants[0]));
+            EvaluationReplayCacheMetrics metrics = cache.GetMetrics();
+            metrics.Misses.ShouldBe(workerCount);
+            metrics.PublishedVariants.ShouldBe(1);
+            metrics.PublicationContentions.ShouldBe(workerCount - 1);
+        }
+
+        [Fact]
+        public void CompiledPropertyEffectsFormContiguousBatchesAndPreserveFinalState()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEvaluationEnvVarName,
+                "1");
+            environment.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEffectBatchingEnvVarName,
+                "1");
+            var projectFile = environment.CreateFile(
+                "effect-batches.proj",
+                """
+                <Project TreatAsLocalProperty="Local">
+                  <PropertyGroup>
+                    <First>one</First>
+                    <First>two</First>
+                    <LiteralPath>folder\file</LiteralPath>
+                    <Dynamic>$(Flavor)</Dynamic>
+                    <AfterDynamic>constant</AfterDynamic>
+                    <Conditional Condition="'$(Flavor)' == 'A'">selected</Conditional>
+                    <Empty />
+                    <Global>local</Global>
+                    <Local>local</Local>
+                  </PropertyGroup>
+                </Project>
+                """);
+            var globals = new Dictionary<string, string>
+            {
+                ["Flavor"] = "A",
+                ["Global"] = "global",
+                ["Local"] = "global",
+            };
+            ProjectCollection optimizedCollection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext optimizedContext = EvaluationContext.Create(
+                EvaluationContext.SharingPolicy.Shared);
+            Project optimized = Project.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = optimizedContext,
+                    GlobalProperties = globals,
+                    ProjectCollection = optimizedCollection,
+                });
+            ProjectCollection scalarCollection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext scalarContext = EvaluationContext.Create(
+                EvaluationContext.SharingPolicy.Isolated,
+                ProjectEvaluationMode.Classic,
+                fileSystem: null);
+            Project scalar = Project.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = scalarContext,
+                    GlobalProperties = globals,
+                    ProjectCollection = scalarCollection,
+                });
+
+            AssertEquivalentProperties(scalar, optimized);
+            optimized.GetPropertyValue("Global").ShouldBe("global");
+            optimized.GetPropertyValue("Local").ShouldBe("local");
+            optimized.GetProperty("First").Predecessor.ShouldBeNull();
+            optimized.AllEvaluatedProperties
+                .Where(property => property.Xml is not null)
+                .Select(property => property.Name)
+                .ShouldNotContain("First");
+
+            EvaluationModule module =
+                optimizedContext.EvaluationModuleCache.GetModule(
+                    optimized.Xml);
+            module.Properties[0].IsDeadStore.ShouldBeTrue();
+            module.Properties[1].IsDeadStore.ShouldBeFalse();
+            TableRange segments = module.PropertyGroups[0].PropertySegments;
+            segments.Count.ShouldBe(5);
+            PropertySegmentTemplate[] loweredSegments =
+                module.PropertySegments
+                    .Skip(segments.Start)
+                    .Take(segments.Count)
+                    .ToArray();
+            loweredSegments.Select(segment => segment.Kind)
+                .ShouldBe(
+                    new[]
+                    {
+                        PropertySegmentKind.CompiledEffectBatch,
+                        PropertySegmentKind.Scalar,
+                        PropertySegmentKind.CompiledEffectBatch,
+                        PropertySegmentKind.Scalar,
+                        PropertySegmentKind.CompiledEffectBatch,
+                    });
+            loweredSegments.Select(segment => segment.Properties.Count)
+                .ShouldBe(new[] { 3, 1, 1, 1, 3 });
+        }
+
+        [Fact]
+        public void CompiledPropertyEffectsFoldLocalPropertyChains()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEvaluationEnvVarName,
+                "1");
+            environment.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEffectBatchingEnvVarName,
+                "1");
+            var projectFile = environment.CreateFile(
+                "folded-property-effects.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <A>one</A>
+                    <B>$(A)-two</B>
+                    <C>prefix-$(B)-suffix</C>
+                    <GlobalA>local</GlobalA>
+                    <GlobalB>$(GlobalA)-two</GlobalB>
+                    <External>$(Flavor)</External>
+                    <D>after</D>
+                    <E>$(D)-end</E>
+                  </PropertyGroup>
+                </Project>
+                """);
+            var globals = new Dictionary<string, string>
+            {
+                ["Flavor"] = "external",
+                ["GlobalA"] = "global",
+            };
+            ProjectCollection optimizedCollection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext optimizedContext = EvaluationContext.Create(
+                EvaluationContext.SharingPolicy.Shared);
+            Project optimized = Project.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = optimizedContext,
+                    GlobalProperties = globals,
+                    ProjectCollection = optimizedCollection,
+                });
+            Project scalar = Project.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = EvaluationContext.Create(
+                        EvaluationContext.SharingPolicy.Isolated,
+                        ProjectEvaluationMode.Classic,
+                        fileSystem: null),
+                    GlobalProperties = globals,
+                    ProjectCollection =
+                        environment.CreateProjectCollection().Collection,
+                });
+
+            AssertEquivalentProperties(scalar, optimized);
+            optimized.GetPropertyValue("B").ShouldBe("one-two");
+            optimized.GetPropertyValue("C")
+                .ShouldBe("prefix-one-two-suffix");
+            optimized.GetPropertyValue("GlobalA").ShouldBe("global");
+            optimized.GetPropertyValue("GlobalB").ShouldBe("global-two");
+            optimized.GetPropertyValue("External").ShouldBe("external");
+            optimized.GetPropertyValue("E").ShouldBe("after-end");
+
+            EvaluationModule module =
+                optimizedContext.EvaluationModuleCache.GetModule(
+                    optimized.Xml);
+            TableRange segments = module.PropertyGroups[0].PropertySegments;
+            segments.Count.ShouldBe(3);
+            PropertySegmentTemplate[] loweredSegments =
+                module.PropertySegments
+                    .Skip(segments.Start)
+                    .Take(segments.Count)
+                    .ToArray();
+            loweredSegments.Select(segment => segment.Kind)
+                .ShouldBe(
+                    new[]
+                    {
+                        PropertySegmentKind.CompiledEffectBatch,
+                        PropertySegmentKind.Scalar,
+                        PropertySegmentKind.CompiledEffectBatch,
+                    });
+            loweredSegments.Select(segment => segment.Properties.Count)
+                .ShouldBe(new[] { 5, 1, 2 });
+            module.Properties.Count(
+                    property => property.CompiledValueParts.Count > 0)
+                .ShouldBe(4);
         }
 
         [Fact]

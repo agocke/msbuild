@@ -4365,15 +4365,44 @@ namespace Microsoft.Build.Evaluation
             /// <summary>
             /// Sets a property derived from Xml.
             /// </summary>
-            public ProjectProperty SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, LoggingContext loggingContext)
+            public ProjectProperty SetProperty(
+                ProjectPropertyElement propertyElement,
+                string evaluatedValueEscaped,
+                LoggingContext loggingContext,
+                bool preserveEvaluationHistory = true)
             {
-                ProjectProperty predecessor = GetProperty(propertyElement.Name);
+                ProjectProperty predecessor = preserveEvaluationHistory
+                    ? GetProperty(propertyElement.Name)
+                    : null;
                 ProjectProperty property = ProjectProperty.Create(Project, propertyElement, evaluatedValueEscaped, predecessor);
                 Properties.Set(property);
 
-                AddToAllEvaluatedPropertiesList(property);
+                if (preserveEvaluationHistory)
+                {
+                    AddToAllEvaluatedPropertiesList(property);
+                }
 
                 return property;
+            }
+
+            public void SetConstantProperties(
+                EvaluationModule module,
+                TableRange properties)
+            {
+                for (int i = properties.Start;
+                     i < properties.Start + properties.Count;
+                     i++)
+                {
+                    PropertyTemplate template = module.Properties[i];
+                    ProjectProperty property = ProjectProperty.Create(
+                        Project,
+                        (ProjectPropertyElement)module.GetSource(
+                            template.SourceId),
+                        module.GetStringValue(
+                            template.ConstantValueStringId),
+                        predecessor: null);
+                    Properties.Set(property);
+                }
             }
 
             /// <summary>
