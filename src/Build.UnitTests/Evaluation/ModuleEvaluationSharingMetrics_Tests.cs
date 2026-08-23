@@ -1422,14 +1422,128 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 PropertySegmentKind.CompiledEffectBatch);
             module.Properties.Count(property =>
                     property.RequiresExpansion)
-                .ShouldBe(4);
+                .ShouldBe(2);
             module.PropertyInstructions
                 .Skip(segment.Instructions.Start)
                 .Take(segment.Instructions.Count)
                 .Count(instruction =>
                     instruction.Kind ==
                     PropertyInstructionKind.SetExpandedValue)
-                .ShouldBe(4);
+                .ShouldBe(2);
+            module.PropertyInstructions
+                .Skip(segment.Instructions.Start)
+                .Take(segment.Instructions.Count)
+                .Count(instruction =>
+                    instruction.Kind ==
+                    PropertyInstructionKind.AppendFunction)
+                .ShouldBe(2);
+            module.CompiledPropertyFunctions
+                .Count(function =>
+                    function.Kind ==
+                    CompiledPropertyFunctionKind.StringToUpperInvariant)
+                .ShouldBe(2);
+        }
+
+        [Fact]
+        public void FrequentPropertyFunctionsCompileIntoResidualProgram()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "compiled-property-functions.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Base>AbC</Base>
+                    <Spaced>  value  </Spaced>
+                    <EscapedSource>A%3bB</EscapedSource>
+                    <Root>$(MSBuildThisFileDirectory)</Root>
+                    <ExpectedPath>$(MSBuildThisFileDirectory)child</ExpectedPath>
+                    <Lower>$(Base.ToLowerInvariant())</Lower>
+                    <Upper>$(Base.ToUpperInvariant())</Upper>
+                    <Contains>$(Base.Contains('bC'))</Contains>
+                    <StartsWith>$(Base.StartsWith('A'))</StartsWith>
+                    <EndsWith>$(Base.EndsWith('C'))</EndsWith>
+                    <Equals>$(Base.Equals('AbC'))</Equals>
+                    <NumericEquals>$(Numeric.Equals('1.0'))</NumericEquals>
+                    <PathEquals>$(ExpectedPath.Equals('$(PathArgument)'))</PathEquals>
+                    <Replaced>$(Base.Replace('b', '-'))</Replaced>
+                    <Trimmed>$(Spaced.Trim())</Trimmed>
+                    <EscapedLower>$(EscapedSource.ToLowerInvariant())</EscapedLower>
+                    <NormalizedPath>$([MSBuild]::NormalizePath('$(Root)', 'folder', '$(Lower)'))</NormalizedPath>
+                    <NormalizedDirectory>$([MSBuild]::NormalizeDirectory('$(Root)', '$(Base.ToLowerInvariant())'))</NormalizedDirectory>
+                    <RawParentheses>$([MSBuild]::NormalizePath('$(Root)', segment(one,two)))</RawParentheses>
+                  </PropertyGroup>
+                </Project>
+                """);
+            string root = Path.GetDirectoryName(projectFile.Path)!;
+            var globals = new Dictionary<string, string>
+            {
+                ["Numeric"] = "1",
+                ["PathArgument"] = Path.Combine(root, "child")
+                    .Replace('/', '\\'),
+            };
+            ProjectCollection optimizedCollection =
+                environment.CreateProjectCollection().Collection;
+            EvaluationContext optimizedContext =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    ProjectEvaluationMode.Pure,
+                    useCompiledModuleEffectBatches: true);
+            Project optimized = EvaluateWithGlobals(
+                projectFile.Path,
+                optimizedCollection,
+                optimizedContext,
+                globals);
+            Project scalar = EvaluateWithGlobals(
+                projectFile.Path,
+                environment.CreateProjectCollection().Collection,
+                EvaluationContext.Create(
+                    EvaluationContext.SharingPolicy.Isolated,
+                    ProjectEvaluationMode.Pure),
+                globals);
+
+            AssertEquivalentProperties(scalar, optimized);
+            optimized.GetPropertyValue("Lower").ShouldBe("abc");
+            optimized.GetPropertyValue("Upper").ShouldBe("ABC");
+            optimized.GetPropertyValue("Contains").ShouldBe("True");
+            optimized.GetPropertyValue("StartsWith").ShouldBe("True");
+            optimized.GetPropertyValue("EndsWith").ShouldBe("True");
+            optimized.GetPropertyValue("Equals").ShouldBe("True");
+            optimized.GetPropertyValue("NumericEquals").ShouldBe("True");
+            optimized.GetPropertyValue("PathEquals").ShouldBe("True");
+            optimized.GetPropertyValue("Replaced").ShouldBe("A-C");
+            optimized.GetPropertyValue("Trimmed").ShouldBe("value");
+            optimized.GetPropertyValue("EscapedLower").ShouldBe("a;b");
+            optimized.GetPropertyValue("NormalizedPath").ShouldBe(
+                Path.GetFullPath(Path.Combine(root, "folder", "abc")));
+            optimized.GetPropertyValue("NormalizedDirectory").ShouldBe(
+                FileUtilities.EnsureTrailingSlash(
+                    Path.GetFullPath(Path.Combine(root, "abc"))));
+            optimized.GetPropertyValue("RawParentheses").ShouldBe(
+                Path.GetFullPath(
+                    Path.Combine(root, "segment(one", "two)")));
+
+            EvaluationModule module =
+                optimizedContext.EvaluationModuleCache.GetModule(
+                    optimized.Xml);
+            module.Properties.ShouldAllBe(property =>
+                !property.RequiresExpansion);
+            module.CompiledPropertyFunctions.Length.ShouldBe(15);
+            module.CompiledPropertyFunctions
+                .Select(function => function.Kind)
+                .ShouldContain(
+                    CompiledPropertyFunctionKind.NormalizeDirectory);
+            module.CompiledPropertyFunctions
+                .Select(function => function.Kind)
+                .ShouldContain(
+                    CompiledPropertyFunctionKind.NormalizePath);
+            module.PropertyInstructions.Count(instruction =>
+                    instruction.Kind ==
+                    PropertyInstructionKind.SetExpandedValue)
+                .ShouldBe(0);
+            module.PropertyInstructions.Count(instruction =>
+                    instruction.Kind ==
+                    PropertyInstructionKind.AppendFunction)
+                .ShouldBe(14);
         }
 
         [Fact]
@@ -1482,7 +1596,12 @@ namespace Microsoft.Build.UnitTests.Evaluation
             module.PropertyInstructions[
                     segment.Instructions.Start]
                 .Kind
-                .ShouldBe(PropertyInstructionKind.SetExpandedValue);
+                .ShouldBe(PropertyInstructionKind.SetValue);
+            module.PropertyInstructions[
+                    segment.Instructions.Start + 1]
+                .Kind
+                .ShouldBe(
+                    PropertyInstructionKind.AppendContextualProperty);
         }
 
         [Fact]

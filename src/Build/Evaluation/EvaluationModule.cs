@@ -545,6 +545,8 @@ namespace Microsoft.Build.Evaluation
         Literal,
         PropertyReference,
         ExternalPropertyReference,
+        ContextualPropertyReference,
+        Function,
     }
 
     internal readonly struct CompiledPropertyValuePart
@@ -562,6 +564,57 @@ namespace Microsoft.Build.Evaluation
         internal int Value { get; }
     }
 
+    internal enum CompiledPropertyFunctionKind : byte
+    {
+        NormalizeDirectory,
+        NormalizePath,
+        StringContains,
+        StringEndsWith,
+        StringEquals,
+        StringReplace,
+        StringStartsWith,
+        StringToLower,
+        StringToLowerInvariant,
+        StringToUpper,
+        StringToUpperInvariant,
+        StringTrim,
+        StringTrimEnd,
+        StringTrimStart,
+    }
+
+    internal readonly struct CompiledPropertyFunction
+    {
+        internal CompiledPropertyFunction(
+            CompiledPropertyFunctionKind kind,
+            TableRange receiver,
+            TableRange arguments,
+            int expressionStringId)
+        {
+            Kind = kind;
+            Receiver = receiver;
+            Arguments = arguments;
+            ExpressionStringId = expressionStringId;
+        }
+
+        internal CompiledPropertyFunctionKind Kind { get; }
+
+        internal TableRange Receiver { get; }
+
+        internal TableRange Arguments { get; }
+
+        internal int ExpressionStringId { get; }
+    }
+
+    internal readonly struct CompiledPropertyFunctionArgument
+    {
+        internal CompiledPropertyFunctionArgument(TableRange valueParts)
+        {
+            ValueParts = valueParts;
+        }
+
+        internal TableRange ValueParts { get; }
+    }
+
     internal enum PropertyInstructionKind : byte
     {
         BranchIfPropertyConditionFalse,
@@ -571,6 +624,8 @@ namespace Microsoft.Build.Evaluation
         AppendLiteral,
         AppendLocalProperty,
         AppendExternalProperty,
+        AppendContextualProperty,
+        AppendFunction,
     }
 
     internal enum CompiledConditionKind : byte
@@ -1043,6 +1098,8 @@ namespace Microsoft.Build.Evaluation
             PropertySegmentTemplate[] propertySegments,
             PropertyTemplate[] properties,
             CompiledPropertyValuePart[] compiledPropertyValueParts,
+            CompiledPropertyFunction[] compiledPropertyFunctions,
+            CompiledPropertyFunctionArgument[] compiledPropertyFunctionArguments,
             PropertyInstruction[] propertyInstructions,
             CompiledPropertyExternalRead[] compiledPropertyExternalReads,
             CompiledCondition[] compiledConditions,
@@ -1080,6 +1137,9 @@ namespace Microsoft.Build.Evaluation
             PropertySegments = propertySegments;
             Properties = properties;
             CompiledPropertyValueParts = compiledPropertyValueParts;
+            CompiledPropertyFunctions = compiledPropertyFunctions;
+            CompiledPropertyFunctionArguments =
+                compiledPropertyFunctionArguments;
             PropertyInstructions = propertyInstructions;
             CompiledPropertyExternalReads = compiledPropertyExternalReads;
             CompiledConditions = compiledConditions;
@@ -1127,6 +1187,10 @@ namespace Microsoft.Build.Evaluation
         internal PropertyTemplate[] Properties { get; }
 
         internal CompiledPropertyValuePart[] CompiledPropertyValueParts { get; }
+
+        internal CompiledPropertyFunction[] CompiledPropertyFunctions { get; }
+
+        internal CompiledPropertyFunctionArgument[] CompiledPropertyFunctionArguments { get; }
 
         internal PropertyInstruction[] PropertyInstructions { get; }
 
@@ -1315,6 +1379,12 @@ namespace Microsoft.Build.Evaluation
             private readonly List<CompiledPropertyValuePart>
                 _compiledPropertyValueParts =
                     new List<CompiledPropertyValuePart>();
+            private readonly List<CompiledPropertyFunction>
+                _compiledPropertyFunctions =
+                    new List<CompiledPropertyFunction>();
+            private readonly List<CompiledPropertyFunctionArgument>
+                _compiledPropertyFunctionArguments =
+                    new List<CompiledPropertyFunctionArgument>();
             private readonly List<PropertyInstruction>
                 _propertyInstructions =
                     new List<PropertyInstruction>();
@@ -1436,6 +1506,8 @@ namespace Microsoft.Build.Evaluation
                     _propertySegments.ToArray(),
                     _properties.ToArray(),
                     _compiledPropertyValueParts.ToArray(),
+                    _compiledPropertyFunctions.ToArray(),
+                    _compiledPropertyFunctionArguments.ToArray(),
                     _propertyInstructions.ToArray(),
                     _compiledPropertyExternalReads.ToArray(),
                     _compiledConditions.ToArray(),
@@ -1574,6 +1646,8 @@ namespace Microsoft.Build.Evaluation
                             propertySourceId);
                     int constantValueStringId = 0;
                     List<CompiledPropertyValuePart> compiledValueParts = null;
+                    List<PendingCompiledPropertyFunction>
+                        compiledFunctions = null;
                     List<int> referencedAssignments = null;
                     bool requiresExpansion = false;
                     bool isCompiledEffect =
@@ -1584,6 +1658,7 @@ namespace Microsoft.Build.Evaluation
                             lastCompiledAssignments,
                             out constantValueStringId,
                             out compiledValueParts,
+                            out compiledFunctions,
                             out referencedAssignments))
                     {
                         requiresExpansion = true;
@@ -1615,6 +1690,7 @@ namespace Microsoft.Build.Evaluation
                         isCompiledEffect && !requiresExpansion
                             ? AddCompiledPropertyValueParts(
                                 compiledValueParts,
+                                compiledFunctions,
                                 externalReads)
                             : default;
                     if (isCompiledEffect && !requiresExpansion)
@@ -2134,78 +2210,130 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
 
+            private sealed class PendingCompiledPropertyFunction
+            {
+                internal PendingCompiledPropertyFunction(
+                    CompiledPropertyFunctionKind kind,
+                    List<CompiledPropertyValuePart> receiver,
+                    List<List<CompiledPropertyValuePart>> arguments,
+                    int expressionStringId)
+                {
+                    Kind = kind;
+                    Receiver = receiver;
+                    Arguments = arguments;
+                    ExpressionStringId = expressionStringId;
+                }
+
+                internal CompiledPropertyFunctionKind Kind { get; }
+
+                internal List<CompiledPropertyValuePart> Receiver { get; }
+
+                internal List<List<CompiledPropertyValuePart>> Arguments { get; }
+
+                internal int ExpressionStringId { get; }
+            }
+
             private bool TryCompilePropertyValue(
                 string value,
                 Dictionary<string, int> locallyDefinedProperties,
                 out int constantValueStringId,
                 out List<CompiledPropertyValuePart> compiledValueParts,
+                out List<PendingCompiledPropertyFunction> compiledFunctions,
                 out List<int> referencedAssignments)
             {
-                int propertyStart = value.IndexOf(
-                    "$(",
-                    StringComparison.Ordinal);
-                if (propertyStart < 0)
+                if (!value.Contains("$(", StringComparison.Ordinal))
                 {
                     constantValueStringId = GetStringId(
                         FileUtilities.MaybeAdjustFilePath(value));
                     compiledValueParts = null;
+                    compiledFunctions = null;
                     referencedAssignments = null;
                     return true;
                 }
 
-                var parts = new List<CompiledPropertyValuePart>();
-                var references = new List<int>();
+                compiledFunctions =
+                    new List<PendingCompiledPropertyFunction>();
+                referencedAssignments = new List<int>();
+                if (!TryCompilePropertyValueParts(
+                        value,
+                        locallyDefinedProperties,
+                        compiledFunctions,
+                        referencedAssignments,
+                        adjustLiteralPaths: true,
+                        allowNonStringFunctions: true,
+                        out compiledValueParts))
+                {
+                    constantValueStringId = 0;
+                    compiledValueParts = null;
+                    compiledFunctions = null;
+                    referencedAssignments = null;
+                    return false;
+                }
+
+                constantValueStringId = 0;
+                return true;
+            }
+
+            private bool TryCompilePropertyValueParts(
+                string value,
+                Dictionary<string, int> locallyDefinedProperties,
+                List<PendingCompiledPropertyFunction> compiledFunctions,
+                List<int> referencedAssignments,
+                bool adjustLiteralPaths,
+                bool allowNonStringFunctions,
+                out List<CompiledPropertyValuePart> parts)
+            {
+                parts = new List<CompiledPropertyValuePart>();
                 int sourceIndex = 0;
+                int propertyStart = value.IndexOf(
+                    "$(",
+                    StringComparison.Ordinal);
                 while (propertyStart >= 0)
                 {
-                    if (propertyStart > sourceIndex)
-                    {
-                        parts.Add(new CompiledPropertyValuePart(
-                            CompiledPropertyValuePartKind.Literal,
-                            GetStringId(
-                                FileUtilities.MaybeAdjustFilePath(
-                                    value.Substring(
-                                        sourceIndex,
-                                        propertyStart - sourceIndex)))));
-                    }
+                    AddCompiledLiteral(
+                        value,
+                        sourceIndex,
+                        propertyStart - sourceIndex,
+                        adjustLiteralPaths,
+                        parts);
 
-                    int propertyEnd = value.IndexOf(')', propertyStart + 2);
+                    int propertyEnd =
+                        FindClosingParenthesis(value, propertyStart + 2);
                     if (propertyEnd < 0)
                     {
-                        constantValueStringId = 0;
-                        compiledValueParts = null;
-                        referencedAssignments = null;
+                        parts = null;
                         return false;
                     }
 
-                    string propertyName = value.Substring(
+                    string propertyBody = value.Substring(
                         propertyStart + 2,
                         propertyEnd - propertyStart - 2);
-                    if (!IsValidPropertyName(propertyName) ||
-                        IsContextualPropertyName(propertyName))
+                    if (IsValidPropertyName(propertyBody))
                     {
-                        constantValueStringId = 0;
-                        compiledValueParts = null;
-                        referencedAssignments = null;
-                        return false;
+                        AddCompiledPropertyReference(
+                            propertyBody,
+                            locallyDefinedProperties,
+                            referencedAssignments,
+                            parts);
                     }
-
-                    if (locallyDefinedProperties.TryGetValue(
-                            propertyName,
-                            out int referencedAssignment))
+                    else if (!TryCompilePropertyFunction(
+                                 propertyBody,
+                                 locallyDefinedProperties,
+                                 compiledFunctions,
+                                 referencedAssignments,
+                                 allowNonStringFunctions,
+                                 out int functionIndex))
                     {
-                        references.Add(referencedAssignment);
-                        parts.Add(new CompiledPropertyValuePart(
-                            CompiledPropertyValuePartKind.PropertyReference,
-                            referencedAssignment));
+                        parts = null;
+                        return false;
                     }
                     else
                     {
                         parts.Add(new CompiledPropertyValuePart(
-                            CompiledPropertyValuePartKind
-                                .ExternalPropertyReference,
-                            GetStringId(propertyName)));
+                            CompiledPropertyValuePartKind.Function,
+                            functionIndex));
                     }
+
                     sourceIndex = propertyEnd + 1;
                     propertyStart = value.IndexOf(
                         "$(",
@@ -2213,23 +2341,504 @@ namespace Microsoft.Build.Evaluation
                         StringComparison.Ordinal);
                 }
 
-                if (sourceIndex < value.Length)
+                AddCompiledLiteral(
+                    value,
+                    sourceIndex,
+                    value.Length - sourceIndex,
+                    adjustLiteralPaths,
+                    parts);
+                return true;
+            }
+
+            private void AddCompiledLiteral(
+                string value,
+                int start,
+                int length,
+                bool adjustFilePaths,
+                List<CompiledPropertyValuePart> parts)
+            {
+                if (length == 0)
                 {
-                    parts.Add(new CompiledPropertyValuePart(
-                        CompiledPropertyValuePartKind.Literal,
-                        GetStringId(
-                            FileUtilities.MaybeAdjustFilePath(
-                                value.Substring(sourceIndex)))));
+                    return;
                 }
 
-                constantValueStringId = 0;
-                compiledValueParts = parts;
-                referencedAssignments = references;
+                string literal = value.Substring(start, length);
+                if (adjustFilePaths)
+                {
+                    literal = FileUtilities.MaybeAdjustFilePath(literal);
+                }
+
+                parts.Add(new CompiledPropertyValuePart(
+                    CompiledPropertyValuePartKind.Literal,
+                    GetStringId(literal)));
+            }
+
+            private void AddCompiledPropertyReference(
+                string propertyName,
+                Dictionary<string, int> locallyDefinedProperties,
+                List<int> referencedAssignments,
+                List<CompiledPropertyValuePart> parts)
+            {
+                if (IsContextualPropertyName(propertyName))
+                {
+                    parts.Add(new CompiledPropertyValuePart(
+                        CompiledPropertyValuePartKind
+                            .ContextualPropertyReference,
+                        GetStringId(propertyName)));
+                }
+                else if (locallyDefinedProperties.TryGetValue(
+                             propertyName,
+                             out int referencedAssignment))
+                {
+                    referencedAssignments.Add(referencedAssignment);
+                    parts.Add(new CompiledPropertyValuePart(
+                        CompiledPropertyValuePartKind.PropertyReference,
+                        referencedAssignment));
+                }
+                else
+                {
+                    parts.Add(new CompiledPropertyValuePart(
+                        CompiledPropertyValuePartKind
+                            .ExternalPropertyReference,
+                        GetStringId(propertyName)));
+                }
+            }
+
+            private bool TryCompilePropertyFunction(
+                string body,
+                Dictionary<string, int> locallyDefinedProperties,
+                List<PendingCompiledPropertyFunction> compiledFunctions,
+                List<int> referencedAssignments,
+                bool allowNonStringFunctions,
+                out int functionIndex)
+            {
+                const string intrinsicPrefix = "[MSBuild]::";
+                string receiverName = null;
+                string methodName;
+                int argumentsStart;
+                bool isIntrinsic;
+                if (body.StartsWith(
+                        intrinsicPrefix,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    isIntrinsic = true;
+                    int methodStart = intrinsicPrefix.Length;
+                    argumentsStart = body.IndexOf('(', methodStart);
+                    if (argumentsStart < 0)
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    methodName = body.Substring(
+                            methodStart,
+                            argumentsStart - methodStart)
+                        .Trim();
+                }
+                else
+                {
+                    isIntrinsic = false;
+                    int receiverEnd = body.IndexOf('.');
+                    if (receiverEnd <= 0)
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    receiverName = body.Substring(0, receiverEnd).Trim();
+                    if (!IsValidPropertyName(receiverName))
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    int methodStart = receiverEnd + 1;
+                    argumentsStart = body.IndexOf('(', methodStart);
+                    if (argumentsStart < 0)
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    methodName = body.Substring(
+                            methodStart,
+                            argumentsStart - methodStart)
+                        .Trim();
+                }
+
+                int argumentsEnd =
+                    FindClosingParenthesis(body, argumentsStart + 1);
+                if (argumentsEnd != body.Length - 1 ||
+                    !TryGetCompiledPropertyFunctionKind(
+                        isIntrinsic,
+                        methodName,
+                        out CompiledPropertyFunctionKind kind,
+                        out int expectedArgumentCount,
+                        out bool returnsString))
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                if (!allowNonStringFunctions && !returnsString)
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                if (!TrySplitFunctionArguments(
+                        body,
+                        argumentsStart + 1,
+                        argumentsEnd,
+                        out List<string> argumentValues) ||
+                    (expectedArgumentCount >= 0 &&
+                     argumentValues.Count != expectedArgumentCount))
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                List<CompiledPropertyValuePart> receiver = null;
+                if (receiverName is not null)
+                {
+                    receiver = new List<CompiledPropertyValuePart>(1);
+                    AddCompiledPropertyReference(
+                        receiverName,
+                        locallyDefinedProperties,
+                        referencedAssignments,
+                        receiver);
+                }
+
+                var arguments =
+                    new List<List<CompiledPropertyValuePart>>(
+                        argumentValues.Count);
+                foreach (string argumentValue in argumentValues)
+                {
+                    if (argumentValue is null ||
+                        !TryCompilePropertyValueParts(
+                            argumentValue,
+                            locallyDefinedProperties,
+                            compiledFunctions,
+                            referencedAssignments,
+                            adjustLiteralPaths: false,
+                            allowNonStringFunctions: false,
+                            out List<CompiledPropertyValuePart>
+                                argumentParts))
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    arguments.Add(argumentParts);
+                }
+
+                functionIndex = compiledFunctions.Count;
+                compiledFunctions.Add(
+                    new PendingCompiledPropertyFunction(
+                        kind,
+                        receiver,
+                        arguments,
+                        GetStringId(body)));
                 return true;
+            }
+
+            private static bool TryGetCompiledPropertyFunctionKind(
+                bool isIntrinsic,
+                string methodName,
+                out CompiledPropertyFunctionKind kind,
+                out int expectedArgumentCount,
+                out bool returnsString)
+            {
+                expectedArgumentCount = -1;
+                returnsString = true;
+                if (isIntrinsic)
+                {
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.NormalizeDirectory),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind.NormalizeDirectory;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.NormalizePath),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.NormalizePath;
+                        return true;
+                    }
+
+                    kind = default;
+                    return false;
+                }
+
+                expectedArgumentCount = 0;
+                if (methodName.Equals(
+                        nameof(string.ToLower),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    kind = CompiledPropertyFunctionKind.StringToLower;
+                }
+                else if (methodName.Equals(
+                             nameof(string.ToLowerInvariant),
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    kind =
+                        CompiledPropertyFunctionKind.StringToLowerInvariant;
+                }
+                else if (methodName.Equals(
+                             nameof(string.ToUpper),
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    kind = CompiledPropertyFunctionKind.StringToUpper;
+                }
+                else if (methodName.Equals(
+                             nameof(string.ToUpperInvariant),
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    kind =
+                        CompiledPropertyFunctionKind.StringToUpperInvariant;
+                }
+                else if (methodName.Equals(
+                             nameof(string.Trim),
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    kind = CompiledPropertyFunctionKind.StringTrim;
+                }
+                else if (methodName.Equals(
+                             nameof(string.TrimEnd),
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    kind = CompiledPropertyFunctionKind.StringTrimEnd;
+                }
+                else if (methodName.Equals(
+                             nameof(string.TrimStart),
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    kind = CompiledPropertyFunctionKind.StringTrimStart;
+                }
+                else
+                {
+                    expectedArgumentCount =
+                        methodName.Equals(
+                            nameof(string.Replace),
+                            StringComparison.OrdinalIgnoreCase)
+                            ? 2
+                            : 1;
+                    returnsString = methodName.Equals(
+                        nameof(string.Replace),
+                        StringComparison.OrdinalIgnoreCase);
+                    if (methodName.Equals(
+                            nameof(string.Contains),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind.StringContains;
+                    }
+                    else if (methodName.Equals(
+                                 nameof(string.EndsWith),
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind.StringEndsWith;
+                    }
+                    else if (methodName.Equals(
+                                 nameof(string.Equals),
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.StringEquals;
+                    }
+                    else if (methodName.Equals(
+                                 nameof(string.Replace),
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.StringReplace;
+                    }
+                    else if (methodName.Equals(
+                                 nameof(string.StartsWith),
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind.StringStartsWith;
+                    }
+                    else
+                    {
+                        kind = default;
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            private static bool TrySplitFunctionArguments(
+                string expression,
+                int start,
+                int end,
+                out List<string> arguments)
+            {
+                arguments = new List<string>();
+                if (start == end)
+                {
+                    return true;
+                }
+
+                int argumentStart = start;
+                for (int i = start; i < end; i++)
+                {
+                    char current = expression[i];
+                    if (current is '\'' or '"' or '`')
+                    {
+                        int quoteEnd = expression.IndexOf(current, i + 1);
+                        if (quoteEnd < 0 || quoteEnd >= end)
+                        {
+                            arguments = null;
+                            return false;
+                        }
+
+                        i = quoteEnd;
+                    }
+                    else if (current == '$' &&
+                             i + 1 < end &&
+                             expression[i + 1] == '(')
+                    {
+                        int propertyEnd =
+                            FindClosingParenthesis(expression, i + 2);
+                        if (propertyEnd < 0 || propertyEnd >= end)
+                        {
+                            arguments = null;
+                            return false;
+                        }
+
+                        i = propertyEnd;
+                    }
+                    else if (current == ',')
+                    {
+                        arguments.Add(ExtractFunctionArgument(
+                            expression,
+                            argumentStart,
+                            i - argumentStart));
+                        argumentStart = i + 1;
+                    }
+                }
+
+                arguments.Add(ExtractFunctionArgument(
+                    expression,
+                    argumentStart,
+                    end - argumentStart));
+                return true;
+            }
+
+            private static string ExtractFunctionArgument(
+                string expression,
+                int start,
+                int length)
+            {
+                string argument = expression.Substring(start, length).Trim();
+                if (argument.Equals(
+                        "null",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
+                if (argument.Length >= 2 &&
+                    argument[0] == argument[argument.Length - 1] &&
+                    argument[0] is '\'' or '"' or '`')
+                {
+                    return argument.Substring(1, argument.Length - 2);
+                }
+
+                return argument;
+            }
+
+            private static int FindClosingParenthesis(
+                string expression,
+                int start)
+            {
+                int nesting = 1;
+                for (int i = start; i < expression.Length; i++)
+                {
+                    char current = expression[i];
+                    if (current is '\'' or '"' or '`')
+                    {
+                        i = expression.IndexOf(current, i + 1);
+                        if (i < 0)
+                        {
+                            return -1;
+                        }
+                    }
+                    else if (current == '(')
+                    {
+                        nesting++;
+                    }
+                    else if (current == ')' && --nesting == 0)
+                    {
+                        return i;
+                    }
+                }
+
+                return -1;
             }
 
             private TableRange AddCompiledPropertyValueParts(
                 List<CompiledPropertyValuePart> parts,
+                List<PendingCompiledPropertyFunction> functions,
+                Dictionary<string, int> externalReads)
+            {
+                if (parts is null)
+                {
+                    return default;
+                }
+
+                int[] functionIds =
+                    functions is null ? null : new int[functions.Count];
+                if (functions is not null)
+                {
+                    for (int i = 0; i < functions.Count; i++)
+                    {
+                        PendingCompiledPropertyFunction function =
+                            functions[i];
+                        TableRange receiver = AddCompiledPropertyValuePartsCore(
+                            function.Receiver,
+                            functionIds,
+                            externalReads);
+                        int argumentStart =
+                            _compiledPropertyFunctionArguments.Count;
+                        foreach (List<CompiledPropertyValuePart> argument
+                                 in function.Arguments)
+                        {
+                            _compiledPropertyFunctionArguments.Add(
+                                new CompiledPropertyFunctionArgument(
+                                    AddCompiledPropertyValuePartsCore(
+                                        argument,
+                                        functionIds,
+                                        externalReads)));
+                        }
+
+                        functionIds[i] = _compiledPropertyFunctions.Count;
+                        _compiledPropertyFunctions.Add(
+                            new CompiledPropertyFunction(
+                                function.Kind,
+                                receiver,
+                                new TableRange(
+                                    argumentStart,
+                                    function.Arguments.Count),
+                                function.ExpressionStringId));
+                    }
+                }
+
+                return AddCompiledPropertyValuePartsCore(
+                    parts,
+                    functionIds,
+                    externalReads);
+            }
+
+            private TableRange AddCompiledPropertyValuePartsCore(
+                List<CompiledPropertyValuePart> parts,
+                int[] functionIds,
                 Dictionary<string, int> externalReads)
             {
                 if (parts is null)
@@ -2240,32 +2849,43 @@ namespace Microsoft.Build.Evaluation
                 int start = _compiledPropertyValueParts.Count;
                 foreach (CompiledPropertyValuePart part in parts)
                 {
-                    if (part.Kind !=
+                    if (part.Kind ==
                         CompiledPropertyValuePartKind
                             .ExternalPropertyReference)
                     {
-                        _compiledPropertyValueParts.Add(part);
-                        continue;
-                    }
+                        string propertyName = _strings[part.Value];
+                        if (!externalReads.TryGetValue(
+                                propertyName,
+                                out int readIndex))
+                        {
+                            readIndex =
+                                _compiledPropertyExternalReads.Count;
+                            externalReads.Add(propertyName, readIndex);
+                            _compiledPropertyExternalReads.Add(
+                                new CompiledPropertyExternalRead(
+                                    _propertyIdentities.GetOrCreate(
+                                        propertyName),
+                                    part.Value));
+                        }
 
-                    string propertyName = _strings[part.Value];
-                    if (!externalReads.TryGetValue(
-                            propertyName,
-                            out int readIndex))
+                        _compiledPropertyValueParts.Add(
+                            new CompiledPropertyValuePart(
+                                CompiledPropertyValuePartKind
+                                    .ExternalPropertyReference,
+                                readIndex));
+                    }
+                    else if (part.Kind ==
+                             CompiledPropertyValuePartKind.Function)
                     {
-                        readIndex = _compiledPropertyExternalReads.Count;
-                        externalReads.Add(propertyName, readIndex);
-                        _compiledPropertyExternalReads.Add(
-                            new CompiledPropertyExternalRead(
-                                _propertyIdentities.GetOrCreate(propertyName),
-                                part.Value));
+                        _compiledPropertyValueParts.Add(
+                            new CompiledPropertyValuePart(
+                                CompiledPropertyValuePartKind.Function,
+                                functionIds[part.Value]));
                     }
-
-                    _compiledPropertyValueParts.Add(
-                        new CompiledPropertyValuePart(
-                            CompiledPropertyValuePartKind
-                                .ExternalPropertyReference,
-                            readIndex));
+                    else
+                    {
+                        _compiledPropertyValueParts.Add(part);
+                    }
                 }
 
                 return new TableRange(start, parts.Count);
@@ -2349,6 +2969,10 @@ namespace Microsoft.Build.Evaluation
                                         PropertyInstructionKind.AppendLocalProperty,
                                     CompiledPropertyValuePartKind.ExternalPropertyReference =>
                                         PropertyInstructionKind.AppendExternalProperty,
+                                    CompiledPropertyValuePartKind.ContextualPropertyReference =>
+                                        PropertyInstructionKind.AppendContextualProperty,
+                                    CompiledPropertyValuePartKind.Function =>
+                                        PropertyInstructionKind.AppendFunction,
                                     _ => throw new InternalErrorException(
                                         "Unknown compiled property value part."),
                                 },

@@ -32,6 +32,7 @@ using EngineFileUtilities = Microsoft.Build.Internal.EngineFileUtilities;
 using ILoggingService = Microsoft.Build.BackEnd.Logging.ILoggingService;
 using InvalidProjectFileException = Microsoft.Build.Exceptions.InvalidProjectFileException;
 using ObjectModel = System.Collections.ObjectModel;
+using ParseArgs = Microsoft.Build.Evaluation.Expander.ArgumentParser;
 using ReservedPropertyNames = Microsoft.Build.Internal.ReservedPropertyNames;
 using SdkReferencePropertyExpansionMode = Microsoft.Build.Framework.EscapeHatches.SdkReferencePropertyExpansionMode;
 using SdkResult = Microsoft.Build.BackEnd.SdkResolution.SdkResult;
@@ -1753,10 +1754,339 @@ namespace Microsoft.Build.Evaluation
                             out string externalValue)
                         ? FileUtilities.MaybeAdjustFilePath(externalValue)
                         : string.Empty;
+                case PropertyInstructionKind.AppendContextualProperty:
+                    return EvaluateContextualProperty(
+                        module.GetStringValue(instruction.Argument0),
+                        location);
+                case PropertyInstructionKind.AppendFunction:
+                    return EvaluateCompiledPropertyFunction(
+                        module,
+                        instruction.Argument0,
+                        location);
                 default:
                     throw new InternalErrorException(
                         "Unknown residual property value instruction.");
             }
+        }
+
+        private string EvaluateCompiledPropertyFunction(
+            EvaluationModule module,
+            int functionIndex,
+            IElementLocation location)
+        {
+            EvaluationPerformanceInstrumentation.RecordEvent(
+                EvaluationPerformanceMetric.CompiledPropertyFunction);
+            CompiledPropertyFunction function =
+                module.CompiledPropertyFunctions[functionIndex];
+            try
+            {
+                TableRange arguments = function.Arguments;
+                if (function.Kind is
+                    CompiledPropertyFunctionKind.NormalizeDirectory or
+                    CompiledPropertyFunctionKind.NormalizePath)
+                {
+                    var values = new string[arguments.Count];
+                    for (int i = 0; i < values.Length; i++)
+                    {
+                        values[i] =
+                            EvaluateCompiledPropertyFunctionArgument(
+                                module,
+                                module.CompiledPropertyFunctionArguments[
+                                    arguments.Start + i],
+                                location);
+                    }
+
+                    string normalized =
+                        function.Kind ==
+                        CompiledPropertyFunctionKind.NormalizeDirectory
+                            ? IntrinsicFunctions.NormalizeDirectory(values)
+                            : IntrinsicFunctions.NormalizePath(values);
+                    return EscapingUtilities.Escape(normalized);
+                }
+
+                string receiver = EscapingUtilities.UnescapeAll(
+                    EvaluateCompiledPropertyFunctionValue(
+                        module,
+                        function.Receiver,
+                        location));
+                string argument0 = arguments.Count > 0
+                    ? EvaluateCompiledPropertyFunctionArgument(
+                        module,
+                        module.CompiledPropertyFunctionArguments[
+                            arguments.Start],
+                        location)
+                    : null;
+                string result;
+                switch (function.Kind)
+                {
+                    case CompiledPropertyFunctionKind.StringContains:
+                        result = Convert.ToString(
+                            receiver.Contains(argument0),
+                            CultureInfo.InvariantCulture);
+                        break;
+                    case CompiledPropertyFunctionKind.StringEndsWith:
+                        result = Convert.ToString(
+                            receiver.EndsWith(
+                                argument0,
+                                StringComparison.CurrentCulture),
+                            CultureInfo.InvariantCulture);
+                        break;
+                    case CompiledPropertyFunctionKind.StringEquals:
+                        object equalsReceiver = receiver;
+                        object equalsArgument = argument0;
+                        if (ParseArgs.IsFloatingPointRepresentation(
+                                equalsArgument) &&
+                            double.TryParse(
+                                equalsReceiver.ToString(),
+                                NumberStyles.Number |
+                                NumberStyles.Float,
+                                CultureInfo.InvariantCulture.NumberFormat,
+                                out double numericReceiver))
+                        {
+                            equalsReceiver = numericReceiver;
+                        }
+
+                        equalsArgument = Convert.ChangeType(
+                            equalsArgument,
+                            equalsReceiver.GetType(),
+                            CultureInfo.InvariantCulture);
+                        result = Convert.ToString(
+                            equalsReceiver.Equals(equalsArgument),
+                            CultureInfo.InvariantCulture);
+                        break;
+                    case CompiledPropertyFunctionKind.StringReplace:
+                        result = receiver.Replace(
+                            argument0,
+                            EvaluateCompiledPropertyFunctionArgument(
+                                module,
+                                module.CompiledPropertyFunctionArguments[
+                                    arguments.Start + 1],
+                                location));
+                        break;
+                    case CompiledPropertyFunctionKind.StringStartsWith:
+                        result = Convert.ToString(
+                            receiver.StartsWith(
+                                argument0,
+                                StringComparison.CurrentCulture),
+                            CultureInfo.InvariantCulture);
+                        break;
+                    case CompiledPropertyFunctionKind.StringToLower:
+                        result = receiver.ToLower();
+                        break;
+                    case CompiledPropertyFunctionKind.StringToLowerInvariant:
+                        result = receiver.ToLowerInvariant();
+                        break;
+                    case CompiledPropertyFunctionKind.StringToUpper:
+                        result = receiver.ToUpper();
+                        break;
+                    case CompiledPropertyFunctionKind.StringToUpperInvariant:
+                        result = receiver.ToUpperInvariant();
+                        break;
+                    case CompiledPropertyFunctionKind.StringTrim:
+                        result = receiver.Trim();
+                        break;
+                    case CompiledPropertyFunctionKind.StringTrimEnd:
+                        result = receiver.TrimEnd();
+                        break;
+                    case CompiledPropertyFunctionKind.StringTrimStart:
+                        result = receiver.TrimStart();
+                        break;
+                    default:
+                        throw new InternalErrorException(
+                            "Unknown compiled property function.");
+                }
+
+                return EscapingUtilities.Escape(result);
+            }
+            catch (Exception ex)
+                when (!ExceptionHandling.NotExpectedFunctionException(ex))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    location,
+                    "InvalidFunctionPropertyExpression",
+                    module.GetStringValue(function.ExpressionStringId),
+                    ex.Message.Replace("\r\n", " "));
+                return null;
+            }
+        }
+
+        private string EvaluateCompiledPropertyFunctionArgument(
+            EvaluationModule module,
+            CompiledPropertyFunctionArgument argument,
+            IElementLocation location) =>
+            EscapingUtilities.UnescapeAll(
+                EvaluateCompiledPropertyFunctionValue(
+                    module,
+                    argument.ValueParts,
+                    location,
+                    adjustFilePaths: true));
+
+        private string EvaluateCompiledPropertyFunctionValue(
+            EvaluationModule module,
+            TableRange valueParts,
+            IElementLocation location,
+            bool adjustFilePaths = false)
+        {
+            if (valueParts.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            if (valueParts.Count == 1)
+            {
+                return EvaluateCompiledPropertyFunctionValuePart(
+                    module,
+                    module.CompiledPropertyValueParts[valueParts.Start],
+                    location,
+                    adjustFilePaths);
+            }
+
+            if (valueParts.Count == 2)
+            {
+                return string.Concat(
+                    EvaluateCompiledPropertyFunctionValuePart(
+                        module,
+                        module.CompiledPropertyValueParts[valueParts.Start],
+                        location,
+                        adjustFilePaths),
+                    EvaluateCompiledPropertyFunctionValuePart(
+                        module,
+                        module.CompiledPropertyValueParts[
+                            valueParts.Start + 1],
+                        location,
+                        adjustFilePaths));
+            }
+
+            var builder = new StringBuilder();
+            for (int i = valueParts.Start;
+                 i < valueParts.Start + valueParts.Count;
+                 i++)
+            {
+                builder.Append(EvaluateCompiledPropertyFunctionValuePart(
+                    module,
+                    module.CompiledPropertyValueParts[i],
+                    location,
+                    adjustFilePaths));
+            }
+
+            return builder.ToString();
+        }
+
+        private string EvaluateCompiledPropertyFunctionValuePart(
+            EvaluationModule module,
+            CompiledPropertyValuePart part,
+            IElementLocation location,
+            bool adjustFilePaths)
+        {
+            string value;
+            switch (part.Kind)
+            {
+                case CompiledPropertyValuePartKind.Literal:
+                    value = module.GetStringValue(part.Value);
+                    break;
+                case CompiledPropertyValuePartKind.PropertyReference:
+                    PropertyTemplate referencedProperty =
+                        module.Properties[part.Value];
+                    value = _data.TryGetEscapedPropertyValue(
+                            referencedProperty.PropertyId,
+                            module.GetStringValue(
+                                referencedProperty.NameStringId),
+                            location,
+                            out string localValue)
+                        ? localValue
+                        : string.Empty;
+                    break;
+                case CompiledPropertyValuePartKind.ExternalPropertyReference:
+                    CompiledPropertyExternalRead externalRead =
+                        module.CompiledPropertyExternalReads[part.Value];
+                    value = _data.TryGetEscapedPropertyValue(
+                            externalRead.PropertyId,
+                            module.GetStringValue(
+                                externalRead.NameStringId),
+                            location,
+                            out string externalValue)
+                        ? externalValue
+                        : string.Empty;
+                    break;
+                case CompiledPropertyValuePartKind
+                    .ContextualPropertyReference:
+                    value = EvaluateContextualProperty(
+                        module.GetStringValue(part.Value),
+                        location);
+                    break;
+                case CompiledPropertyValuePartKind.Function:
+                    value = EvaluateCompiledPropertyFunction(
+                        module,
+                        part.Value,
+                        location);
+                    break;
+                default:
+                    throw new InternalErrorException(
+                        "Unknown compiled property function value part.");
+            }
+
+            return adjustFilePaths
+                ? FileUtilities.MaybeAdjustFilePath(value)
+                : value;
+        }
+
+        private static string EvaluateContextualProperty(
+            string propertyName,
+            IElementLocation location)
+        {
+            if (string.IsNullOrEmpty(location.File))
+            {
+                return string.Empty;
+            }
+
+            if (propertyName.Equals(
+                    ReservedPropertyNames.thisFile,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.GetFileName(location.File);
+            }
+
+            if (propertyName.Equals(
+                    ReservedPropertyNames.thisFileName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.GetFileNameWithoutExtension(location.File);
+            }
+
+            if (propertyName.Equals(
+                    ReservedPropertyNames.thisFileFullPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return FileUtilities.NormalizePath(location.File);
+            }
+
+            if (propertyName.Equals(
+                    ReservedPropertyNames.thisFileExtension,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.GetExtension(location.File);
+            }
+
+            if (propertyName.Equals(
+                    ReservedPropertyNames.thisFileDirectory,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return FileUtilities.EnsureTrailingSlash(
+                    Path.GetDirectoryName(location.File));
+            }
+
+            if (propertyName.Equals(
+                    ReservedPropertyNames.thisFileDirectoryNoRoot,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                string directory = Path.GetDirectoryName(location.File);
+                int rootLength = Path.GetPathRoot(directory).Length;
+                return FileUtilities.EnsureTrailingNoLeadingSlash(
+                    directory,
+                    rootLength);
+            }
+
+            return string.Empty;
         }
 
         private bool EvaluateCompiledCondition(

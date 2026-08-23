@@ -46,6 +46,7 @@ namespace Microsoft.Build.Evaluation
         CompiledPropertyEffect,
         CompiledPropertyFold,
         CompiledPropertyExpansion,
+        CompiledPropertyFunction,
         CompiledPropertyDeadStore,
         CompiledPropertyBlockCacheHit,
         CompiledPropertyBlockCacheMiss,
