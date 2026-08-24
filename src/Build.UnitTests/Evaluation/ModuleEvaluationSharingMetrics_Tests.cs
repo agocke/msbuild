@@ -2184,6 +2184,9 @@ namespace Microsoft.Build.UnitTests.Evaluation
                       <Updated Condition="'%(Compile.Filename)' == 'keep' and '$(EnableMetadata)' == 'true'">%(Filename)</Updated>
                       <Skipped Condition="'%(Filename)' != 'keep'">wrong</Skipped>
                     </Compile>
+                    <Glob Include="*.generated.cs" />
+                    <Dynamic Include="$(Excluded)" />
+                    <Fallback Include="$([System.IO.Path]::GetFileName('fallback.cs'))" />
                   </ItemGroup>
                   <UsingTask TaskName="$(TaskPrefix).Generated"
                              AssemblyFile="$(TaskAssembly)"
@@ -2252,6 +2255,35 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     metadata.CompiledConditionId > 0)
                 .ShouldBeGreaterThanOrEqualTo(2);
             module.Items[0].MatchOnMetadataExpressionId.ShouldBe(0);
+            module.CompiledItemSpecFragments
+                .Any(fragment =>
+                    fragment.Kind ==
+                    CompiledItemSpecFragmentKind.Value)
+                .ShouldBeTrue();
+            module.CompiledItemSpecFragments
+                .Any(fragment =>
+                    fragment.Kind ==
+                    CompiledItemSpecFragmentKind.Glob)
+                .ShouldBeTrue();
+            module.CompiledItemSpecFragments
+                .Any(fragment =>
+                    fragment.Kind ==
+                    CompiledItemSpecFragmentKind.ItemExpression)
+                .ShouldBeTrue();
+            ItemTemplate dynamicItem = module.Items
+                .Single(item =>
+                    module.GetStringValue(item.ItemTypeStringId) ==
+                    "Dynamic");
+            dynamicItem.CompiledItemSpecFragments.Start
+                .ShouldBe(-1);
+            dynamicItem.CompiledItemSpecExpansion.Start
+                .ShouldBeGreaterThanOrEqualTo(0);
+            module.Items
+                .Single(item =>
+                    module.GetStringValue(item.ItemTypeStringId) ==
+                    "Fallback")
+                .CompiledItemSpecExpansion.Start
+                .ShouldBe(-1);
         }
 
         [Fact]

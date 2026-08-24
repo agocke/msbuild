@@ -360,6 +360,25 @@ namespace Microsoft.Build.Evaluation
             return false;
         }
 
+        internal static ItemExpressionCapture? GetSingleItemExpressionCapture(
+            string expression,
+            IElementLocation elementLocation)
+        {
+            if (expression.Length == 0 ||
+                !expression.Contains("@", StringComparison.Ordinal) ||
+                !TryGetNextItemVectorExpression(expression, out ItemExpressionCapture itemVector))
+            {
+                return null;
+            }
+
+            ProjectErrorUtilities.VerifyThrowInvalidProject(
+                itemVector.Index == 0 && itemVector.Length == expression.Length,
+                elementLocation,
+                "EmbeddedItemVectorCannotBeItemized",
+                expression);
+            return itemVector;
+        }
+
         private static bool TryParseItemVectorExpression(string expression, int startIndex, out ItemExpressionCapture itemVector)
         {
             int end = expression.Length;

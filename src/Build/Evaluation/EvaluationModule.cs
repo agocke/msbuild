@@ -939,6 +939,8 @@ namespace Microsoft.Build.Evaluation
             ItemOperationKind operationKind,
             int conditionId,
             int compiledConditionId,
+            TableRange compiledItemSpecFragments,
+            TableRange compiledItemSpecExpansion,
             int includeExpressionId,
             int excludeExpressionId,
             int removeExpressionId,
@@ -952,6 +954,8 @@ namespace Microsoft.Build.Evaluation
             OperationKind = operationKind;
             ConditionId = conditionId;
             CompiledConditionId = compiledConditionId;
+            CompiledItemSpecFragments = compiledItemSpecFragments;
+            CompiledItemSpecExpansion = compiledItemSpecExpansion;
             IncludeExpressionId = includeExpressionId;
             ExcludeExpressionId = excludeExpressionId;
             RemoveExpressionId = removeExpressionId;
@@ -969,6 +973,10 @@ namespace Microsoft.Build.Evaluation
         internal int ConditionId { get; }
 
         internal int CompiledConditionId { get; }
+
+        internal TableRange CompiledItemSpecFragments { get; }
+
+        internal TableRange CompiledItemSpecExpansion { get; }
 
         internal int IncludeExpressionId { get; }
 
@@ -992,6 +1000,35 @@ namespace Microsoft.Build.Evaluation
         Include,
         Remove,
         Update,
+    }
+
+    internal enum CompiledItemSpecFragmentKind : byte
+    {
+        Value,
+        Glob,
+        ItemExpression,
+    }
+
+    internal readonly struct CompiledItemSpecFragment
+    {
+        internal CompiledItemSpecFragment(
+            CompiledItemSpecFragmentKind kind,
+            int textStringId,
+            ExpressionShredder.ItemExpressionCapture itemExpression)
+        {
+            Kind = kind;
+            TextStringId = textStringId;
+            ItemExpression = itemExpression;
+        }
+
+        internal CompiledItemSpecFragmentKind Kind { get; }
+
+        internal int TextStringId { get; }
+
+        internal ExpressionShredder.ItemExpressionCapture ItemExpression
+        {
+            get;
+        }
     }
 
     internal readonly struct ItemDefinitionGroupTemplate
@@ -1148,6 +1185,9 @@ namespace Microsoft.Build.Evaluation
         private readonly ConcurrentDictionary<long, PropertyDelta>
             _constantPropertyDeltas =
                 new ConcurrentDictionary<long, PropertyDelta>();
+        private readonly ConcurrentDictionary<
+            (int CacheKey, string EvaluatedItemSpec),
+            ItemSpecFragmentDescriptor[]> _expandedItemSpecs = new();
         private int _handle;
 
         private EvaluationModule(
@@ -1174,6 +1214,7 @@ namespace Microsoft.Build.Evaluation
             ChooseArmTemplate[] chooseArms,
             ItemGroupTemplate[] itemGroups,
             ItemTemplate[] items,
+            CompiledItemSpecFragment[] compiledItemSpecFragments,
             ItemDefinitionGroupTemplate[] itemDefinitionGroups,
             ItemDefinitionTemplate[] itemDefinitions,
             MetadataTemplate[] metadata,
@@ -1221,6 +1262,7 @@ namespace Microsoft.Build.Evaluation
             ChooseArms = chooseArms;
             ItemGroups = itemGroups;
             Items = items;
+            CompiledItemSpecFragments = compiledItemSpecFragments;
             ItemDefinitionGroups = itemDefinitionGroups;
             ItemDefinitions = itemDefinitions;
             Metadata = metadata;
@@ -1284,6 +1326,8 @@ namespace Microsoft.Build.Evaluation
 
         internal ItemTemplate[] Items { get; }
 
+        internal CompiledItemSpecFragment[] CompiledItemSpecFragments { get; }
+
         internal ItemDefinitionGroupTemplate[] ItemDefinitionGroups { get; }
 
         internal ItemDefinitionTemplate[] ItemDefinitions { get; }
@@ -1327,6 +1371,23 @@ namespace Microsoft.Build.Evaluation
         internal ProjectElement GetSource(int sourceId) => _sources[sourceId];
 
         internal string GetStringValue(int stringId) => _strings[stringId];
+
+        internal ItemSpecFragmentDescriptor[] GetOrAddExpandedItemSpec(
+            int cacheKey,
+            string evaluatedItemSpec,
+            IElementLocation location)
+        {
+            var key = (cacheKey, evaluatedItemSpec);
+            if (_expandedItemSpecs.TryGetValue(
+                    key,
+                    out ItemSpecFragmentDescriptor[] fragments))
+            {
+                return fragments;
+            }
+
+            fragments = ItemSpecParser.Parse(evaluatedItemSpec, location);
+            return _expandedItemSpecs.GetOrAdd(key, fragments);
+        }
 
         internal PropertyDelta GetConstantPropertyDelta(TableRange properties)
         {
@@ -1483,6 +1544,9 @@ namespace Microsoft.Build.Evaluation
                 new List<ItemGroupTemplate>();
             private readonly List<ItemTemplate> _items =
                 new List<ItemTemplate>();
+            private readonly List<CompiledItemSpecFragment>
+                _compiledItemSpecFragments =
+                    new List<CompiledItemSpecFragment>();
             private readonly List<ItemDefinitionGroupTemplate> _itemDefinitionGroups =
                 new List<ItemDefinitionGroupTemplate>();
             private readonly List<ItemDefinitionTemplate> _itemDefinitions =
@@ -1587,6 +1651,7 @@ namespace Microsoft.Build.Evaluation
                     _chooseArms.ToArray(),
                     _itemGroups.ToArray(),
                     _items.ToArray(),
+                    _compiledItemSpecFragments.ToArray(),
                     _itemDefinitionGroups.ToArray(),
                     _itemDefinitions.ToArray(),
                     _metadata.ToArray(),
@@ -2223,6 +2288,7 @@ namespace Microsoft.Build.Evaluation
                 }
 
                 int partStart = _compiledConditionValueParts.Count;
+                int readStart = _compiledConditionPropertyReads.Count;
                 int sourceIndex = 0;
                 int propertyStart = value.IndexOf(
                     "$(",
@@ -2248,6 +2314,10 @@ namespace Microsoft.Build.Evaluation
                             partStart,
                             _compiledConditionValueParts.Count -
                             partStart);
+                        _compiledConditionPropertyReads.RemoveRange(
+                            readStart,
+                            _compiledConditionPropertyReads.Count -
+                            readStart);
                         compiledOperand = default;
                         return false;
                     }
@@ -2265,6 +2335,10 @@ namespace Microsoft.Build.Evaluation
                             partStart,
                             _compiledConditionValueParts.Count -
                             partStart);
+                        _compiledConditionPropertyReads.RemoveRange(
+                            readStart,
+                            _compiledConditionPropertyReads.Count -
+                            readStart);
                         compiledOperand = default;
                         return false;
                     }
@@ -3643,6 +3717,11 @@ namespace Microsoft.Build.Evaluation
                             item.Condition,
                             itemSourceId,
                             ParserOptions.AllowPropertiesAndItemLists),
+                        AddCompiledItemSpec(
+                            GetItemOperationExpression(item),
+                            GetItemOperationLocation(item)),
+                        AddCompiledItemSpecExpansion(
+                            GetItemOperationExpression(item)),
                         AddExpression(item.Include, itemSourceId),
                         AddExpression(item.Exclude, itemSourceId),
                         AddExpression(item.Remove, itemSourceId),
@@ -3663,6 +3742,139 @@ namespace Microsoft.Build.Evaluation
                     sourceId));
                 return _itemGroups.Count - 1;
             }
+
+            private TableRange AddCompiledItemSpec(
+                string itemSpec,
+                IElementLocation location)
+            {
+                if (itemSpec.Contains("$(", StringComparison.Ordinal))
+                {
+                    return new TableRange(-1, 0);
+                }
+
+                int start = _compiledItemSpecFragments.Count;
+                ItemSpecFragmentDescriptor[] fragments;
+                try
+                {
+                    fragments = ItemSpecParser.Parse(itemSpec, location);
+                }
+                catch (InvalidProjectFileException)
+                {
+                    return new TableRange(-1, 0);
+                }
+
+                foreach (ItemSpecFragmentDescriptor fragment in fragments)
+                {
+                    _compiledItemSpecFragments.Add(
+                        new CompiledItemSpecFragment(
+                            fragment.Kind,
+                            GetStringId(fragment.Text),
+                            fragment.ItemExpression));
+                }
+
+                return new TableRange(
+                    start,
+                    _compiledItemSpecFragments.Count - start);
+            }
+
+            private TableRange AddCompiledItemSpecExpansion(string itemSpec)
+            {
+                if (!itemSpec.Contains("$(", StringComparison.Ordinal))
+                {
+                    return new TableRange(-1, 0);
+                }
+
+                int partStart = _compiledConditionValueParts.Count;
+                int readStart = _compiledConditionPropertyReads.Count;
+                int sourceIndex = 0;
+                int propertyStart =
+                    itemSpec.IndexOf("$(", StringComparison.Ordinal);
+                while (propertyStart >= 0)
+                {
+                    if (propertyStart > sourceIndex)
+                    {
+                        _compiledConditionValueParts.Add(
+                            new CompiledConditionValuePart(
+                                CompiledConditionValuePartKind.Literal,
+                                GetStringId(itemSpec.Substring(
+                                    sourceIndex,
+                                    propertyStart - sourceIndex))));
+                    }
+
+                    int propertyEnd =
+                        itemSpec.IndexOf(')', propertyStart + 2);
+                    if (propertyEnd < 0)
+                    {
+                        _compiledConditionValueParts.RemoveRange(
+                            partStart,
+                            _compiledConditionValueParts.Count - partStart);
+                        _compiledConditionPropertyReads.RemoveRange(
+                            readStart,
+                            _compiledConditionPropertyReads.Count - readStart);
+                        return new TableRange(-1, 0);
+                    }
+
+                    string propertyName = itemSpec.Substring(
+                        propertyStart + 2,
+                        propertyEnd - propertyStart - 2);
+                    if (!IsValidPropertyName(propertyName) ||
+                        IsContextualPropertyName(propertyName) ||
+                        propertyName.Equals(
+                            "MSBuildToolsVersion",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        _compiledConditionValueParts.RemoveRange(
+                            partStart,
+                            _compiledConditionValueParts.Count - partStart);
+                        _compiledConditionPropertyReads.RemoveRange(
+                            readStart,
+                            _compiledConditionPropertyReads.Count - readStart);
+                        return new TableRange(-1, 0);
+                    }
+
+                    int readIndex =
+                        _compiledConditionPropertyReads.Count;
+                    _compiledConditionPropertyReads.Add(
+                        new CompiledPropertyExternalRead(
+                            _propertyIdentities.GetOrCreate(propertyName),
+                            GetStringId(propertyName)));
+                    _compiledConditionValueParts.Add(
+                        new CompiledConditionValuePart(
+                            CompiledConditionValuePartKind.Property,
+                            readIndex));
+                    sourceIndex = propertyEnd + 1;
+                    propertyStart = itemSpec.IndexOf(
+                        "$(",
+                        sourceIndex,
+                        StringComparison.Ordinal);
+                }
+
+                if (sourceIndex < itemSpec.Length)
+                {
+                    _compiledConditionValueParts.Add(
+                        new CompiledConditionValuePart(
+                            CompiledConditionValuePartKind.Literal,
+                            GetStringId(itemSpec.Substring(sourceIndex))));
+                }
+
+                return new TableRange(
+                    partStart,
+                    _compiledConditionValueParts.Count - partStart);
+            }
+
+            private static string GetItemOperationExpression(
+                ProjectItemElement item) =>
+                item.IncludeLocation is not null
+                    ? item.Include
+                    : item.RemoveLocation is not null
+                        ? item.Remove
+                        : item.Update;
+
+            private static IElementLocation GetItemOperationLocation(
+                ProjectItemElement item) =>
+                item.IncludeLocation ??
+                item.RemoveLocation ??
+                item.UpdateLocation;
 
             private int AddItemDefinitionGroup(
                 ProjectItemDefinitionGroupElement itemDefinitionGroup)

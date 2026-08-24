@@ -13,6 +13,76 @@ using Microsoft.Build.Shared;
 
 namespace Microsoft.Build.Evaluation
 {
+    internal readonly struct ItemSpecFragmentDescriptor
+    {
+        internal ItemSpecFragmentDescriptor(
+            CompiledItemSpecFragmentKind kind,
+            string text,
+            ExpressionShredder.ItemExpressionCapture itemExpression)
+        {
+            Kind = kind;
+            Text = text;
+            ItemExpression = itemExpression;
+        }
+
+        internal CompiledItemSpecFragmentKind Kind { get; }
+
+        internal string Text { get; }
+
+        internal ExpressionShredder.ItemExpressionCapture ItemExpression
+        {
+            get;
+        }
+    }
+
+    internal static class ItemSpecParser
+    {
+        internal static ItemSpecFragmentDescriptor[] Parse(
+            string evaluatedItemSpec,
+            IElementLocation location)
+        {
+            if (evaluatedItemSpec.Length == 0)
+            {
+                return Array.Empty<ItemSpecFragmentDescriptor>();
+            }
+
+            var fragments = new List<ItemSpecFragmentDescriptor>();
+            foreach (string split in
+                     ExpressionShredder.SplitSemiColonSeparatedList(
+                         evaluatedItemSpec))
+            {
+                ExpressionShredder.ItemExpressionCapture? capture =
+                    ExpressionShredder.GetSingleItemExpressionCapture(
+                        split,
+                        location);
+                if (capture is not null)
+                {
+                    fragments.Add(new ItemSpecFragmentDescriptor(
+                        CompiledItemSpecFragmentKind.ItemExpression,
+                        split,
+                        capture.Value));
+                }
+                else if (!FileMatcher.HasWildcards(split) ||
+                         EscapingUtilities.ContainsEscapedWildcards(split))
+                {
+                    fragments.Add(new ItemSpecFragmentDescriptor(
+                        CompiledItemSpecFragmentKind.Value,
+                        split,
+                        default));
+                }
+                else
+                {
+                    fragments.Add(new ItemSpecFragmentDescriptor(
+                        CompiledItemSpecFragmentKind.Glob,
+                        EscapingUtilities.UnescapeAll(split),
+                        default));
+                }
+            }
+
+            return fragments.ToArray();
+        }
+    }
+
     /// <summary>
     ///     Represents the elements of an item specification string (e.g. Include="*.cs;foo;@(i)") and
     ///     provides some operations over them (like matching items against a given ItemSpec)
@@ -169,6 +239,104 @@ namespace Microsoft.Build.Evaluation
             ItemSpecLocation = itemSpecLocation;
 
             Fragments = BuildItemFragments(itemSpecLocation, projectDirectory, expandProperties);
+        }
+
+        internal ItemSpec(
+            string itemSpec,
+            Expander<P, I> expander,
+            IElementLocation itemSpecLocation,
+            string projectDirectory,
+            EvaluationModule module,
+            TableRange compiledFragments)
+        {
+            ItemSpecString = itemSpec;
+            Expander = expander;
+            ItemSpecLocation = itemSpecLocation;
+            Fragments = BuildCompiledItemFragments(
+                module,
+                compiledFragments,
+                projectDirectory);
+        }
+
+        internal ItemSpec(
+            string itemSpec,
+            Expander<P, I> expander,
+            IElementLocation itemSpecLocation,
+            string projectDirectory,
+            EvaluationModule module,
+            int cacheKey,
+            string evaluatedItemSpec)
+        {
+            ItemSpecString = itemSpec;
+            Expander = expander;
+            ItemSpecLocation = itemSpecLocation;
+            Fragments = BuildCompiledItemFragments(
+                module.GetOrAddExpandedItemSpec(
+                    cacheKey,
+                    evaluatedItemSpec,
+                    itemSpecLocation),
+                projectDirectory);
+        }
+
+        private List<ItemSpecFragment> BuildCompiledItemFragments(
+            EvaluationModule module,
+            TableRange compiledFragments,
+            string projectDirectory)
+        {
+            var fragments =
+                new List<ItemSpecFragment>(compiledFragments.Count);
+            int end = compiledFragments.Start + compiledFragments.Count;
+            for (int i = compiledFragments.Start; i < end; i++)
+            {
+                CompiledItemSpecFragment fragment =
+                    module.CompiledItemSpecFragments[i];
+                string text = module.GetStringValue(fragment.TextStringId);
+                fragments.Add(fragment.Kind switch
+                {
+                    CompiledItemSpecFragmentKind.Value =>
+                        new ValueFragment(text, projectDirectory),
+                    CompiledItemSpecFragmentKind.Glob =>
+                        new GlobFragment(text, projectDirectory),
+                    CompiledItemSpecFragmentKind.ItemExpression =>
+                        new ItemExpressionFragment(
+                            fragment.ItemExpression,
+                            text,
+                            this,
+                            projectDirectory),
+                    _ => throw new InternalErrorException(
+                        "Unknown compiled item-spec fragment."),
+                });
+            }
+
+            return fragments;
+        }
+
+        private List<ItemSpecFragment> BuildCompiledItemFragments(
+            ItemSpecFragmentDescriptor[] compiledFragments,
+            string projectDirectory)
+        {
+            var fragments =
+                new List<ItemSpecFragment>(compiledFragments.Length);
+            foreach (ItemSpecFragmentDescriptor fragment in compiledFragments)
+            {
+                fragments.Add(fragment.Kind switch
+                {
+                    CompiledItemSpecFragmentKind.Value =>
+                        new ValueFragment(fragment.Text, projectDirectory),
+                    CompiledItemSpecFragmentKind.Glob =>
+                        new GlobFragment(fragment.Text, projectDirectory),
+                    CompiledItemSpecFragmentKind.ItemExpression =>
+                        new ItemExpressionFragment(
+                            fragment.ItemExpression,
+                            fragment.Text,
+                            this,
+                            projectDirectory),
+                    _ => throw new InternalErrorException(
+                        "Unknown compiled item-spec fragment."),
+                });
+            }
+
+            return fragments;
         }
 
         private List<ItemSpecFragment> BuildItemFragments(IElementLocation itemSpecLocation, string projectDirectory, bool expandProperties)
