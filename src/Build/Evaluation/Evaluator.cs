@@ -1568,13 +1568,19 @@ namespace Microsoft.Build.Evaluation
                 else if (instruction.Kind ==
                          PropertyInstructionKind.SetExpandedValue)
                 {
-                    EvaluationPerformanceInstrumentation.RecordEvent(
-                        EvaluationPerformanceMetric
-                            .CompiledPropertyExpansion);
-                    evaluatedValue =
-                        EvaluateExpandedPropertyValue(
-                            module,
-                            property);
+                    EvaluationPerformanceInstrumentation
+                        .RecordCompiledPropertyExpansion(
+                            module.GetExpressionValue(
+                                property.ValueExpressionId));
+                    using (EvaluationPerformanceInstrumentation.Measure(
+                               EvaluationPerformanceMetric
+                                   .CompiledPropertyExpansion))
+                    {
+                        evaluatedValue =
+                            EvaluateExpandedPropertyValue(
+                                module,
+                                property);
+                    }
                 }
                 else
                 {
@@ -1774,8 +1780,9 @@ namespace Microsoft.Build.Evaluation
             int functionIndex,
             IElementLocation location)
         {
-            EvaluationPerformanceInstrumentation.RecordEvent(
-                EvaluationPerformanceMetric.CompiledPropertyFunction);
+            using EvaluationPerformanceInstrumentation.Scope scope =
+                EvaluationPerformanceInstrumentation.Measure(
+                    EvaluationPerformanceMetric.CompiledPropertyFunction);
             CompiledPropertyFunction function =
                 module.CompiledPropertyFunctions[functionIndex];
             try
@@ -1783,7 +1790,8 @@ namespace Microsoft.Build.Evaluation
                 TableRange arguments = function.Arguments;
                 if (function.Kind is
                     CompiledPropertyFunctionKind.NormalizeDirectory or
-                    CompiledPropertyFunctionKind.NormalizePath)
+                    CompiledPropertyFunctionKind.NormalizePath or
+                    CompiledPropertyFunctionKind.PathCombine)
                 {
                     var values = new string[arguments.Count];
                     for (int i = 0; i < values.Length; i++)
@@ -1796,19 +1804,27 @@ namespace Microsoft.Build.Evaluation
                                 location);
                     }
 
-                    string normalized =
-                        function.Kind ==
-                        CompiledPropertyFunctionKind.NormalizeDirectory
-                            ? IntrinsicFunctions.NormalizeDirectory(values)
-                            : IntrinsicFunctions.NormalizePath(values);
-                    return EscapingUtilities.Escape(normalized);
+                    string aggregateResult = function.Kind switch
+                    {
+                        CompiledPropertyFunctionKind.NormalizeDirectory =>
+                            IntrinsicFunctions.NormalizeDirectory(values),
+                        CompiledPropertyFunctionKind.NormalizePath =>
+                            IntrinsicFunctions.NormalizePath(values),
+                        CompiledPropertyFunctionKind.PathCombine =>
+                            Path.Combine(values),
+                        _ => throw new InternalErrorException(
+                            "Unknown compiled property function."),
+                    };
+                    return EscapingUtilities.Escape(aggregateResult);
                 }
 
-                string receiver = EscapingUtilities.UnescapeAll(
-                    EvaluateCompiledPropertyFunctionValue(
-                        module,
-                        function.Receiver,
-                        location));
+                string receiver = function.Receiver.Count == 0
+                    ? null
+                    : EscapingUtilities.UnescapeAll(
+                        EvaluateCompiledPropertyFunctionValue(
+                            module,
+                            function.Receiver,
+                            location));
                 string argument0 = arguments.Count > 0
                     ? EvaluateCompiledPropertyFunctionArgument(
                         module,
@@ -1819,6 +1835,140 @@ namespace Microsoft.Build.Evaluation
                 string result;
                 switch (function.Kind)
                 {
+                    case CompiledPropertyFunctionKind.Add:
+                    case CompiledPropertyFunctionKind.Subtract:
+                        object[] arithmeticArguments =
+                        [
+                            argument0,
+                            EvaluateCompiledPropertyFunctionArgument(
+                                module,
+                                module.CompiledPropertyFunctionArguments[
+                                    arguments.Start + 1],
+                                location),
+                        ];
+                        bool arithmeticSucceeded = function.Kind ==
+                            CompiledPropertyFunctionKind.Add
+                                ? ParseArgs.TryExecuteArithmeticOverload(
+                                    arithmeticArguments,
+                                    IntrinsicFunctions.Add,
+                                    IntrinsicFunctions.Add,
+                                    out object arithmeticResult)
+                                : ParseArgs.TryExecuteArithmeticOverload(
+                                    arithmeticArguments,
+                                    IntrinsicFunctions.Subtract,
+                                    IntrinsicFunctions.Subtract,
+                                    out arithmeticResult);
+                        if (!arithmeticSucceeded)
+                        {
+                            throw new InvalidOperationException(
+                                "The arithmetic arguments are invalid.");
+                        }
+
+                        result = Convert.ToString(
+                            arithmeticResult,
+                            CultureInfo.InvariantCulture);
+                        break;
+                    case CompiledPropertyFunctionKind.EnsureTrailingSlash:
+                        result = IntrinsicFunctions.EnsureTrailingSlash(
+                            argument0);
+                        break;
+                    case CompiledPropertyFunctionKind.Escape:
+                        return IntrinsicFunctions.Escape(argument0);
+                    case CompiledPropertyFunctionKind
+                        .GetDirectoryNameOfFileAbove:
+                        result =
+                            IntrinsicFunctions.GetDirectoryNameOfFileAbove(
+                                argument0,
+                                EvaluateCompiledPropertyFunctionArgument(
+                                    module,
+                                    module
+                                        .CompiledPropertyFunctionArguments[
+                                            arguments.Start + 1],
+                                    location),
+                                _evaluationContext.FileSystem);
+                        break;
+                    case CompiledPropertyFunctionKind
+                        .GetTargetFrameworkIdentifier:
+                        result =
+                            IntrinsicFunctions.GetTargetFrameworkIdentifier(
+                                argument0);
+                        break;
+                    case CompiledPropertyFunctionKind
+                        .GetTargetFrameworkVersion:
+                        result = arguments.Count == 1
+                            ? IntrinsicFunctions.GetTargetFrameworkVersion(
+                                argument0)
+                            : IntrinsicFunctions.GetTargetFrameworkVersion(
+                                argument0,
+                                int.Parse(
+                                    EvaluateCompiledPropertyFunctionArgument(
+                                        module,
+                                        module
+                                            .CompiledPropertyFunctionArguments[
+                                                arguments.Start + 1],
+                                        location),
+                                    NumberStyles.Integer,
+                                    CultureInfo.InvariantCulture.NumberFormat));
+                        break;
+                    case CompiledPropertyFunctionKind
+                        .GetTargetPlatformIdentifier:
+                        result =
+                            IntrinsicFunctions.GetTargetPlatformIdentifier(
+                                argument0);
+                        break;
+                    case CompiledPropertyFunctionKind
+                        .GetTargetPlatformVersion:
+                        result = arguments.Count == 1
+                            ? IntrinsicFunctions.GetTargetPlatformVersion(
+                                argument0)
+                            : IntrinsicFunctions.GetTargetPlatformVersion(
+                                argument0,
+                                int.Parse(
+                                    EvaluateCompiledPropertyFunctionArgument(
+                                        module,
+                                        module
+                                            .CompiledPropertyFunctionArguments[
+                                                arguments.Start + 1],
+                                        location),
+                                    NumberStyles.Integer,
+                                    CultureInfo.InvariantCulture.NumberFormat));
+                        break;
+                    case CompiledPropertyFunctionKind.GetToolsDirectory32:
+                        result = IntrinsicFunctions.GetToolsDirectory32();
+                        break;
+                    case CompiledPropertyFunctionKind
+                        .IsRunningFromVisualStudio:
+                        result = Convert.ToString(
+                            IntrinsicFunctions.IsRunningFromVisualStudio(),
+                            CultureInfo.InvariantCulture);
+                        break;
+                    case CompiledPropertyFunctionKind.PathDirectorySeparatorChar:
+                        result = Path.DirectorySeparatorChar.ToString();
+                        break;
+                    case CompiledPropertyFunctionKind.PathGetDirectoryName:
+                        result = Path.GetDirectoryName(argument0) ??
+                            string.Empty;
+                        break;
+                    case CompiledPropertyFunctionKind.PathGetFullPath:
+                        result = !string.IsNullOrEmpty(
+                            FileUtilities.CurrentThreadWorkingDirectory)
+                            ? Path.GetFullPath(Path.Combine(
+                                FileUtilities.CurrentThreadWorkingDirectory,
+                                argument0))
+                            : Path.GetFullPath(argument0);
+                        break;
+                    case CompiledPropertyFunctionKind
+                        .RuntimeInformationProcessArchitectureLowerInvariant:
+                        result = System.Runtime.InteropServices
+                            .RuntimeInformation.ProcessArchitecture
+                            .ToString()
+                            .ToLowerInvariant();
+                        break;
+                    case CompiledPropertyFunctionKind
+                        .RuntimeInformationRuntimeIdentifier:
+                        result = System.Runtime.InteropServices
+                            .RuntimeInformation.RuntimeIdentifier;
+                        break;
                     case CompiledPropertyFunctionKind.StringContains:
                         result = Convert.ToString(
                             receiver.Contains(argument0),
@@ -1854,6 +2004,13 @@ namespace Microsoft.Build.Evaluation
                             equalsReceiver.Equals(equalsArgument),
                             CultureInfo.InvariantCulture);
                         break;
+                    case CompiledPropertyFunctionKind.StringLastIndexOf:
+                        result = Convert.ToString(
+                            receiver.LastIndexOf(
+                                argument0,
+                                StringComparison.CurrentCulture),
+                            CultureInfo.InvariantCulture);
+                        break;
                     case CompiledPropertyFunctionKind.StringReplace:
                         result = receiver.Replace(
                             argument0,
@@ -1870,6 +2027,25 @@ namespace Microsoft.Build.Evaluation
                                 StringComparison.CurrentCulture),
                             CultureInfo.InvariantCulture);
                         break;
+                    case CompiledPropertyFunctionKind.StringSubstring:
+                        int startIndex = int.Parse(
+                            argument0,
+                            NumberStyles.Integer,
+                            CultureInfo.InvariantCulture.NumberFormat);
+                        result = arguments.Count == 1
+                            ? receiver.Substring(startIndex)
+                            : receiver.Substring(
+                                startIndex,
+                                int.Parse(
+                                    EvaluateCompiledPropertyFunctionArgument(
+                                        module,
+                                        module
+                                            .CompiledPropertyFunctionArguments[
+                                                arguments.Start + 1],
+                                        location),
+                                    NumberStyles.Integer,
+                                    CultureInfo.InvariantCulture.NumberFormat));
+                        break;
                     case CompiledPropertyFunctionKind.StringToLower:
                         result = receiver.ToLower();
                         break;
@@ -1883,13 +2059,49 @@ namespace Microsoft.Build.Evaluation
                         result = receiver.ToUpperInvariant();
                         break;
                     case CompiledPropertyFunctionKind.StringTrim:
-                        result = receiver.Trim();
+                        result = arguments.Count == 0
+                            ? receiver.Trim()
+                            : receiver.Trim(argument0.ToCharArray());
                         break;
                     case CompiledPropertyFunctionKind.StringTrimEnd:
-                        result = receiver.TrimEnd();
+                        result = arguments.Count == 0
+                            ? receiver.TrimEnd()
+                            : receiver.TrimEnd(argument0.ToCharArray());
                         break;
                     case CompiledPropertyFunctionKind.StringTrimStart:
-                        result = receiver.TrimStart();
+                        result = arguments.Count == 0
+                            ? receiver.TrimStart()
+                            : receiver.TrimStart(argument0.ToCharArray());
+                        break;
+                    case CompiledPropertyFunctionKind.ValueOrDefault:
+                        result = IntrinsicFunctions.ValueOrDefault(
+                            argument0,
+                            EvaluateCompiledPropertyFunctionArgument(
+                                module,
+                                module.CompiledPropertyFunctionArguments[
+                                    arguments.Start + 1],
+                                location));
+                        break;
+                    case CompiledPropertyFunctionKind.VersionBuild:
+                        result = Convert.ToString(
+                            Version.Parse(argument0).Build,
+                            CultureInfo.InvariantCulture);
+                        break;
+                    case CompiledPropertyFunctionKind.VersionLessThan:
+                        result = Convert.ToString(
+                            IntrinsicFunctions.VersionLessThan(
+                                argument0,
+                                EvaluateCompiledPropertyFunctionArgument(
+                                    module,
+                                    module
+                                        .CompiledPropertyFunctionArguments[
+                                            arguments.Start + 1],
+                                    location)),
+                            CultureInfo.InvariantCulture);
+                        break;
+                    case CompiledPropertyFunctionKind
+                        .VersionParseToStringTwo:
+                        result = Version.Parse(argument0).ToString(2);
                         break;
                     default:
                         throw new InternalErrorException(
@@ -2096,10 +2308,21 @@ namespace Microsoft.Build.Evaluation
             using var measurement =
                 EvaluationPerformanceInstrumentation.Measure(
                     EvaluationPerformanceMetric.ConditionEvaluation);
+            using var compiledMeasurement =
+                EvaluationPerformanceInstrumentation.Measure(
+                    EvaluationPerformanceMetric
+                        .CompiledConditionEvaluation);
             CompiledCondition condition =
                 module.CompiledConditions[conditionId];
-            IElementLocation location =
-                module.GetSource(condition.SourceId).ConditionLocation;
+            ProjectElement source = module.GetSource(condition.SourceId);
+            if (EvaluationPerformanceInstrumentation.Enabled)
+            {
+                EvaluationPerformanceInstrumentation.RecordConditionShape(
+                    "Compiled",
+                    source.Condition);
+            }
+
+            IElementLocation location = source.ConditionLocation;
             TableRange instructions = condition.Instructions;
             int instructionIndex = instructions.Start;
             while (true)
@@ -2351,7 +2574,7 @@ namespace Microsoft.Build.Evaluation
             };
         }
 
-        private static bool CompareCompiledConditionValues(
+        internal static bool CompareCompiledConditionValues(
             string left,
             string right,
             out bool updateConditionedProperties)

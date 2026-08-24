@@ -433,7 +433,7 @@ namespace Microsoft.Build.Evaluation
             RecordPropertyRead(name, value?.EscapedValue);
         }
 
-        internal void RecordItems<I, M>(string itemType, ICollection<I> items)
+        internal void RecordItems<I, M>(string itemType, IEnumerable<I> items)
             where I : class, IItem<M>
             where M : class, IMetadatum
         {

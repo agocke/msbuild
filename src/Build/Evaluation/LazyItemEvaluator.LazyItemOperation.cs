@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
+using System.Text;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Framework;
@@ -59,18 +60,71 @@ namespace Microsoft.Build.Evaluation
             public void Apply(OrderedItemDataCollection.Builder listBuilder, ImmutableHashSet<string> globsToIgnore)
             {
                 MSBuildEventSource.Log.ApplyLazyItemOperationsStart(_itemElement.ItemType);
+                EvaluationPerformanceInstrumentation.Scope
+                    operationMeasurement = default;
+                EvaluationPerformanceInstrumentation
+                    .LazyItemOperationShapeScope shapeMeasurement =
+                        default;
+                if (EvaluationPerformanceInstrumentation.Enabled)
+                {
+                    EvaluationPerformanceMetric operationMetric =
+                        this switch
+                        {
+                            IncludeOperation =>
+                                EvaluationPerformanceMetric
+                                    .LazyItemIncludeApplication,
+                            RemoveOperation =>
+                                EvaluationPerformanceMetric
+                                    .LazyItemRemoveApplication,
+                            UpdateOperation =>
+                                EvaluationPerformanceMetric
+                                    .LazyItemUpdateApplication,
+                            _ => throw new InternalErrorException(
+                                "Unknown lazy item operation."),
+                        };
+                    string operationExpression = operationMetric switch
+                    {
+                        EvaluationPerformanceMetric
+                            .LazyItemIncludeApplication =>
+                            _itemElement.Include,
+                        EvaluationPerformanceMetric
+                            .LazyItemRemoveApplication =>
+                            _itemElement.Remove,
+                        EvaluationPerformanceMetric
+                            .LazyItemUpdateApplication =>
+                            _itemElement.Update,
+                        _ => string.Empty,
+                    };
+                    operationMeasurement =
+                        EvaluationPerformanceInstrumentation.Measure(
+                            operationMetric);
+                    shapeMeasurement =
+                        EvaluationPerformanceInstrumentation
+                            .MeasureLazyItemOperationShape(
+                                operationMetric,
+                                _itemElement.ItemType,
+                                operationExpression);
+                }
+
+                using (shapeMeasurement)
+                using (operationMeasurement)
                 using (EvaluationPerformanceInstrumentation.Measure(
                            EvaluationPerformanceMetric
                                .LazyItemOperationApplication))
                 using (_lazyEvaluator._evaluationProfiler.TrackElement(_itemElement))
-                using (_lazyEvaluator._moduleEvaluationReadTracker.Track(
-                           _itemElement,
-                           "ItemOperationApplication",
-                           _itemElement.ItemType))
+                using (ModuleEvaluationReadTracker.Scope readTrackingScope =
+                           _lazyEvaluator._moduleEvaluationReadTracker.Track(
+                               _itemElement,
+                               "ItemOperationApplication",
+                               _itemElement.ItemType))
                 {
-                    _lazyEvaluator._moduleEvaluationReadTracker.RecordItems<I, M>(
-                        _itemElement.ItemType,
-                        listBuilder.Select(itemData => itemData.Item).ToArray());
+                    if (readTrackingScope is not null)
+                    {
+                        _lazyEvaluator._moduleEvaluationReadTracker.RecordItems<I, M>(
+                            _itemElement.ItemType,
+                            listBuilder.Select(itemData => itemData.Item));
+                    }
+
                     ApplyImpl(listBuilder, globsToIgnore);
                 }
                 MSBuildEventSource.Log.ApplyLazyItemOperationsStop(_itemElement.ItemType);
@@ -222,13 +276,12 @@ namespace Microsoft.Build.Evaluation
                             {
                                 ProjectMetadataElement metadataElement =
                                     metadata.GetElement(i);
-                                if (!EvaluateCondition(
-                                        metadata.GetCondition(i),
+                                if (!EvaluateMetadataCondition(
+                                        metadata,
+                                        i,
                                         metadataElement,
                                         metadataExpansionOptions,
-                                        ParserOptions.AllowAll,
-                                        _expander,
-                                        _lazyEvaluator))
+                                        ParserOptions.AllowAll))
                                 {
                                     continue;
                                 }
@@ -273,14 +326,12 @@ namespace Microsoft.Build.Evaluation
                                 metadata.GetElement(i);
                             // Because of the checking above, it should be safe to expand metadata in conditions; the condition
                             // will be true for either all the items or none
-                            if (
-                                !EvaluateCondition(
-                                    metadata.GetCondition(i),
+                            if (!EvaluateMetadataCondition(
+                                    metadata,
+                                    i,
                                     metadataElement,
                                     metadataExpansionOptions,
-                                    ParserOptions.AllowAll,
-                                    _expander,
-                                    _lazyEvaluator))
+                                    ParserOptions.AllowAll))
                             {
                                 continue;
                             }
@@ -311,6 +362,317 @@ namespace Microsoft.Build.Evaluation
                         _expander.Metadata = null;
                     }
                 }
+            }
+
+            private bool EvaluateMetadataCondition(
+                DeferredMetadata metadata,
+                int index,
+                ProjectMetadataElement metadataElement,
+                ExpanderOptions expanderOptions,
+                ParserOptions parserOptions)
+            {
+                int compiledConditionId =
+                    metadata.GetCompiledConditionId(index);
+                if (_lazyEvaluator.EvaluationContext
+                        .UseCompiledModuleEffectBatches &&
+                    compiledConditionId >= 0)
+                {
+                    return compiledConditionId == 0 ||
+                        EvaluateCompiledMetadataCondition(
+                            metadata.Module,
+                            compiledConditionId);
+                }
+
+                return EvaluateCondition(
+                    metadata.GetCondition(index),
+                    metadataElement,
+                    expanderOptions,
+                    parserOptions,
+                    _expander,
+                    _lazyEvaluator);
+            }
+
+            private bool EvaluateCompiledMetadataCondition(
+                EvaluationModule module,
+                int conditionId)
+            {
+                using var conditionMeasurement =
+                    EvaluationPerformanceInstrumentation.Measure(
+                        EvaluationPerformanceMetric.ConditionEvaluation);
+                using var compiledMeasurement =
+                    EvaluationPerformanceInstrumentation.Measure(
+                        EvaluationPerformanceMetric
+                            .CompiledConditionEvaluation);
+                CompiledCondition condition =
+                    module.CompiledConditions[conditionId];
+                ProjectElement source =
+                    module.GetSource(condition.SourceId);
+                if (EvaluationPerformanceInstrumentation.Enabled)
+                {
+                    EvaluationPerformanceInstrumentation
+                        .RecordConditionShape(
+                            "Compiled",
+                            source.Condition);
+                }
+
+                IElementLocation location = source.ConditionLocation;
+                TableRange instructions = condition.Instructions;
+                int instructionIndex = instructions.Start;
+                while (true)
+                {
+                    CompiledConditionInstruction instruction =
+                        module.CompiledConditionInstructions[
+                            instructionIndex];
+                    switch (instruction.Kind)
+                    {
+                        case CompiledConditionInstructionKind
+                            .BranchIfComparisonFalse:
+                            if (!EvaluateCompiledMetadataComparison(
+                                    module,
+                                    instruction.Argument0,
+                                    location))
+                            {
+                                instructionIndex +=
+                                    instruction.Argument1;
+                            }
+                            else
+                            {
+                                instructionIndex++;
+                            }
+
+                            break;
+                        case CompiledConditionInstructionKind
+                            .BranchIfComparisonTrue:
+                            if (EvaluateCompiledMetadataComparison(
+                                    module,
+                                    instruction.Argument0,
+                                    location))
+                            {
+                                instructionIndex +=
+                                    instruction.Argument1;
+                            }
+                            else
+                            {
+                                instructionIndex++;
+                            }
+
+                            break;
+                        case CompiledConditionInstructionKind
+                            .ReturnComparison:
+                            return EvaluateCompiledMetadataComparison(
+                                module,
+                                instruction.Argument0,
+                                location);
+                        case CompiledConditionInstructionKind.ReturnFalse:
+                            return false;
+                        case CompiledConditionInstructionKind.ReturnTrue:
+                            return true;
+                        default:
+                            throw new InternalErrorException(
+                                "Unknown compiled condition instruction.");
+                    }
+                }
+            }
+
+            private bool EvaluateCompiledMetadataComparison(
+                EvaluationModule module,
+                int comparisonId,
+                IElementLocation location)
+            {
+                CompiledConditionComparison comparison =
+                    module.CompiledConditionComparisons[comparisonId];
+                string left = EvaluateCompiledMetadataOperand(
+                    module,
+                    comparison.Left,
+                    location);
+                string right = EvaluateCompiledMetadataOperand(
+                    module,
+                    comparison.Right,
+                    location);
+                bool equal =
+                    Evaluator<P, I, M, D>
+                        .CompareCompiledConditionValues(
+                            left,
+                            right,
+                            out _);
+                return comparison.Kind == CompiledConditionKind.Equal
+                    ? equal
+                    : !equal;
+            }
+
+            private string EvaluateCompiledMetadataOperand(
+                EvaluationModule module,
+                CompiledConditionOperand operand,
+                IElementLocation location)
+            {
+                return operand.Kind switch
+                {
+                    CompiledConditionOperandKind.Literal =>
+                        module.GetStringValue(operand.Value),
+                    CompiledConditionOperandKind.Property =>
+                        EvaluateCompiledMetadataProperty(
+                            module,
+                            operand.Value,
+                            location,
+                            unescape: true),
+                    CompiledConditionOperandKind.ExpandedValue =>
+                        EvaluateCompiledMetadataExpandedValue(
+                            module,
+                            operand.Value,
+                            operand.Count,
+                            location),
+                    CompiledConditionOperandKind.Metadata =>
+                        EvaluateCompiledMetadataValue(
+                            module,
+                            operand),
+                    _ => throw new InternalErrorException(
+                        "Unknown compiled condition operand."),
+                };
+            }
+
+            private string EvaluateCompiledMetadataProperty(
+                EvaluationModule module,
+                int readIndex,
+                IElementLocation location,
+                bool unescape)
+            {
+                CompiledPropertyExternalRead read =
+                    module.CompiledConditionPropertyReads[readIndex];
+                if (!_evaluatorData.TryGetEscapedPropertyValue(
+                        read.PropertyId,
+                        module.GetStringValue(read.NameStringId),
+                        location,
+                        out string escapedValue))
+                {
+                    return string.Empty;
+                }
+
+                return unescape
+                    ? FileUtilities.MaybeAdjustFilePath(
+                        EscapingUtilities.UnescapeAll(escapedValue))
+                    : escapedValue;
+            }
+
+            private string EvaluateCompiledMetadataExpandedValue(
+                EvaluationModule module,
+                int firstPart,
+                int partCount,
+                IElementLocation location)
+            {
+                string expanded;
+                if (partCount == 1)
+                {
+                    expanded = EvaluateCompiledMetadataValuePart(
+                        module,
+                        firstPart,
+                        location);
+                }
+                else if (partCount == 2)
+                {
+                    expanded = string.Concat(
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart,
+                            location),
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart + 1,
+                            location));
+                }
+                else if (partCount == 3)
+                {
+                    expanded = string.Concat(
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart,
+                            location),
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart + 1,
+                            location),
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart + 2,
+                            location));
+                }
+                else if (partCount == 4)
+                {
+                    expanded = string.Concat(
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart,
+                            location),
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart + 1,
+                            location),
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart + 2,
+                            location),
+                        EvaluateCompiledMetadataValuePart(
+                            module,
+                            firstPart + 3,
+                            location));
+                }
+                else
+                {
+                    var builder = new StringBuilder();
+                    for (int partIndex = firstPart;
+                         partIndex < firstPart + partCount;
+                         partIndex++)
+                    {
+                        builder.Append(
+                            EvaluateCompiledMetadataValuePart(
+                                module,
+                                partIndex,
+                                location));
+                    }
+
+                    expanded = builder.ToString();
+                }
+
+                return FileUtilities.MaybeAdjustFilePath(
+                    EscapingUtilities.UnescapeAll(expanded));
+            }
+
+            private string EvaluateCompiledMetadataValuePart(
+                EvaluationModule module,
+                int partIndex,
+                IElementLocation location)
+            {
+                CompiledConditionValuePart part =
+                    module.CompiledConditionValueParts[partIndex];
+                return part.Kind switch
+                {
+                    CompiledConditionValuePartKind.Literal =>
+                        module.GetStringValue(part.Value),
+                    CompiledConditionValuePartKind.Property =>
+                        EvaluateCompiledMetadataProperty(
+                            module,
+                            part.Value,
+                            location,
+                            unescape: false),
+                    _ => throw new InternalErrorException(
+                        "Unknown compiled condition value part."),
+                };
+            }
+
+            private string EvaluateCompiledMetadataValue(
+                EvaluationModule module,
+                CompiledConditionOperand operand)
+            {
+                string itemType =
+                    module.GetStringValue(operand.Value);
+                string metadataName =
+                    module.GetStringValue(operand.Count);
+                string escapedValue = itemType.Length == 0
+                    ? _expander.Metadata.GetEscapedValue(metadataName)
+                    : _expander.Metadata.GetEscapedValue(
+                        itemType,
+                        metadataName);
+                return FileUtilities.MaybeAdjustFilePath(
+                    EscapingUtilities.UnescapeAll(escapedValue));
             }
 
             protected bool NeedToExpandMetadataForEachItem(

@@ -33,8 +33,13 @@ namespace Microsoft.Build.Evaluation
         ConditionPoolContention,
         ConditionParsing,
         ConditionExpressionEvaluation,
+        CompiledConditionEvaluation,
+        ScalarConditionEvaluation,
         ItemSpecConstruction,
         MetadataAnalysis,
+        LazyItemIncludeApplication,
+        LazyItemRemoveApplication,
+        LazyItemUpdateApplication,
         UsingTaskRegistration,
         PropertyReplayCacheHit,
         PropertyReplayCacheMiss,
@@ -78,8 +83,27 @@ namespace Microsoft.Build.Evaluation
                     string,
                     CompiledPropertyModuleAccumulator>(
                         StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<
+            string,
+            CompiledPropertyExpansionAccumulator>
+            s_compiledPropertyExpansions =
+                new ConcurrentDictionary<
+                    string,
+                    CompiledPropertyExpansionAccumulator>(
+                        StringComparer.Ordinal);
+        private static readonly ConcurrentDictionary<
+            (string Shape, string Condition),
+            long> s_conditionShapes = new();
+        private static readonly ConcurrentDictionary<
+            (EvaluationPerformanceMetric Kind, string ItemType, string Expression),
+            LazyItemOperationShapeAccumulator>
+            s_lazyItemOperationShapes = new();
         private static readonly object s_reportLock = new object();
         private static long s_completedEvaluations;
+        private static long s_compiledPropertyModuleCount;
+        private static long s_compiledPropertyValuePartCount;
+        private static long s_compiledPropertyFunctionCount;
+        private static long s_compiledPropertyFunctionArgumentCount;
         private static readonly string s_outputDirectory =
             Environment.GetEnvironmentVariable(
                 OutputDirectoryEnvironmentVariable);
@@ -129,6 +153,44 @@ namespace Microsoft.Build.Evaluation
             }
         }
 
+        internal static void RecordCompiledPropertyExpansion(
+            string expression)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            CompiledPropertyExpansionAccumulator accumulator =
+                s_compiledPropertyExpansions.GetOrAdd(
+                    expression,
+                    static _ =>
+                        new CompiledPropertyExpansionAccumulator());
+            Interlocked.Increment(ref accumulator.Count);
+        }
+
+        internal static void RecordCompiledPropertyModuleShape(
+            int valuePartCount,
+            int functionCount,
+            int functionArgumentCount)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            Interlocked.Increment(ref s_compiledPropertyModuleCount);
+            Interlocked.Add(
+                ref s_compiledPropertyValuePartCount,
+                valuePartCount);
+            Interlocked.Add(
+                ref s_compiledPropertyFunctionCount,
+                functionCount);
+            Interlocked.Add(
+                ref s_compiledPropertyFunctionArgumentCount,
+                functionArgumentCount);
+        }
+
         internal static void RecordConditionContention(
             string condition,
             long startTimestamp)
@@ -152,6 +214,29 @@ namespace Microsoft.Build.Evaluation
                 ref accumulator.ElapsedTicks,
                 elapsedTicks);
         }
+
+        internal static void RecordConditionShape(
+            string shape,
+            string condition)
+        {
+            if (Enabled)
+            {
+                s_conditionShapes.AddOrUpdate(
+                    (shape, condition),
+                    1,
+                    static (_, count) => count + 1);
+            }
+        }
+
+        internal static LazyItemOperationShapeScope
+            MeasureLazyItemOperationShape(
+            EvaluationPerformanceMetric kind,
+            string itemType,
+            string expression) =>
+            new LazyItemOperationShapeScope(
+                kind,
+                itemType,
+                expression);
 
         internal static void RecordConstantPropertyBlock(
             EvaluationModule module,
@@ -329,6 +414,37 @@ namespace Microsoft.Build.Evaluation
                     : "false");
             report.Append("command_line\t");
             report.AppendLine(Escape(Environment.CommandLine));
+#if NETCOREAPP
+            GCMemoryInfo memoryInfo = GC.GetGCMemoryInfo();
+            report.Append("managed_heap_bytes\t");
+            report.AppendLine(
+                GC.GetTotalMemory(false)
+                    .ToString(CultureInfo.InvariantCulture));
+            report.Append("gc_heap_size_bytes\t");
+            report.AppendLine(
+                memoryInfo.HeapSizeBytes
+                    .ToString(CultureInfo.InvariantCulture));
+            report.Append("gc_fragmented_bytes\t");
+            report.AppendLine(
+                memoryInfo.FragmentedBytes
+                    .ToString(CultureInfo.InvariantCulture));
+            report.Append("gc_total_committed_bytes\t");
+            report.AppendLine(
+                memoryInfo.TotalCommittedBytes
+                    .ToString(CultureInfo.InvariantCulture));
+#endif
+            report.Append("compiled_property_module_count\t");
+            report.AppendLine(
+                Read(ref s_compiledPropertyModuleCount));
+            report.Append("compiled_property_value_part_count\t");
+            report.AppendLine(
+                Read(ref s_compiledPropertyValuePartCount));
+            report.Append("compiled_property_function_record_count\t");
+            report.AppendLine(
+                Read(ref s_compiledPropertyFunctionCount));
+            report.Append("compiled_property_function_argument_count\t");
+            report.AppendLine(
+                Read(ref s_compiledPropertyFunctionArgumentCount));
             report.Append("timestamp_frequency\t");
             report.AppendLine(
                 Stopwatch.Frequency.ToString(CultureInfo.InvariantCulture));
@@ -397,6 +513,60 @@ namespace Microsoft.Build.Evaluation
                         .ToString("F3", CultureInfo.InvariantCulture));
             }
 
+            report.AppendLine("condition_shape\tcondition\tcount");
+            foreach (KeyValuePair<
+                         (string Shape, string Condition),
+                         long> entry
+                     in s_conditionShapes
+                         .OrderByDescending(pair => pair.Value)
+                         .ThenBy(pair => pair.Key.Shape)
+                         .ThenBy(pair => pair.Key.Condition)
+                         .Take(300))
+            {
+                report.Append(Escape(entry.Key.Shape));
+                report.Append('\t');
+                report.Append(Escape(entry.Key.Condition));
+                report.Append('\t');
+                report.AppendLine(
+                    entry.Value.ToString(CultureInfo.InvariantCulture));
+            }
+
+            report.AppendLine(
+                "lazy_item_operation\titem_type\texpression\tcount\t" +
+                "elapsed_ticks\telapsed_ms");
+            foreach (KeyValuePair<
+                         (EvaluationPerformanceMetric Kind, string ItemType, string Expression),
+                         LazyItemOperationShapeAccumulator> entry
+                     in s_lazyItemOperationShapes
+                         .OrderByDescending(
+                             pair => Interlocked.Read(
+                                 ref pair.Value.ElapsedTicks))
+                         .ThenBy(pair => pair.Key.Kind)
+                         .ThenBy(pair => pair.Key.ItemType)
+                         .ThenBy(pair => pair.Key.Expression)
+                         .Take(500))
+            {
+                long count =
+                    Interlocked.Read(ref entry.Value.Count);
+                long elapsedTicks =
+                    Interlocked.Read(ref entry.Value.ElapsedTicks);
+                report.Append(entry.Key.Kind);
+                report.Append('\t');
+                report.Append(Escape(entry.Key.ItemType));
+                report.Append('\t');
+                report.Append(Escape(entry.Key.Expression));
+                report.Append('\t');
+                report.Append(
+                    count.ToString(CultureInfo.InvariantCulture));
+                report.Append('\t');
+                report.Append(
+                    elapsedTicks.ToString(CultureInfo.InvariantCulture));
+                report.Append('\t');
+                report.AppendLine(
+                    ToMilliseconds(elapsedTicks)
+                        .ToString("F3", CultureInfo.InvariantCulture));
+            }
+
             report.AppendLine(
                 "compiled_property_module\tconstant_applications\t" +
                 "specialization_hits\tspecialization_misses\t" +
@@ -454,6 +624,21 @@ namespace Microsoft.Build.Evaluation
                         .ToString("F3", CultureInfo.InvariantCulture));
             }
 
+            report.AppendLine("compiled_property_expansion\tcount");
+            foreach (KeyValuePair<
+                         string,
+                         CompiledPropertyExpansionAccumulator> entry
+                     in s_compiledPropertyExpansions
+                         .OrderByDescending(
+                             pair =>
+                                 Interlocked.Read(ref pair.Value.Count))
+                         .ThenBy(pair => pair.Key))
+            {
+                report.Append(Escape(entry.Key));
+                report.Append('\t');
+                report.AppendLine(Read(ref entry.Value.Count));
+            }
+
             string outputPath = Path.Combine(
                 s_outputDirectory,
                 $"evaluation-profile-{processId}.tsv");
@@ -502,6 +687,57 @@ namespace Microsoft.Build.Evaluation
             internal long AppliedEffects;
             internal long SpecializationHitTicks;
             internal long SpecializationMissTicks;
+        }
+
+        private sealed class CompiledPropertyExpansionAccumulator
+        {
+            internal long Count;
+        }
+
+        private sealed class LazyItemOperationShapeAccumulator
+        {
+            internal long Count;
+            internal long ElapsedTicks;
+        }
+
+        internal readonly struct LazyItemOperationShapeScope :
+            IDisposable
+        {
+            private readonly (
+                EvaluationPerformanceMetric Kind,
+                string ItemType,
+                string Expression) _key;
+            private readonly long _startTimestamp;
+
+            internal LazyItemOperationShapeScope(
+                EvaluationPerformanceMetric kind,
+                string itemType,
+                string expression)
+            {
+                _key = (kind, itemType, expression);
+                _startTimestamp =
+                    Enabled ? Stopwatch.GetTimestamp() : 0;
+            }
+
+            public void Dispose()
+            {
+                if (_startTimestamp == 0)
+                {
+                    return;
+                }
+
+                long elapsedTicks =
+                    Stopwatch.GetTimestamp() - _startTimestamp;
+                LazyItemOperationShapeAccumulator accumulator =
+                    s_lazyItemOperationShapes.GetOrAdd(
+                        _key,
+                        static _ =>
+                            new LazyItemOperationShapeAccumulator());
+                Interlocked.Increment(ref accumulator.Count);
+                Interlocked.Add(
+                    ref accumulator.ElapsedTicks,
+                    elapsedTicks);
+            }
         }
 
         internal readonly struct Scope : IDisposable

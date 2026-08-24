@@ -5,6 +5,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Microsoft.Build.Construction;
@@ -566,13 +567,31 @@ namespace Microsoft.Build.Evaluation
 
     internal enum CompiledPropertyFunctionKind : byte
     {
+        Add,
+        EnsureTrailingSlash,
+        Escape,
+        GetDirectoryNameOfFileAbove,
+        GetTargetFrameworkIdentifier,
+        GetTargetFrameworkVersion,
+        GetTargetPlatformIdentifier,
+        GetTargetPlatformVersion,
+        GetToolsDirectory32,
+        IsRunningFromVisualStudio,
         NormalizeDirectory,
         NormalizePath,
+        PathCombine,
+        PathDirectorySeparatorChar,
+        PathGetDirectoryName,
+        PathGetFullPath,
+        RuntimeInformationProcessArchitectureLowerInvariant,
+        RuntimeInformationRuntimeIdentifier,
         StringContains,
         StringEndsWith,
         StringEquals,
+        StringLastIndexOf,
         StringReplace,
         StringStartsWith,
+        StringSubstring,
         StringToLower,
         StringToLowerInvariant,
         StringToUpper,
@@ -580,6 +599,11 @@ namespace Microsoft.Build.Evaluation
         StringTrim,
         StringTrimEnd,
         StringTrimStart,
+        Subtract,
+        ValueOrDefault,
+        VersionBuild,
+        VersionLessThan,
+        VersionParseToStringTwo,
     }
 
     internal readonly struct CompiledPropertyFunction
@@ -667,6 +691,7 @@ namespace Microsoft.Build.Evaluation
         Literal,
         Property,
         ExpandedValue,
+        Metadata,
     }
 
     internal enum CompiledConditionValuePartKind : byte
@@ -992,11 +1017,13 @@ namespace Microsoft.Build.Evaluation
         internal MetadataTemplate(
             int nameStringId,
             int conditionId,
+            int compiledConditionId,
             int valueExpressionId,
             int sourceId)
         {
             NameStringId = nameStringId;
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             ValueExpressionId = valueExpressionId;
             SourceId = sourceId;
         }
@@ -1004,6 +1031,8 @@ namespace Microsoft.Build.Evaluation
         internal int NameStringId { get; }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal int ValueExpressionId { get; }
 
@@ -1140,6 +1169,11 @@ namespace Microsoft.Build.Evaluation
             CompiledPropertyFunctions = compiledPropertyFunctions;
             CompiledPropertyFunctionArguments =
                 compiledPropertyFunctionArguments;
+            EvaluationPerformanceInstrumentation
+                .RecordCompiledPropertyModuleShape(
+                    compiledPropertyValueParts.Length,
+                    compiledPropertyFunctions.Length,
+                    compiledPropertyFunctionArguments.Length);
             PropertyInstructions = propertyInstructions;
             CompiledPropertyExternalReads = compiledPropertyExternalReads;
             CompiledConditions = compiledConditions;
@@ -1794,7 +1828,9 @@ namespace Microsoft.Build.Evaluation
 
             private int AddCompiledCondition(
                 string condition,
-                int sourceId)
+                int sourceId,
+                ParserOptions parserOptions =
+                    ParserOptions.AllowProperties)
             {
                 if (string.IsNullOrEmpty(condition))
                 {
@@ -1806,7 +1842,7 @@ namespace Microsoft.Build.Evaluation
                 {
                     expression = new Parser().Parse(
                         condition,
-                        ParserOptions.AllowProperties,
+                        parserOptions,
                         _sources[sourceId].ConditionLocation);
                 }
                 catch (InvalidProjectFileException)
@@ -2068,6 +2104,26 @@ namespace Microsoft.Build.Evaluation
                 out CompiledConditionOperand compiledOperand)
             {
                 string value = operand.UnexpandedValue;
+                if (value.StartsWith("%(", StringComparison.Ordinal))
+                {
+                    int metadataEnd = 2;
+                    if (ExpressionShredder.TryParseMetadataExpression(
+                            value,
+                            ref metadataEnd,
+                            value.Length,
+                            out string itemType,
+                            out string metadataName) &&
+                        metadataEnd == value.Length)
+                    {
+                        compiledOperand =
+                            new CompiledConditionOperand(
+                                CompiledConditionOperandKind.Metadata,
+                                GetStringId(itemType ?? string.Empty),
+                                GetStringId(metadataName));
+                        return true;
+                    }
+                }
+
                 if (ConditionEvaluator.TryGetSingleProperty(
                         value.AsSpan(),
                         0,
@@ -2413,16 +2469,78 @@ namespace Microsoft.Build.Evaluation
                 out int functionIndex)
             {
                 const string intrinsicPrefix = "[MSBuild]::";
+                const string pathPrefix = "[System.IO.Path]::";
+                const string runtimeInformationPrefix =
+                    "[System.Runtime.InteropServices.RuntimeInformation]::";
+                const string versionPrefix = "[System.Version]::";
                 string receiverName = null;
                 string methodName;
                 int argumentsStart;
                 bool isIntrinsic;
+                bool isPath;
+                bool isRuntimeInformation;
+                bool isVersion;
                 if (body.StartsWith(
                         intrinsicPrefix,
                         StringComparison.OrdinalIgnoreCase))
                 {
                     isIntrinsic = true;
+                    isPath = false;
+                    isRuntimeInformation = false;
+                    isVersion = false;
                     int methodStart = intrinsicPrefix.Length;
+                    argumentsStart = body.IndexOf('(', methodStart);
+                    if (argumentsStart < 0)
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    methodName = body.Substring(
+                            methodStart,
+                            argumentsStart - methodStart)
+                        .Trim();
+                }
+                else if (body.StartsWith(
+                             pathPrefix,
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    isIntrinsic = false;
+                    isPath = true;
+                    isRuntimeInformation = false;
+                    isVersion = false;
+                    int methodStart = pathPrefix.Length;
+                    argumentsStart = body.IndexOf('(', methodStart);
+                    int methodEnd = argumentsStart >= 0
+                        ? argumentsStart
+                        : body.Length;
+                    methodName = body.Substring(
+                            methodStart,
+                            methodEnd - methodStart)
+                        .Trim();
+                }
+                else if (body.StartsWith(
+                             runtimeInformationPrefix,
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    isIntrinsic = false;
+                    isPath = false;
+                    isRuntimeInformation = true;
+                    isVersion = false;
+                    methodName = body.Substring(
+                            runtimeInformationPrefix.Length)
+                        .Trim();
+                    argumentsStart = -1;
+                }
+                else if (body.StartsWith(
+                             versionPrefix,
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    isIntrinsic = false;
+                    isPath = false;
+                    isRuntimeInformation = false;
+                    isVersion = true;
+                    int methodStart = versionPrefix.Length;
                     argumentsStart = body.IndexOf('(', methodStart);
                     if (argumentsStart < 0)
                     {
@@ -2438,6 +2556,9 @@ namespace Microsoft.Build.Evaluation
                 else
                 {
                     isIntrinsic = false;
+                    isPath = false;
+                    isRuntimeInformation = false;
+                    isVersion = false;
                     int receiverEnd = body.IndexOf('.');
                     if (receiverEnd <= 0)
                     {
@@ -2466,15 +2587,44 @@ namespace Microsoft.Build.Evaluation
                         .Trim();
                 }
 
-                int argumentsEnd =
-                    FindClosingParenthesis(body, argumentsStart + 1);
-                if (argumentsEnd != body.Length - 1 ||
+                int argumentsEnd = argumentsStart >= 0
+                    ? FindClosingParenthesis(body, argumentsStart + 1)
+                    : body.Length;
+                if (argumentsEnd < 0)
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                string remainder = argumentsStart >= 0
+                    ? body.Substring(argumentsEnd + 1).Trim()
+                    : string.Empty;
+                if (
                     !TryGetCompiledPropertyFunctionKind(
                         isIntrinsic,
+                        isPath,
+                        isRuntimeInformation,
+                        isVersion,
                         methodName,
+                        remainder,
                         out CompiledPropertyFunctionKind kind,
-                        out int expectedArgumentCount,
+                        out int minimumArgumentCount,
+                        out int maximumArgumentCount,
                         out bool returnsString))
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                bool isStaticProperty =
+                    kind is
+                        CompiledPropertyFunctionKind
+                            .PathDirectorySeparatorChar or
+                        CompiledPropertyFunctionKind
+                            .RuntimeInformationProcessArchitectureLowerInvariant or
+                        CompiledPropertyFunctionKind
+                            .RuntimeInformationRuntimeIdentifier;
+                if (isStaticProperty == (argumentsStart >= 0))
                 {
                     functionIndex = 0;
                     return false;
@@ -2488,11 +2638,13 @@ namespace Microsoft.Build.Evaluation
 
                 if (!TrySplitFunctionArguments(
                         body,
-                        argumentsStart + 1,
+                        argumentsStart >= 0
+                            ? argumentsStart + 1
+                            : argumentsEnd,
                         argumentsEnd,
                         out List<string> argumentValues) ||
-                    (expectedArgumentCount >= 0 &&
-                     argumentValues.Count != expectedArgumentCount))
+                    argumentValues.Count < minimumArgumentCount ||
+                    argumentValues.Count > maximumArgumentCount)
                 {
                     functionIndex = 0;
                     return false;
@@ -2512,6 +2664,9 @@ namespace Microsoft.Build.Evaluation
                 var arguments =
                     new List<List<CompiledPropertyValuePart>>(
                         argumentValues.Count);
+                bool allowTypedFunctionArguments =
+                    kind is CompiledPropertyFunctionKind.Add or
+                        CompiledPropertyFunctionKind.Subtract;
                 foreach (string argumentValue in argumentValues)
                 {
                     if (argumentValue is null ||
@@ -2521,7 +2676,8 @@ namespace Microsoft.Build.Evaluation
                             compiledFunctions,
                             referencedAssignments,
                             adjustLiteralPaths: false,
-                            allowNonStringFunctions: false,
+                            allowNonStringFunctions:
+                                allowTypedFunctionArguments,
                             out List<CompiledPropertyValuePart>
                                 argumentParts))
                     {
@@ -2544,21 +2700,34 @@ namespace Microsoft.Build.Evaluation
 
             private static bool TryGetCompiledPropertyFunctionKind(
                 bool isIntrinsic,
+                bool isPath,
+                bool isRuntimeInformation,
+                bool isVersion,
                 string methodName,
+                string remainder,
                 out CompiledPropertyFunctionKind kind,
-                out int expectedArgumentCount,
+                out int minimumArgumentCount,
+                out int maximumArgumentCount,
                 out bool returnsString)
             {
-                expectedArgumentCount = -1;
+                minimumArgumentCount = 0;
+                maximumArgumentCount = 0;
                 returnsString = true;
                 if (isIntrinsic)
                 {
+                    if (remainder.Length != 0)
+                    {
+                        kind = default;
+                        return false;
+                    }
+
                     if (methodName.Equals(
                             nameof(IntrinsicFunctions.NormalizeDirectory),
                             StringComparison.OrdinalIgnoreCase))
                     {
                         kind =
                             CompiledPropertyFunctionKind.NormalizeDirectory;
+                        maximumArgumentCount = int.MaxValue;
                         return true;
                     }
 
@@ -2567,6 +2736,159 @@ namespace Microsoft.Build.Evaluation
                             StringComparison.OrdinalIgnoreCase))
                     {
                         kind = CompiledPropertyFunctionKind.NormalizePath;
+                        maximumArgumentCount = int.MaxValue;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.EnsureTrailingSlash),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .EnsureTrailingSlash;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = 1;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.ValueOrDefault),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.ValueOrDefault;
+                        minimumArgumentCount = 2;
+                        maximumArgumentCount = 2;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.Add),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.Add;
+                        minimumArgumentCount = 2;
+                        maximumArgumentCount = 2;
+                        returnsString = false;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.Escape),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.Escape;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = 1;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions
+                                .GetDirectoryNameOfFileAbove),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .GetDirectoryNameOfFileAbove;
+                        minimumArgumentCount = 2;
+                        maximumArgumentCount = 2;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions
+                                .GetTargetFrameworkIdentifier),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .GetTargetFrameworkIdentifier;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = 1;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions
+                                .GetTargetFrameworkVersion),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .GetTargetFrameworkVersion;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = 2;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions
+                                .GetTargetPlatformIdentifier),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .GetTargetPlatformIdentifier;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = 1;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions
+                                .GetTargetPlatformVersion),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .GetTargetPlatformVersion;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = 2;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.GetToolsDirectory32),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind.GetToolsDirectory32;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions
+                                .IsRunningFromVisualStudio),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .IsRunningFromVisualStudio;
+                        returnsString = false;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.Subtract),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.Subtract;
+                        minimumArgumentCount = 2;
+                        maximumArgumentCount = 2;
+                        returnsString = false;
+                        return true;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(IntrinsicFunctions.VersionLessThan),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind.VersionLessThan;
+                        minimumArgumentCount = 2;
+                        maximumArgumentCount = 2;
+                        returnsString = false;
                         return true;
                     }
 
@@ -2574,7 +2896,133 @@ namespace Microsoft.Build.Evaluation
                     return false;
                 }
 
-                expectedArgumentCount = 0;
+                if (isPath)
+                {
+                    if (remainder.Length != 0)
+                    {
+                        kind = default;
+                        return false;
+                    }
+
+                    if (methodName.Equals(
+                            nameof(Path.Combine),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.PathCombine;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = int.MaxValue;
+                    }
+                    else if (methodName.Equals(
+                                 nameof(Path.DirectorySeparatorChar),
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .PathDirectorySeparatorChar;
+                        returnsString = false;
+                    }
+                    else if (methodName.Equals(
+                                 nameof(Path.GetDirectoryName),
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .PathGetDirectoryName;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = 1;
+                    }
+                    else if (methodName.Equals(
+                                 nameof(Path.GetFullPath),
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind.PathGetFullPath;
+                        minimumArgumentCount = 1;
+                        maximumArgumentCount = 1;
+                    }
+                    else
+                    {
+                        kind = default;
+                        return false;
+                    }
+
+                    return true;
+                }
+
+                if (isRuntimeInformation)
+                {
+                    if (remainder.Length != 0)
+                    {
+                        kind = default;
+                        return false;
+                    }
+
+                    if (methodName.Equals(
+                            "ProcessArchitecture.ToString().ToLowerInvariant",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .RuntimeInformationProcessArchitectureLowerInvariant;
+                    }
+                    else if (methodName.Equals(
+                                 "RuntimeIdentifier",
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .RuntimeInformationRuntimeIdentifier;
+                    }
+                    else
+                    {
+                        kind = default;
+                        return false;
+                    }
+
+                    return true;
+                }
+
+                if (isVersion)
+                {
+                    if (!methodName.Equals(
+                            "Parse",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = default;
+                        return false;
+                    }
+
+                    minimumArgumentCount = 1;
+                    maximumArgumentCount = 1;
+                    if (remainder.Equals(
+                            ".Build",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind = CompiledPropertyFunctionKind.VersionBuild;
+                        returnsString = false;
+                        return true;
+                    }
+
+                    if (remainder.Equals(
+                            ".ToString(2)",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        kind =
+                            CompiledPropertyFunctionKind
+                                .VersionParseToStringTwo;
+                        return true;
+                    }
+
+                    kind = default;
+                    return false;
+                }
+
+                if (remainder.Length != 0)
+                {
+                    kind = default;
+                    return false;
+                }
+
                 if (methodName.Equals(
                         nameof(string.ToLower),
                         StringComparison.OrdinalIgnoreCase))
@@ -2606,27 +3054,49 @@ namespace Microsoft.Build.Evaluation
                              StringComparison.OrdinalIgnoreCase))
                 {
                     kind = CompiledPropertyFunctionKind.StringTrim;
+                    maximumArgumentCount = 1;
                 }
                 else if (methodName.Equals(
                              nameof(string.TrimEnd),
                              StringComparison.OrdinalIgnoreCase))
                 {
                     kind = CompiledPropertyFunctionKind.StringTrimEnd;
+                    maximumArgumentCount = 1;
                 }
                 else if (methodName.Equals(
                              nameof(string.TrimStart),
                              StringComparison.OrdinalIgnoreCase))
                 {
                     kind = CompiledPropertyFunctionKind.StringTrimStart;
+                    maximumArgumentCount = 1;
+                }
+                else if (methodName.Equals(
+                             nameof(string.LastIndexOf),
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    kind =
+                        CompiledPropertyFunctionKind.StringLastIndexOf;
+                    minimumArgumentCount = 1;
+                    maximumArgumentCount = 1;
+                    returnsString = false;
+                }
+                else if (methodName.Equals(
+                             nameof(string.Substring),
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    kind = CompiledPropertyFunctionKind.StringSubstring;
+                    minimumArgumentCount = 1;
+                    maximumArgumentCount = 2;
                 }
                 else
                 {
-                    expectedArgumentCount =
+                    minimumArgumentCount =
                         methodName.Equals(
                             nameof(string.Replace),
                             StringComparison.OrdinalIgnoreCase)
                             ? 2
                             : 1;
+                    maximumArgumentCount = minimumArgumentCount;
                     returnsString = methodName.Equals(
                         nameof(string.Replace),
                         StringComparison.OrdinalIgnoreCase);
@@ -3165,6 +3635,10 @@ namespace Microsoft.Build.Evaluation
                     _metadata.Add(new MetadataTemplate(
                         GetStringId(metadata.Name),
                         AddCondition(metadata.Condition, sourceId),
+                        AddCompiledCondition(
+                            metadata.Condition,
+                            sourceId,
+                            ParserOptions.AllowAll),
                         AddExpression(metadata.Value, sourceId),
                         sourceId));
                 }

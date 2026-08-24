@@ -234,6 +234,10 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
 
+            using var scalarConditionMeasurement =
+                EvaluationPerformanceInstrumentation.Measure(
+                    EvaluationPerformanceMetric.ScalarConditionEvaluation);
+
             // If the condition wasn't empty, there must be a location for it
             ArgumentNullException.ThrowIfNull(elementLocation);
 
@@ -298,6 +302,13 @@ namespace Microsoft.Build.Evaluation
                         options,
                         elementLocation);
                 }
+            }
+
+            if (EvaluationPerformanceInstrumentation.Enabled)
+            {
+                EvaluationPerformanceInstrumentation.RecordConditionShape(
+                    parsedExpression.GetType().Name,
+                    condition);
             }
 
             bool result;

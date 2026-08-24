@@ -1422,21 +1422,21 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 PropertySegmentKind.CompiledEffectBatch);
             module.Properties.Count(property =>
                     property.RequiresExpansion)
-                .ShouldBe(2);
+                .ShouldBe(1);
             module.PropertyInstructions
                 .Skip(segment.Instructions.Start)
                 .Take(segment.Instructions.Count)
                 .Count(instruction =>
                     instruction.Kind ==
                     PropertyInstructionKind.SetExpandedValue)
-                .ShouldBe(2);
+                .ShouldBe(1);
             module.PropertyInstructions
                 .Skip(segment.Instructions.Start)
                 .Take(segment.Instructions.Count)
                 .Count(instruction =>
                     instruction.Kind ==
                     PropertyInstructionKind.AppendFunction)
-                .ShouldBe(2);
+                .ShouldBe(3);
             module.CompiledPropertyFunctions
                 .Count(function =>
                     function.Kind ==
@@ -1468,7 +1468,36 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     <PathEquals>$(ExpectedPath.Equals('$(PathArgument)'))</PathEquals>
                     <Replaced>$(Base.Replace('b', '-'))</Replaced>
                     <Trimmed>$(Spaced.Trim())</Trimmed>
+                    <TrimmedChars>+$(_subset.Trim('+'))+</TrimmedChars>
+                    <TrimmedStart>$(Version.TrimStart('vV'))</TrimmedStart>
+                    <TrimmedEnd>$(Suffix.TrimEnd('!?'))</TrimmedEnd>
+                    <LastDash>$(Rid.LastIndexOf('-'))</LastDash>
+                    <SubstringToEnd>$(Rid.Substring('6'))</SubstringToEnd>
+                    <SubstringRange>$(Rid.Substring(0, $(LastDash)))</SubstringRange>
                     <EscapedLower>$(EscapedSource.ToLowerInvariant())</EscapedLower>
+                    <TrailingSlash>$([MSBuild]::EnsureTrailingSlash('$(Root)'))</TrailingSlash>
+                    <Defaulted>$([MSBuild]::ValueOrDefault('$(Missing)', 'fallback'))</Defaulted>
+                    <EscapedLiteral>$([MSBuild]::Escape('a;b'))</EscapedLiteral>
+                    <DirectoryAbove>$([MSBuild]::GetDirectoryNameOfFileAbove('$(Root)', 'compiled-property-functions.proj'))</DirectoryAbove>
+                    <RunningFromVisualStudio>$([MSBuild]::IsRunningFromVisualStudio())</RunningFromVisualStudio>
+                    <VersionLessThan>$([MSBuild]::VersionLessThan('18.9', '18.10'))</VersionLessThan>
+                    <Sum>$([MSBuild]::Add('40', '2'))</Sum>
+                    <Difference>$([MSBuild]::Subtract('44', '2'))</Difference>
+                    <TargetFrameworkIdentifier>$([MSBuild]::GetTargetFrameworkIdentifier('net8.0-windows10.0.19041'))</TargetFrameworkIdentifier>
+                    <TargetFrameworkVersion>$([MSBuild]::GetTargetFrameworkVersion('net8.0-windows10.0.19041'))</TargetFrameworkVersion>
+                    <TargetFrameworkVersionParts>$([MSBuild]::GetTargetFrameworkVersion('net8.0-windows10.0.19041', 1))</TargetFrameworkVersionParts>
+                    <TargetPlatformIdentifier>$([MSBuild]::GetTargetPlatformIdentifier('net8.0-windows10.0.19041'))</TargetPlatformIdentifier>
+                    <TargetPlatformVersion>$([MSBuild]::GetTargetPlatformVersion('net8.0-windows10.0.19041', 2))</TargetPlatformVersion>
+                    <ToolsDirectory32>$([MSBuild]::GetToolsDirectory32())</ToolsDirectory32>
+                    <ProcessArchitectureLower>$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant)</ProcessArchitectureLower>
+                    <RuntimeIdentifier>$([System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier)</RuntimeIdentifier>
+                    <VersionToString>$([System.Version]::Parse('18.11.2.3').ToString(2))</VersionToString>
+                    <VersionBuildSum>$([MSBuild]::Add($([System.Version]::Parse('1.2.3').Build), 39))</VersionBuildSum>
+                    <Combined>$([System.IO.Path]::Combine('$(Root)', 'folder', 'file.txt'))</Combined>
+                    <FullPath>$([System.IO.Path]::GetFullPath('$(Root)folder/../file.txt'))</FullPath>
+                    <DirectoryName>$([System.IO.Path]::GetDirectoryName('$(Combined)'))</DirectoryName>
+                    <DirectorySeparator>$([System.IO.Path]::DirectorySeparatorChar)</DirectorySeparator>
+                    <NestedPath>$([System.IO.Path]::GetFullPath(`$([System.IO.Path]::Combine(`$(Root)`, `nested`, `..`, `file.txt`))`))</NestedPath>
                     <NormalizedPath>$([MSBuild]::NormalizePath('$(Root)', 'folder', '$(Lower)'))</NormalizedPath>
                     <NormalizedDirectory>$([MSBuild]::NormalizeDirectory('$(Root)', '$(Base.ToLowerInvariant())'))</NormalizedDirectory>
                     <RawParentheses>$([MSBuild]::NormalizePath('$(Root)', segment(one,two)))</RawParentheses>
@@ -1479,6 +1508,10 @@ namespace Microsoft.Build.UnitTests.Evaluation
             var globals = new Dictionary<string, string>
             {
                 ["Numeric"] = "1",
+                ["Rid"] = "linux-x64",
+                ["Suffix"] = "value?!",
+                ["Version"] = "Vv8.0",
+                ["_subset"] = "++subset++",
                 ["PathArgument"] = Path.Combine(root, "child")
                     .Replace('/', '\\'),
             };
@@ -1512,7 +1545,47 @@ namespace Microsoft.Build.UnitTests.Evaluation
             optimized.GetPropertyValue("PathEquals").ShouldBe("True");
             optimized.GetPropertyValue("Replaced").ShouldBe("A-C");
             optimized.GetPropertyValue("Trimmed").ShouldBe("value");
+            optimized.GetPropertyValue("TrimmedChars").ShouldBe("+subset+");
+            optimized.GetPropertyValue("TrimmedStart").ShouldBe("8.0");
+            optimized.GetPropertyValue("TrimmedEnd").ShouldBe("value");
+            optimized.GetPropertyValue("LastDash").ShouldBe("5");
+            optimized.GetPropertyValue("SubstringToEnd").ShouldBe("x64");
+            optimized.GetPropertyValue("SubstringRange").ShouldBe("linux");
             optimized.GetPropertyValue("EscapedLower").ShouldBe("a;b");
+            optimized.GetPropertyValue("TrailingSlash").ShouldBe(
+                FileUtilities.EnsureTrailingSlash(root));
+            optimized.GetPropertyValue("Defaulted").ShouldBe("fallback");
+            optimized.GetPropertyValue("EscapedLiteral").ShouldBe("a;b");
+            optimized.GetPropertyValue("DirectoryAbove").ShouldBe(
+                FileUtilities.EnsureTrailingSlash(root));
+            optimized.GetPropertyValue("VersionLessThan").ShouldBe("True");
+            optimized.GetPropertyValue("Sum").ShouldBe("42");
+            optimized.GetPropertyValue("Difference").ShouldBe("42");
+            optimized.GetPropertyValue("TargetFrameworkIdentifier")
+                .ShouldBe(".NETCoreApp");
+            optimized.GetPropertyValue("TargetFrameworkVersion")
+                .ShouldBe("8.0");
+            optimized.GetPropertyValue("TargetFrameworkVersionParts")
+                .ShouldBe("8");
+            optimized.GetPropertyValue("TargetPlatformIdentifier")
+                .ShouldBe("windows");
+            optimized.GetPropertyValue("TargetPlatformVersion")
+                .ShouldBe("10.0.19041");
+            optimized.GetPropertyValue("ToolsDirectory32")
+                .ShouldBe(IntrinsicFunctions.GetToolsDirectory32());
+            optimized.GetPropertyValue("VersionToString")
+                .ShouldBe("18.11");
+            optimized.GetPropertyValue("VersionBuildSum").ShouldBe("42");
+            optimized.GetPropertyValue("Combined").ShouldBe(
+                Path.Combine(root, "folder", "file.txt"));
+            optimized.GetPropertyValue("FullPath").ShouldBe(
+                Path.Combine(root, "file.txt"));
+            optimized.GetPropertyValue("DirectoryName").ShouldBe(
+                Path.Combine(root, "folder"));
+            optimized.GetPropertyValue("DirectorySeparator").ShouldBe(
+                Path.DirectorySeparatorChar.ToString());
+            optimized.GetPropertyValue("NestedPath").ShouldBe(
+                Path.Combine(root, "file.txt"));
             optimized.GetPropertyValue("NormalizedPath").ShouldBe(
                 Path.GetFullPath(Path.Combine(root, "folder", "abc")));
             optimized.GetPropertyValue("NormalizedDirectory").ShouldBe(
@@ -1527,7 +1600,7 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     optimized.Xml);
             module.Properties.ShouldAllBe(property =>
                 !property.RequiresExpansion);
-            module.CompiledPropertyFunctions.Length.ShouldBe(15);
+            module.CompiledPropertyFunctions.Length.ShouldBe(46);
             module.CompiledPropertyFunctions
                 .Select(function => function.Kind)
                 .ShouldContain(
@@ -1543,7 +1616,7 @@ namespace Microsoft.Build.UnitTests.Evaluation
             module.PropertyInstructions.Count(instruction =>
                     instruction.Kind ==
                     PropertyInstructionKind.AppendFunction)
-                .ShouldBe(14);
+                .ShouldBe(43);
         }
 
         [Fact]
@@ -2059,7 +2132,8 @@ namespace Microsoft.Build.UnitTests.Evaluation
                              MatchOnMetadata="Category"
                              MatchOnMetadataOptions="CaseInsensitive" />
                     <Compile Update="keep.cs">
-                      <Updated>%(Filename)</Updated>
+                      <Updated Condition="'%(Compile.Filename)' == 'keep' and '$(EnableMetadata)' == 'true'">%(Filename)</Updated>
+                      <Skipped Condition="'%(Filename)' != 'keep'">wrong</Skipped>
                     </Compile>
                   </ItemGroup>
                   <UsingTask TaskName="$(TaskPrefix).Generated"
@@ -2107,6 +2181,12 @@ namespace Microsoft.Build.UnitTests.Evaluation
                             StringComparer.Ordinal)
                         .Select(target =>
                             $"{target.Name}|{target.BeforeTargets}|{target.AfterTargets}"));
+            ProjectItem updated =
+                optimized.GetItems("Compile")
+                    .Single(item =>
+                        item.EvaluatedInclude == "keep.cs");
+            updated.GetMetadataValue("Updated").ShouldBe("keep");
+            updated.GetMetadataValue("Skipped").ShouldBe(string.Empty);
             Assert.Equal(
                 optimized.CreateProjectInstance().TaskRegistry,
                 scalar.CreateProjectInstance().TaskRegistry,
@@ -2118,6 +2198,10 @@ namespace Microsoft.Build.UnitTests.Evaluation
             module.GetExpressionValue(0).ShouldBe(string.Empty);
             module.Items[0].RemoveExpressionId.ShouldBe(0);
             module.Items[0].UpdateExpressionId.ShouldBe(0);
+            module.Metadata
+                .Count(metadata =>
+                    metadata.CompiledConditionId > 0)
+                .ShouldBeGreaterThanOrEqualTo(2);
             module.Items[0].MatchOnMetadataExpressionId.ShouldBe(0);
         }
 

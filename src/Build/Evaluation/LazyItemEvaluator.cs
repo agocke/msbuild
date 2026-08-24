@@ -653,6 +653,13 @@ namespace Microsoft.Build.Evaluation
                     : _module.GetConditionValue(
                         GetTemplate(index).ConditionId);
 
+            internal int GetCompiledConditionId(int index) =>
+                _module is null
+                    ? -1
+                    : GetTemplate(index).CompiledConditionId;
+
+            internal EvaluationModule Module => _module;
+
             internal string GetValue(int index) =>
                 _module is null
                     ? _elements[index].Value
