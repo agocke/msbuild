@@ -247,7 +247,8 @@ namespace Microsoft.Build.Execution
                 string assemblyName,
                 string runtime,
                 string architecture,
-                string overrideUsingTask)
+                string overrideUsingTask,
+                bool conditionAlreadyEvaluated = false)
             {
                 Element = element;
                 DirectoryOfImportingFile = directoryOfImportingFile;
@@ -259,6 +260,7 @@ namespace Microsoft.Build.Execution
                 Runtime = runtime;
                 Architecture = architecture;
                 Override = overrideUsingTask;
+                ConditionAlreadyEvaluated = conditionAlreadyEvaluated;
             }
 
             internal ProjectUsingTaskElement Element { get; }
@@ -280,6 +282,8 @@ namespace Microsoft.Build.Execution
             internal string Architecture { get; }
 
             internal string Override { get; }
+
+            internal bool ConditionAlreadyEvaluated { get; }
 
             internal static UsingTaskRegistration FromElement(
                 ProjectUsingTaskElement element,
@@ -384,7 +388,8 @@ namespace Microsoft.Build.Execution
             Assumed.False(taskRegistry._isInitialized, "Attempt to modify TaskRegistry after it was initialized.");
 #endif
 
-            if (!ConditionEvaluator.EvaluateCondition(
+            if (!registration.ConditionAlreadyEvaluated &&
+                !ConditionEvaluator.EvaluateCondition(
                     registration.Condition,
                     ParserOptions.AllowPropertiesAndItemLists,
                     expander,

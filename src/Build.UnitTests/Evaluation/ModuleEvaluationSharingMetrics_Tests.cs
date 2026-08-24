@@ -2024,10 +2024,23 @@ namespace Microsoft.Build.UnitTests.Evaluation
         public void CompactModuleInterpreterPreservesDeferredConditionsAndSelectedClosure()
         {
             using TestEnvironment environment = TestEnvironment.Create();
+            environment.CreateFile(
+                "selected.props",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <ImportedSelection>true</ImportedSelection>
+                  </PropertyGroup>
+                </Project>
+                """);
             var projectFile = environment.CreateFile(
                 "deferred.proj",
                 """
                 <Project DefaultTargets="Selected">
+                  <ImportGroup Condition="'$(Select)' == 'true'">
+                    <Import Project="selected.props"
+                            Condition="'$(Include)' == 'true'" />
+                  </ImportGroup>
                   <ItemDefinitionGroup Condition="'$(Select)' == 'true'">
                     <Compile>
                       <Marker>default</Marker>
@@ -2058,6 +2071,9 @@ namespace Microsoft.Build.UnitTests.Evaluation
                       <Updated>true</Updated>
                     </Compile>
                   </ItemGroup>
+                  <ItemGroup Condition="False">
+                    <Compile Include="literal-false.cs" />
+                  </ItemGroup>
                   <UsingTask TaskName="SkippedTask"
                              AssemblyFile="missing.dll"
                              Condition="'false' == 'true'" />
@@ -2069,11 +2085,13 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 ["Select"] = "true",
                 ["Include"] = "true",
             };
+            EvaluationContext optimizedContext =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    ProjectEvaluationMode.Pure);
             Project optimized = EvaluateWithGlobals(
                 projectFile.Path,
                 environment.CreateProjectCollection().Collection,
-                EvaluationContext.CreateForCompiledModuleEvaluation(
-                    ProjectEvaluationMode.Pure),
+                optimizedContext,
                 globals);
             Project scalar = EvaluateWithGlobals(
                 projectFile.Path,
@@ -2094,6 +2112,37 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 .ShouldBe(
                     scalar.Targets.Keys.OrderBy(name => name, StringComparer.Ordinal));
             optimized.Targets.ShouldContainKey("Selected");
+            optimized.GetPropertyValue("ImportedSelection")
+                .ShouldBe("true");
+            EvaluationModule module =
+                optimizedContext.EvaluationModuleCache.GetModule(
+                    optimized.Xml);
+            module.ImportGroups
+                .Any(group => group.CompiledConditionId > 0)
+                .ShouldBeTrue();
+            module.Imports
+                .Any(import => import.CompiledConditionId > 0)
+                .ShouldBeTrue();
+            module.ChooseArms
+                .Any(arm => arm.CompiledConditionId > 0)
+                .ShouldBeTrue();
+            module.ItemDefinitionGroups
+                .Any(group => group.CompiledConditionId > 0)
+                .ShouldBeTrue();
+            module.UsingTasks
+                .Any(usingTask => usingTask.CompiledConditionId > 0)
+                .ShouldBeTrue();
+            module.ItemGroups
+                .Any(group => group.CompiledConditionId > 0)
+                .ShouldBeTrue();
+            module.ItemGroups
+                .Any(group =>
+                    group.CompiledConditionId > 0 &&
+                    module.GetSource(group.SourceId).Condition == "False")
+                .ShouldBeTrue();
+            module.Items
+                .Any(item => item.CompiledConditionId > 0)
+                .ShouldBeTrue();
         }
 
         [Fact]

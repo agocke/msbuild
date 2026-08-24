@@ -1212,9 +1212,7 @@ namespace Microsoft.Build.Evaluation
         {
             for (int i = imports.Start; i < imports.Start + imports.Count; i++)
             {
-                ProjectImportElement import = (ProjectImportElement)module.GetSource(
-                    module.Imports[i].SourceId);
-                EvaluateImportElement(module.Header.DirectoryPath, import);
+                EvaluateImportElement(module, i);
             }
         }
 
@@ -1292,10 +1290,7 @@ namespace Microsoft.Build.Evaluation
                         element.LocalIndex));
                     break;
                 case ModuleElementKind.Import:
-                    EvaluateImportElement(
-                        module.Header.DirectoryPath,
-                        (ProjectImportElement)module.GetSource(
-                            module.Imports[element.LocalIndex].SourceId));
+                    EvaluateImportElement(module, element.LocalIndex);
                     break;
                 case ModuleElementKind.ImportGroup:
                     EvaluateImportGroupElement(module, element.LocalIndex);
@@ -2303,7 +2298,8 @@ namespace Microsoft.Build.Evaluation
 
         private bool EvaluateCompiledCondition(
             EvaluationModule module,
-            int conditionId)
+            int conditionId,
+            bool collectConditionedProperties = true)
         {
             using var measurement =
                 EvaluationPerformanceInstrumentation.Measure(
@@ -2337,7 +2333,8 @@ namespace Microsoft.Build.Evaluation
                         if (!EvaluateCompiledConditionComparison(
                                 module,
                                 instruction.Argument0,
-                                location))
+                                location,
+                                collectConditionedProperties))
                         {
                             instructionIndex +=
                                 instruction.Argument1;
@@ -2353,7 +2350,8 @@ namespace Microsoft.Build.Evaluation
                         if (EvaluateCompiledConditionComparison(
                                 module,
                                 instruction.Argument0,
-                                location))
+                                location,
+                                collectConditionedProperties))
                         {
                             instructionIndex +=
                                 instruction.Argument1;
@@ -2369,7 +2367,8 @@ namespace Microsoft.Build.Evaluation
                         return EvaluateCompiledConditionComparison(
                             module,
                             instruction.Argument0,
-                            location);
+                            location,
+                            collectConditionedProperties);
                     case CompiledConditionInstructionKind.ReturnFalse:
                         return false;
                     case CompiledConditionInstructionKind.ReturnTrue:
@@ -2384,7 +2383,8 @@ namespace Microsoft.Build.Evaluation
         private bool EvaluateCompiledConditionComparison(
             EvaluationModule module,
             int comparisonId,
-            IElementLocation location)
+            IElementLocation location,
+            bool collectConditionedProperties)
         {
             CompiledConditionComparison comparison =
                 module.CompiledConditionComparisons[comparisonId];
@@ -2400,7 +2400,8 @@ namespace Microsoft.Build.Evaluation
                 left,
                 right,
                 out bool updateConditionedProperties);
-            if (updateConditionedProperties &&
+            if (collectConditionedProperties &&
+                updateConditionedProperties &&
                 _data.ShouldEvaluateForDesignTime)
             {
                 ConditionEvaluator.UpdateConditionedPropertiesTable(
@@ -2775,11 +2776,20 @@ namespace Microsoft.Build.Evaluation
                 module.ItemDefinitionGroups[localIndex];
             ProjectItemDefinitionGroupElement source =
                 GetModuleItemDefinitionGroup(module, localIndex);
-            if (!EvaluateCondition(
-                    source,
-                    module.GetConditionValue(group.ConditionId),
-                    ExpanderOptions.ExpandProperties,
-                    ParserOptions.AllowProperties))
+            bool conditionResult =
+                _evaluationContext.UseCompiledModuleEffectBatches &&
+                group.CompiledConditionId >= 0
+                    ? group.CompiledConditionId == 0 ||
+                      EvaluateCompiledCondition(
+                          module,
+                          group.CompiledConditionId,
+                          collectConditionedProperties: false)
+                    : EvaluateCondition(
+                        source,
+                        module.GetConditionValue(group.ConditionId),
+                        ExpanderOptions.ExpandProperties,
+                        ParserOptions.AllowProperties);
+            if (!conditionResult)
             {
                 return;
             }
@@ -2849,11 +2859,18 @@ namespace Microsoft.Build.Evaluation
                        location: source.ConditionLocation))
             {
                 itemGroupConditionResult =
-                    lazyEvaluator.EvaluateConditionWithCurrentState(
-                        module.GetConditionValue(group.ConditionId),
-                        source,
-                        ExpanderOptions.ExpandPropertiesAndItems,
-                        ParserOptions.AllowPropertiesAndItemLists);
+                    _evaluationContext.UseCompiledModuleEffectBatches &&
+                    group.CompiledConditionId >= 0
+                        ? group.CompiledConditionId == 0 ||
+                          EvaluateCompiledCondition(
+                              module,
+                              group.CompiledConditionId,
+                              collectConditionedProperties: false)
+                        : lazyEvaluator.EvaluateConditionWithCurrentState(
+                            module.GetConditionValue(group.ConditionId),
+                            source,
+                            ExpanderOptions.ExpandPropertiesAndItems,
+                            ParserOptions.AllowPropertiesAndItemLists);
             }
 
             if (!itemGroupConditionResult &&
@@ -2923,11 +2940,26 @@ namespace Microsoft.Build.Evaluation
                 EvaluationModule module = GetDeferredModule(reference);
                 UsingTaskTemplate template =
                     module.UsingTasks[reference.LocalIndex];
+                bool hasCompiledCondition =
+                    _evaluationContext.UseCompiledModuleEffectBatches &&
+                    template.CompiledConditionId >= 0;
+                if (hasCompiledCondition &&
+                    template.CompiledConditionId != 0 &&
+                    !EvaluateCompiledCondition(
+                        module,
+                        template.CompiledConditionId,
+                        collectConditionedProperties: false))
+                {
+                    continue;
+                }
+
                 yield return new TaskRegistry.UsingTaskRegistration(
                     (ProjectUsingTaskElement)module.GetSource(
                         template.SourceId),
                     module.Header.DirectoryPath,
-                    module.GetConditionValue(template.ConditionId),
+                    hasCompiledCondition
+                        ? string.Empty
+                        : module.GetConditionValue(template.ConditionId),
                     module.GetExpressionValue(
                         template.TaskNameExpressionId),
                     module.GetExpressionValue(
@@ -2941,7 +2973,8 @@ namespace Microsoft.Build.Evaluation
                     module.GetExpressionValue(
                         template.ArchitectureExpressionId),
                     module.GetExpressionValue(
-                        template.OverrideExpressionId));
+                        template.OverrideExpressionId),
+                    conditionAlreadyEvaluated: hasCompiledCondition);
             }
         }
 
@@ -3588,11 +3621,18 @@ namespace Microsoft.Build.Evaluation
             LazyItemEvaluator<P, I, M, D> lazyEvaluator)
         {
             bool itemConditionResult =
-                lazyEvaluator.EvaluateConditionWithCurrentState(
-                    module.GetConditionValue(template.ConditionId),
-                    itemElement,
-                    ExpanderOptions.ExpandPropertiesAndItems,
-                    ParserOptions.AllowPropertiesAndItemLists);
+                _evaluationContext.UseCompiledModuleEffectBatches &&
+                template.CompiledConditionId >= 0
+                    ? template.CompiledConditionId == 0 ||
+                      EvaluateCompiledCondition(
+                          module,
+                          template.CompiledConditionId,
+                          collectConditionedProperties: false)
+                    : lazyEvaluator.EvaluateConditionWithCurrentState(
+                        module.GetConditionValue(template.ConditionId),
+                        itemElement,
+                        ExpanderOptions.ExpandPropertiesAndItems,
+                        ParserOptions.AllowPropertiesAndItemLists);
 
             if (!itemConditionResult &&
                 !(_data.ShouldEvaluateForDesignTime &&
@@ -3753,6 +3793,31 @@ namespace Microsoft.Build.Evaluation
         /// </remarks>
         private void EvaluateImportElement(string directoryOfImportingFile, ProjectImportElement importElement)
         {
+            EvaluateImportElement(
+                directoryOfImportingFile,
+                importElement,
+                module: null,
+                compiledConditionId: -1);
+        }
+
+        private void EvaluateImportElement(
+            EvaluationModule module,
+            int importIndex)
+        {
+            ImportTemplate import = module.Imports[importIndex];
+            EvaluateImportElement(
+                module.Header.DirectoryPath,
+                (ProjectImportElement)module.GetSource(import.SourceId),
+                module,
+                import.CompiledConditionId);
+        }
+
+        private void EvaluateImportElement(
+            string directoryOfImportingFile,
+            ProjectImportElement importElement,
+            EvaluationModule module,
+            int compiledConditionId)
+        {
             using (_evaluationProfiler.TrackElement(importElement))
             {
                 List<ProjectRootElement> importedProjectRootElements;
@@ -3765,7 +3830,9 @@ namespace Microsoft.Build.Evaluation
                     importedProjectRootElements = ExpandAndLoadImports(
                         directoryOfImportingFile,
                         importElement,
-                        out sdkResult);
+                        out sdkResult,
+                        module,
+                        compiledConditionId);
                 }
 
                 if (importedProjectRootElements != null)
@@ -3832,11 +3899,18 @@ namespace Microsoft.Build.Evaluation
                            "ImportGroupCondition",
                            location: source.ConditionLocation))
                 {
-                    conditionResult = EvaluateConditionCollectingConditionedProperties(
-                        source,
-                        ExpanderOptions.ExpandProperties,
-                        ParserOptions.AllowProperties,
-                        _projectRootElementCache);
+                    conditionResult =
+                        _evaluationContext.UseCompiledModuleEffectBatches &&
+                        importGroup.CompiledConditionId >= 0
+                            ? importGroup.CompiledConditionId == 0 ||
+                              EvaluateCompiledCondition(
+                                  module,
+                                  importGroup.CompiledConditionId)
+                            : EvaluateConditionCollectingConditionedProperties(
+                                source,
+                                ExpanderOptions.ExpandProperties,
+                                ParserOptions.AllowProperties,
+                                _projectRootElementCache);
                 }
 
                 if (conditionResult)
@@ -3915,10 +3989,18 @@ namespace Microsoft.Build.Evaluation
                                "ChooseWhenCondition",
                                location: when.ConditionLocation))
                     {
-                        conditionResult = EvaluateConditionCollectingConditionedProperties(
-                            when,
-                            ExpanderOptions.ExpandProperties,
-                            ParserOptions.AllowProperties);
+                        conditionResult =
+                            _evaluationContext
+                                    .UseCompiledModuleEffectBatches &&
+                            arm.CompiledConditionId >= 0
+                                ? arm.CompiledConditionId == 0 ||
+                                  EvaluateCompiledCondition(
+                                      module,
+                                      arm.CompiledConditionId)
+                                : EvaluateConditionCollectingConditionedProperties(
+                                    when,
+                                    ExpanderOptions.ExpandProperties,
+                                    ParserOptions.AllowProperties);
                     }
 
                     if (conditionResult)
@@ -3976,7 +4058,12 @@ namespace Microsoft.Build.Evaluation
         /// in those additional paths if the default fails.
         /// </remarks>
         /// </summary>
-        private List<ProjectRootElement> ExpandAndLoadImports(string directoryOfImportingFile, ProjectImportElement importElement, out SdkResult sdkResult)
+        private List<ProjectRootElement> ExpandAndLoadImports(
+            string directoryOfImportingFile,
+            ProjectImportElement importElement,
+            out SdkResult sdkResult,
+            EvaluationModule module,
+            int compiledConditionId)
         {
             var fallbackSearchPathMatch = _data.Toolset.GetProjectImportSearchPaths(importElement.Project);
             sdkResult = null;
@@ -3986,7 +4073,24 @@ namespace Microsoft.Build.Evaluation
             if (fallbackSearchPathMatch.Equals(ProjectImportPathMatch.None))
             {
                 List<ProjectRootElement> projects;
-                ExpandAndLoadImportsFromUnescapedImportExpressionConditioned(directoryOfImportingFile, importElement, out projects, out sdkResult);
+                bool? compiledConditionResult = null;
+                if (module is not null &&
+                    _evaluationContext.UseCompiledModuleEffectBatches &&
+                    compiledConditionId >= 0)
+                {
+                    compiledConditionResult =
+                        compiledConditionId == 0 ||
+                        EvaluateCompiledCondition(
+                            module,
+                            compiledConditionId);
+                }
+
+                ExpandAndLoadImportsFromUnescapedImportExpressionConditioned(
+                    directoryOfImportingFile,
+                    importElement,
+                    compiledConditionResult,
+                    out projects,
+                    out sdkResult);
                 return projects;
             }
 
@@ -4159,14 +4263,19 @@ namespace Microsoft.Build.Evaluation
         private void ExpandAndLoadImportsFromUnescapedImportExpressionConditioned(
             string directoryOfImportingFile,
             ProjectImportElement importElement,
+            bool? compiledConditionResult,
             out List<ProjectRootElement> projects,
             out SdkResult sdkResult)
         {
             projects = null;
             sdkResult = null;
 
-            if (!EvaluateConditionCollectingConditionedProperties(importElement, ExpanderOptions.ExpandProperties,
-                ParserOptions.AllowProperties, _projectRootElementCache))
+            if (!(compiledConditionResult ??
+                  EvaluateConditionCollectingConditionedProperties(
+                      importElement,
+                      ExpanderOptions.ExpandProperties,
+                      ParserOptions.AllowProperties,
+                      _projectRootElementCache)))
             {
                 if (_logProjectImportedEvents)
                 {
@@ -4909,6 +5018,14 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
 
+            if (EvaluationPerformanceInstrumentation.Enabled)
+            {
+                EvaluationPerformanceInstrumentation
+                    .RecordConditionContext(
+                        element.GetType().Name,
+                        condition);
+            }
+
             using (EvaluationPerformanceInstrumentation.Measure(
                        EvaluationPerformanceMetric.ConditionEvaluation))
             using (_evaluationProfiler.TrackCondition(element.ConditionLocation, condition))
@@ -4945,6 +5062,14 @@ namespace Microsoft.Build.Evaluation
             if (!_data.ShouldEvaluateForDesignTime)
             {
                 return EvaluateCondition(element, condition, expanderOptions, parserOptions);
+            }
+
+            if (EvaluationPerformanceInstrumentation.Enabled)
+            {
+                EvaluationPerformanceInstrumentation
+                    .RecordConditionContext(
+                        element.GetType().Name,
+                        condition);
             }
 
             using (EvaluationPerformanceInstrumentation.Measure(

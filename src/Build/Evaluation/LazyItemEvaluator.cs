@@ -106,6 +106,13 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
             MSBuildEventSource.Log.EvaluateConditionStart(condition);
+            if (EvaluationPerformanceInstrumentation.Enabled)
+            {
+                EvaluationPerformanceInstrumentation
+                    .RecordConditionContext(
+                        element.GetType().Name,
+                        condition);
+            }
 
             using (EvaluationPerformanceInstrumentation.Measure(
                        EvaluationPerformanceMetric.ConditionEvaluation))

@@ -814,15 +814,19 @@ namespace Microsoft.Build.Evaluation
     {
         internal ImportGroupTemplate(
             int conditionId,
+            int compiledConditionId,
             TableRange imports,
             int sourceId)
         {
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             Imports = imports;
             SourceId = sourceId;
         }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal TableRange Imports { get; }
 
@@ -832,12 +836,20 @@ namespace Microsoft.Build.Evaluation
     internal readonly struct ImportTemplate
     {
         internal ImportTemplate(
+            int conditionId,
+            int compiledConditionId,
             int projectExpressionId,
             int sourceId)
         {
+            ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             ProjectExpressionId = projectExpressionId;
             SourceId = sourceId;
         }
+
+        internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal int ProjectExpressionId { get; }
 
@@ -861,17 +873,21 @@ namespace Microsoft.Build.Evaluation
     {
         internal ChooseArmTemplate(
             int conditionId,
+            int compiledConditionId,
             TableRange children,
             int sourceId,
             bool isOtherwise)
         {
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             Children = children;
             SourceId = sourceId;
             IsOtherwise = isOtherwise;
         }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal TableRange Children { get; }
 
@@ -897,15 +913,19 @@ namespace Microsoft.Build.Evaluation
     {
         internal ItemGroupTemplate(
             int conditionId,
+            int compiledConditionId,
             TableRange items,
             int sourceId)
         {
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             Items = items;
             SourceId = sourceId;
         }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal TableRange Items { get; }
 
@@ -918,6 +938,7 @@ namespace Microsoft.Build.Evaluation
             int itemTypeStringId,
             ItemOperationKind operationKind,
             int conditionId,
+            int compiledConditionId,
             int includeExpressionId,
             int excludeExpressionId,
             int removeExpressionId,
@@ -930,6 +951,7 @@ namespace Microsoft.Build.Evaluation
             ItemTypeStringId = itemTypeStringId;
             OperationKind = operationKind;
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             IncludeExpressionId = includeExpressionId;
             ExcludeExpressionId = excludeExpressionId;
             RemoveExpressionId = removeExpressionId;
@@ -945,6 +967,8 @@ namespace Microsoft.Build.Evaluation
         internal ItemOperationKind OperationKind { get; }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal int IncludeExpressionId { get; }
 
@@ -974,15 +998,19 @@ namespace Microsoft.Build.Evaluation
     {
         internal ItemDefinitionGroupTemplate(
             int conditionId,
+            int compiledConditionId,
             TableRange itemDefinitions,
             int sourceId)
         {
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             ItemDefinitions = itemDefinitions;
             SourceId = sourceId;
         }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal TableRange ItemDefinitions { get; }
 
@@ -1043,6 +1071,7 @@ namespace Microsoft.Build.Evaluation
     {
         internal UsingTaskTemplate(
             int conditionId,
+            int compiledConditionId,
             int taskNameExpressionId,
             int taskFactoryExpressionId,
             int assemblyFileExpressionId,
@@ -1053,6 +1082,7 @@ namespace Microsoft.Build.Evaluation
             int sourceId)
         {
             ConditionId = conditionId;
+            CompiledConditionId = compiledConditionId;
             TaskNameExpressionId = taskNameExpressionId;
             TaskFactoryExpressionId = taskFactoryExpressionId;
             AssemblyFileExpressionId = assemblyFileExpressionId;
@@ -1064,6 +1094,8 @@ namespace Microsoft.Build.Evaluation
         }
 
         internal int ConditionId { get; }
+
+        internal int CompiledConditionId { get; }
 
         internal int TaskNameExpressionId { get; }
 
@@ -1863,7 +1895,19 @@ namespace Microsoft.Build.Evaluation
                 var instructions =
                     new List<CompiledConditionInstruction>();
                 bool compiled;
-                if (expression is EqualExpressionNode or
+                if (expression is StringExpressionNode booleanLiteral &&
+                    ConversionUtilities.TryConvertStringToBool(
+                        booleanLiteral.UnexpandedValue,
+                        out bool literalValue))
+                {
+                    instructions.Add(
+                        new CompiledConditionInstruction(
+                            literalValue
+                                ? CompiledConditionInstructionKind.ReturnTrue
+                                : CompiledConditionInstructionKind.ReturnFalse));
+                    compiled = true;
+                }
+                else if (expression is EqualExpressionNode or
                     NotEqualExpressionNode)
                 {
                     compiled = TryAddCompiledConditionComparison(
@@ -3511,6 +3555,10 @@ namespace Microsoft.Build.Evaluation
 
                 _importGroups.Add(new ImportGroupTemplate(
                     AddCondition(importGroup.Condition, sourceId),
+                    AddCompiledCondition(
+                        importGroup.Condition,
+                        sourceId,
+                        ParserOptions.AllowProperties),
                     new TableRange(start, _imports.Count - start),
                     sourceId));
                 return _importGroups.Count - 1;
@@ -3520,6 +3568,11 @@ namespace Microsoft.Build.Evaluation
             {
                 int sourceId = AddSource(import);
                 _imports.Add(new ImportTemplate(
+                    AddCondition(import.Condition, sourceId),
+                    AddCompiledCondition(
+                        import.Condition,
+                        sourceId,
+                        ParserOptions.AllowProperties),
                     AddExpression(import.Project, sourceId),
                     sourceId));
                 return _imports.Count - 1;
@@ -3534,6 +3587,10 @@ namespace Microsoft.Build.Evaluation
                     int whenSourceId = AddSource(when);
                     arms.Add(new ChooseArmTemplate(
                         AddCondition(when.Condition, whenSourceId),
+                        AddCompiledCondition(
+                            when.Condition,
+                            whenSourceId,
+                            ParserOptions.AllowProperties),
                         LowerElements(when.ChildrenEnumerable),
                         whenSourceId,
                         isOtherwise: false));
@@ -3545,6 +3602,7 @@ namespace Microsoft.Build.Evaluation
                     int otherwiseSourceId = AddSource(otherwise);
                     arms.Add(new ChooseArmTemplate(
                         conditionId: 0,
+                        compiledConditionId: 0,
                         LowerElements(otherwise.ChildrenEnumerable),
                         otherwiseSourceId,
                         isOtherwise: true));
@@ -3581,6 +3639,10 @@ namespace Microsoft.Build.Evaluation
                         GetStringId(item.ItemType),
                         GetItemOperationKind(item),
                         AddCondition(item.Condition, itemSourceId),
+                        AddCompiledCondition(
+                            item.Condition,
+                            itemSourceId,
+                            ParserOptions.AllowPropertiesAndItemLists),
                         AddExpression(item.Include, itemSourceId),
                         AddExpression(item.Exclude, itemSourceId),
                         AddExpression(item.Remove, itemSourceId),
@@ -3593,6 +3655,10 @@ namespace Microsoft.Build.Evaluation
 
                 _itemGroups.Add(new ItemGroupTemplate(
                     AddCondition(itemGroup.Condition, sourceId),
+                    AddCompiledCondition(
+                        itemGroup.Condition,
+                        sourceId,
+                        ParserOptions.AllowPropertiesAndItemLists),
                     new TableRange(start, _items.Count - start),
                     sourceId));
                 return _itemGroups.Count - 1;
@@ -3618,6 +3684,10 @@ namespace Microsoft.Build.Evaluation
 
                 _itemDefinitionGroups.Add(new ItemDefinitionGroupTemplate(
                     AddCondition(itemDefinitionGroup.Condition, sourceId),
+                    AddCompiledCondition(
+                        itemDefinitionGroup.Condition,
+                        sourceId,
+                        ParserOptions.AllowProperties),
                     new TableRange(
                         start,
                         _itemDefinitions.Count - start),
@@ -3673,6 +3743,10 @@ namespace Microsoft.Build.Evaluation
                 int sourceId = AddSource(usingTask);
                 _usingTasks.Add(new UsingTaskTemplate(
                     AddCondition(usingTask.Condition, sourceId),
+                    AddCompiledCondition(
+                        usingTask.Condition,
+                        sourceId,
+                        ParserOptions.AllowPropertiesAndItemLists),
                     AddExpression(usingTask.TaskName, sourceId),
                     AddExpression(usingTask.TaskFactory, sourceId),
                     AddExpression(usingTask.AssemblyFile, sourceId),

@@ -95,6 +95,13 @@ namespace Microsoft.Build.Evaluation
             (string Shape, string Condition),
             long> s_conditionShapes = new();
         private static readonly ConcurrentDictionary<
+            string,
+            long> s_conditionContexts =
+                new(StringComparer.Ordinal);
+        private static readonly ConcurrentDictionary<
+            (string Context, string Condition),
+            long> s_conditionContextShapes = new();
+        private static readonly ConcurrentDictionary<
             (EvaluationPerformanceMetric Kind, string ItemType, string Expression),
             LazyItemOperationShapeAccumulator>
             s_lazyItemOperationShapes = new();
@@ -223,6 +230,23 @@ namespace Microsoft.Build.Evaluation
             {
                 s_conditionShapes.AddOrUpdate(
                     (shape, condition),
+                    1,
+                    static (_, count) => count + 1);
+            }
+        }
+
+        internal static void RecordConditionContext(
+            string context,
+            string condition)
+        {
+            if (Enabled)
+            {
+                s_conditionContexts.AddOrUpdate(
+                    context,
+                    1,
+                    static (_, count) => count + 1);
+                s_conditionContextShapes.AddOrUpdate(
+                    (context, condition),
                     1,
                     static (_, count) => count + 1);
             }
@@ -492,6 +516,7 @@ namespace Microsoft.Build.Evaluation
                          string,
                          ConditionContentionAccumulator> entry
                      in s_conditionContentions
+                         .ToArray()
                          .OrderByDescending(
                              pair => Interlocked.Read(
                                  ref pair.Value.ElapsedTicks))
@@ -518,12 +543,43 @@ namespace Microsoft.Build.Evaluation
                          (string Shape, string Condition),
                          long> entry
                      in s_conditionShapes
+                         .ToArray()
                          .OrderByDescending(pair => pair.Value)
                          .ThenBy(pair => pair.Key.Shape)
                          .ThenBy(pair => pair.Key.Condition)
                          .Take(300))
             {
                 report.Append(Escape(entry.Key.Shape));
+                report.Append('\t');
+                report.Append(Escape(entry.Key.Condition));
+                report.Append('\t');
+                report.AppendLine(
+                    entry.Value.ToString(CultureInfo.InvariantCulture));
+            }
+
+            report.AppendLine("condition_context\tcount");
+            foreach (KeyValuePair<string, long> entry
+                     in s_conditionContexts
+                         .ToArray()
+                         .OrderByDescending(pair => pair.Value)
+                         .ThenBy(pair => pair.Key))
+            {
+                report.Append(Escape(entry.Key));
+                report.Append('\t');
+                report.AppendLine(
+                    entry.Value.ToString(CultureInfo.InvariantCulture));
+            }
+
+            report.AppendLine("condition_context_shape\tcondition\tcount");
+            foreach (KeyValuePair<(string Context, string Condition), long> entry
+                     in s_conditionContextShapes
+                         .ToArray()
+                         .OrderByDescending(pair => pair.Value)
+                         .ThenBy(pair => pair.Key.Context)
+                         .ThenBy(pair => pair.Key.Condition)
+                         .Take(300))
+            {
+                report.Append(Escape(entry.Key.Context));
                 report.Append('\t');
                 report.Append(Escape(entry.Key.Condition));
                 report.Append('\t');
@@ -538,6 +594,7 @@ namespace Microsoft.Build.Evaluation
                          (EvaluationPerformanceMetric Kind, string ItemType, string Expression),
                          LazyItemOperationShapeAccumulator> entry
                      in s_lazyItemOperationShapes
+                         .ToArray()
                          .OrderByDescending(
                              pair => Interlocked.Read(
                                  ref pair.Value.ElapsedTicks))
@@ -577,6 +634,7 @@ namespace Microsoft.Build.Evaluation
                          string,
                          CompiledPropertyModuleAccumulator> entry
                      in s_compiledPropertyModules
+                         .ToArray()
                          .OrderByDescending(
                              pair =>
                                  Interlocked.Read(
@@ -629,6 +687,7 @@ namespace Microsoft.Build.Evaluation
                          string,
                          CompiledPropertyExpansionAccumulator> entry
                      in s_compiledPropertyExpansions
+                         .ToArray()
                          .OrderByDescending(
                              pair =>
                                  Interlocked.Read(ref pair.Value.Count))
