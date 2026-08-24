@@ -159,6 +159,14 @@ namespace Microsoft.Build.BackEnd
             // In the case of Intrinsic tasks, taskNode will end up null.  Currently this is how we distinguish
             // intrinsic from extrinsic tasks.
             _taskNode = taskInstance as ProjectTaskInstance;
+            using var taskBuilderMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.TaskBuilder,
+                    BuildExecutionInstrumentation.DetailsEnabled
+                        ? _taskNode?.Name ??
+                          taskInstance.GetType().Name
+                        : null,
+                    loggingContext.Target.Name);
 
             if (_taskNode != null && requestEntry.Request.HostServices != null)
             {
@@ -414,6 +422,13 @@ namespace Microsoft.Build.BackEnd
             // If this is an Intrinsic task, it gets handled in a special fashion.
             if (_taskNode == null)
             {
+                using var intrinsicTaskMeasurement =
+                    BuildExecutionInstrumentation.Measure(
+                        BuildExecutionMetric.IntrinsicTask,
+                        BuildExecutionInstrumentation.DetailsEnabled
+                            ? _targetChildInstance.GetType().Name
+                            : null,
+                        _targetLoggingContext.Target.Name);
                 try
                 {
                     ExecuteIntrinsicTask(bucket);
@@ -450,6 +465,11 @@ namespace Microsoft.Build.BackEnd
                     {
                         TaskLoggingContext taskLoggingContext = _targetLoggingContext.LogTaskBatchStarted(_projectFullPath, _targetChildInstance, taskAssemblyLocation);
                         MSBuildEventSource.Log.ExecuteTaskStart(_taskNode?.Name, taskLoggingContext.BuildEventContext.TaskId);
+                        using var taskMeasurement =
+                            BuildExecutionInstrumentation.Measure(
+                                BuildExecutionMetric.Task,
+                                _taskNode?.Name,
+                                _targetLoggingContext.Target.Name);
                         if (_componentHost.BuildParameters.IsTelemetryEnabled)
                         {
                             taskFactoryWrapper?.Statistics?.ExecutionStarted();

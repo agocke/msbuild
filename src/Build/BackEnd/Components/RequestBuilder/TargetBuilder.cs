@@ -112,6 +112,10 @@ namespace Microsoft.Build.BackEnd
             ArgumentNullException.ThrowIfNull(callback, "requestBuilderCallback");
             ArgumentNullException.ThrowIfNull(targetNames);
             ArgumentNullException.ThrowIfNull(baseLookup);
+            using var targetBuilderMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.TargetBuilder,
+                    entry.RequestConfiguration.ProjectFullPath);
             Assumed.Positive(targetNames.Length, "List of targets must be non-empty");
             Assumed.NotNull(_componentHost, "InitializeComponent must be called before building targets.");
 
@@ -486,7 +490,17 @@ namespace Microsoft.Build.BackEnd
 
                             // Execute all of the tasks on this target.
                             MSBuildEventSource.Log.TargetStart(currentTargetEntry.Name);
-                            await currentTargetEntry.ExecuteTarget(taskBuilder, _requestEntry, _projectLoggingContext, _cancellationToken);
+                            using (BuildExecutionInstrumentation.Measure(
+                                       BuildExecutionMetric.Target,
+                                       currentTargetEntry.Name))
+                            {
+                                await currentTargetEntry.ExecuteTarget(
+                                    taskBuilder,
+                                    _requestEntry,
+                                    _projectLoggingContext,
+                                    _cancellationToken);
+                            }
+
                             MSBuildEventSource.Log.TargetStop(currentTargetEntry.Name, currentTargetEntry.Result?.TargetResultCodeToString() ?? string.Empty);
                         }
 

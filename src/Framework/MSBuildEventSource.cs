@@ -33,6 +33,15 @@ namespace Microsoft.Build.Eventing
             /// <see href="https://github.com/dotnet/msbuild/pull/5861">text perf log</see>.
             /// </remarks>
             public const EventKeywords PerformanceLog = (EventKeywords)0x2;
+
+            /// <summary>
+            /// Keyword for coarse-grained project graph and evaluation events.
+            /// </summary>
+            /// <remarks>
+            /// High-volume per-condition and per-item-operation events are
+            /// intentionally excluded.
+            /// </remarks>
+            public const EventKeywords Evaluation = (EventKeywords)0x4;
         }
 
         /// <summary>
@@ -126,98 +135,98 @@ namespace Microsoft.Build.Eventing
         /// Call this method to notify listeners of how the project data was evaluated.
         /// </summary>
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(11, Keywords = Keywords.All | Keywords.PerformanceLog)]
+        [Event(11, Keywords = Keywords.All | Keywords.PerformanceLog | Keywords.Evaluation)]
         public void EvaluateStart(string projectFile)
         {
             WriteEvent(11, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(12, Keywords = Keywords.All | Keywords.PerformanceLog)]
+        [Event(12, Keywords = Keywords.All | Keywords.PerformanceLog | Keywords.Evaluation)]
         public void EvaluateStop(string projectFile)
         {
             WriteEvent(12, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(13, Keywords = Keywords.All)]
+        [Event(13, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass0Start(string projectFile)
         {
             WriteEvent(13, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(14, Keywords = Keywords.All)]
+        [Event(14, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass0Stop(string projectFile)
         {
             WriteEvent(14, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(15, Keywords = Keywords.All)]
+        [Event(15, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass1Start(string projectFile)
         {
             WriteEvent(15, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(16, Keywords = Keywords.All)]
+        [Event(16, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass1Stop(string projectFile)
         {
             WriteEvent(16, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(17, Keywords = Keywords.All)]
+        [Event(17, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass2Start(string projectFile)
         {
             WriteEvent(17, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(18, Keywords = Keywords.All)]
+        [Event(18, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass2Stop(string projectFile)
         {
             WriteEvent(18, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(19, Keywords = Keywords.All)]
+        [Event(19, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass3Start(string projectFile)
         {
             WriteEvent(19, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(20, Keywords = Keywords.All)]
+        [Event(20, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass3Stop(string projectFile)
         {
             WriteEvent(20, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(21, Keywords = Keywords.All)]
+        [Event(21, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass4Start(string projectFile)
         {
             WriteEvent(21, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(22, Keywords = Keywords.All)]
+        [Event(22, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass4Stop(string projectFile)
         {
             WriteEvent(22, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(23, Keywords = Keywords.All)]
+        [Event(23, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass5Start(string projectFile)
         {
             WriteEvent(23, projectFile);
         }
 
         /// <param name="projectFile">Filename of the project being evaluated.</param>
-        [Event(24, Keywords = Keywords.All)]
+        [Event(24, Keywords = Keywords.All | Keywords.Evaluation)]
         public void EvaluatePass5Stop(string projectFile)
         {
             WriteEvent(24, projectFile);
@@ -253,7 +262,7 @@ namespace Microsoft.Build.Eventing
         /// <param name="rootDirectory">Source of files to glob.</param>
         /// <param name="glob">Pattern, possibly with wildcard(s) to be expanded.</param>
         /// <param name="excludedPatterns">Patterns not to expand.</param>
-        [Event(41, Keywords = Keywords.All)]
+        [Event(41, Keywords = Keywords.All | Keywords.Evaluation)]
         public void ExpandGlobStart(string rootDirectory, string glob, string excludedPatterns)
         {
             WriteEvent(41, rootDirectory, glob, excludedPatterns);
@@ -262,7 +271,7 @@ namespace Microsoft.Build.Eventing
         /// <param name="rootDirectory">Source of files to glob.</param>
         /// <param name="glob">Pattern, possibly with wildcard(s) to be expanded.</param>
         /// <param name="excludedPatterns">Patterns not to expand.</param>
-        [Event(42, Keywords = Keywords.All)]
+        [Event(42, Keywords = Keywords.All | Keywords.Evaluation)]
         public void ExpandGlobStop(string rootDirectory, string glob, string excludedPatterns)
         {
             WriteEvent(42, rootDirectory, glob, excludedPatterns);
@@ -272,14 +281,14 @@ namespace Microsoft.Build.Eventing
         /// Call this method to notify listeners of timing related to loading an XmlDocumentWithLocation from a path.
         /// <param name="fullPath">Path to the document to load.</param>
         /// </summary>
-        [Event(29, Keywords = Keywords.All | Keywords.PerformanceLog)]
+        [Event(29, Keywords = Keywords.All | Keywords.PerformanceLog | Keywords.Evaluation)]
         public void LoadDocumentStart(string fullPath)
         {
             WriteEvent(29, fullPath);
         }
 
         /// <param name="fullPath">Path to the document to load.</param>
-        [Event(30, Keywords = Keywords.All | Keywords.PerformanceLog)]
+        [Event(30, Keywords = Keywords.All | Keywords.PerformanceLog | Keywords.Evaluation)]
         public void LoadDocumentStop(string fullPath)
         {
             WriteEvent(30, fullPath);
@@ -301,14 +310,14 @@ namespace Microsoft.Build.Eventing
         /// Call this method to notify listeners of profiling for the function that parses an XML document into a ProjectRootElement.
         /// </summary>
         /// <param name="projectFileName">Filename of the project being evaluated.</param>
-        [Event(33, Keywords = Keywords.All)]
+        [Event(33, Keywords = Keywords.All | Keywords.Evaluation)]
         public void ParseStart(string projectFileName)
         {
             WriteEvent(33, projectFileName);
         }
 
         /// <param name="projectFileName">Filename of the project being evaluated.</param>
-        [Event(34, Keywords = Keywords.All)]
+        [Event(34, Keywords = Keywords.All | Keywords.Evaluation)]
         public void ParseStop(string projectFileName)
         {
             WriteEvent(34, projectFileName);
@@ -431,13 +440,13 @@ namespace Microsoft.Build.Eventing
             WriteEvent(52, taskName, taskID);
         }
 
-        [Event(53, Keywords = Keywords.All)]
+        [Event(53, Keywords = Keywords.All | Keywords.Evaluation)]
         public void ProjectGraphConstructionStart(string graphEntryPoints)
         {
             WriteEvent(53, graphEntryPoints);
         }
 
-        [Event(54, Keywords = Keywords.All)]
+        [Event(54, Keywords = Keywords.All | Keywords.Evaluation)]
         public void ProjectGraphConstructionStop(string graphEntryPoints)
         {
             WriteEvent(54, graphEntryPoints);

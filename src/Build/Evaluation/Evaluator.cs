@@ -760,7 +760,7 @@ namespace Microsoft.Build.Evaluation
 
                 if (_evaluationStage <= ProjectEvaluationStage.Properties)
                 {
-                    FinishEvaluationAndProfile();
+                    FinishEvaluation();
                     return;
                 }
 
@@ -801,7 +801,7 @@ namespace Microsoft.Build.Evaluation
 
                 if (_evaluationStage <= ProjectEvaluationStage.ItemDefinitions)
                 {
-                    FinishEvaluationAndProfile();
+                    FinishEvaluation();
                     return;
                 }
 
@@ -887,7 +887,7 @@ namespace Microsoft.Build.Evaluation
 
                 if (_evaluationStage <= ProjectEvaluationStage.Items)
                 {
-                    FinishEvaluationAndProfile();
+                    FinishEvaluation();
                     return;
                 }
 
@@ -924,7 +924,7 @@ namespace Microsoft.Build.Evaluation
 
                 if (_evaluationStage <= ProjectEvaluationStage.UsingTasks)
                 {
-                    FinishEvaluationAndProfile();
+                    FinishEvaluation();
                     return;
                 }
 
@@ -1020,7 +1020,7 @@ namespace Microsoft.Build.Evaluation
                         }
                     }
 
-                    FinishEvaluationAndProfile();
+                    FinishEvaluation();
                     MSBuildEventSource.Log.EvaluatePass5Stop(projectFile);
                 }
             }
@@ -1028,10 +1028,9 @@ namespace Microsoft.Build.Evaluation
             Assumed.True(_evaluationProfiler.IsEmpty(), "Evaluation profiler stack is not empty.");
         }
 
-        private void FinishEvaluationAndProfile()
+        private void FinishEvaluation()
         {
             _data.FinishEvaluation();
-            EvaluationPerformanceInstrumentation.RecordEvaluationCompleted();
         }
 
         private IEnumerable FilterOutEnvironmentDerivedProperties(PropertyDictionary<P> dictionary)
@@ -2311,12 +2310,9 @@ namespace Microsoft.Build.Evaluation
             CompiledCondition condition =
                 module.CompiledConditions[conditionId];
             ProjectElement source = module.GetSource(condition.SourceId);
-            if (EvaluationPerformanceInstrumentation.Enabled)
-            {
-                EvaluationPerformanceInstrumentation.RecordConditionShape(
-                    "Compiled",
-                    source.Condition);
-            }
+            EvaluationPerformanceInstrumentation.RecordConditionShape(
+                "Compiled",
+                source.Condition);
 
             IElementLocation location = source.ConditionLocation;
             TableRange instructions = condition.Instructions;
@@ -5018,13 +5014,9 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
 
-            if (EvaluationPerformanceInstrumentation.Enabled)
-            {
-                EvaluationPerformanceInstrumentation
-                    .RecordConditionContext(
-                        element.GetType().Name,
-                        condition);
-            }
+            EvaluationPerformanceInstrumentation.RecordConditionContext(
+                element.GetType().Name,
+                condition);
 
             using (EvaluationPerformanceInstrumentation.Measure(
                        EvaluationPerformanceMetric.ConditionEvaluation))
@@ -5064,13 +5056,9 @@ namespace Microsoft.Build.Evaluation
                 return EvaluateCondition(element, condition, expanderOptions, parserOptions);
             }
 
-            if (EvaluationPerformanceInstrumentation.Enabled)
-            {
-                EvaluationPerformanceInstrumentation
-                    .RecordConditionContext(
-                        element.GetType().Name,
-                        condition);
-            }
+            EvaluationPerformanceInstrumentation.RecordConditionContext(
+                element.GetType().Name,
+                condition);
 
             using (EvaluationPerformanceInstrumentation.Measure(
                        EvaluationPerformanceMetric.ConditionEvaluation))

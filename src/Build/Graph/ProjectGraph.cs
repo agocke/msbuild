@@ -507,7 +507,6 @@ namespace Microsoft.Build.Graph
             _projectNodesTopologicallySorted = new Lazy<IReadOnlyCollection<ProjectGraphNode>>(() => TopologicalSort(GraphRoots, ProjectNodes));
 
             ConstructionMetrics = EndMeasurement();
-            EvaluationPerformanceInstrumentation.WriteReportSnapshot();
 
             (Stopwatch Timer, string ETWArgs) BeginMeasurement()
             {

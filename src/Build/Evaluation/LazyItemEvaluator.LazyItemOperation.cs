@@ -65,7 +65,8 @@ namespace Microsoft.Build.Evaluation
                 EvaluationPerformanceInstrumentation
                     .LazyItemOperationShapeScope shapeMeasurement =
                         default;
-                if (EvaluationPerformanceInstrumentation.Enabled)
+                if (EvaluationPerformanceInstrumentation
+                    .LazyItemOperationMetricsEnabled)
                 {
                     EvaluationPerformanceMetric operationMetric =
                         this switch
@@ -82,28 +83,33 @@ namespace Microsoft.Build.Evaluation
                             _ => throw new InternalErrorException(
                                 "Unknown lazy item operation."),
                         };
-                    string operationExpression = operationMetric switch
-                    {
-                        EvaluationPerformanceMetric
-                            .LazyItemIncludeApplication =>
-                            _itemElement.Include,
-                        EvaluationPerformanceMetric
-                            .LazyItemRemoveApplication =>
-                            _itemElement.Remove,
-                        EvaluationPerformanceMetric
-                            .LazyItemUpdateApplication =>
-                            _itemElement.Update,
-                        _ => string.Empty,
-                    };
                     operationMeasurement =
                         EvaluationPerformanceInstrumentation.Measure(
                             operationMetric);
-                    shapeMeasurement =
-                        EvaluationPerformanceInstrumentation
-                            .MeasureLazyItemOperationShape(
-                                operationMetric,
-                                _itemElement.ItemType,
-                                operationExpression);
+                    if (EvaluationPerformanceInstrumentation
+                        .LazyItemShapeEnabled)
+                    {
+                        string operationExpression =
+                            operationMetric switch
+                            {
+                                EvaluationPerformanceMetric
+                                    .LazyItemIncludeApplication =>
+                                    _itemElement.Include,
+                                EvaluationPerformanceMetric
+                                    .LazyItemRemoveApplication =>
+                                    _itemElement.Remove,
+                                EvaluationPerformanceMetric
+                                    .LazyItemUpdateApplication =>
+                                    _itemElement.Update,
+                                _ => string.Empty,
+                            };
+                        shapeMeasurement =
+                            EvaluationPerformanceInstrumentation
+                                .MeasureLazyItemOperationShape(
+                                    operationMetric,
+                                    _itemElement.ItemType,
+                                    operationExpression);
+                    }
                 }
 
                 using (shapeMeasurement)
@@ -559,13 +565,9 @@ namespace Microsoft.Build.Evaluation
                     module.CompiledConditions[conditionId];
                 ProjectElement source =
                     module.GetSource(condition.SourceId);
-                if (EvaluationPerformanceInstrumentation.Enabled)
-                {
-                    EvaluationPerformanceInstrumentation
-                        .RecordConditionShape(
-                            "Compiled",
-                            source.Condition);
-                }
+                EvaluationPerformanceInstrumentation.RecordConditionShape(
+                    "Compiled",
+                    source.Condition);
 
                 IElementLocation location = source.ConditionLocation;
                 TableRange instructions = condition.Instructions;

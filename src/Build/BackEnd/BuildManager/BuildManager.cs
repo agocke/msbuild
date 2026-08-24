@@ -148,6 +148,8 @@ namespace Microsoft.Build.Execution
         /// </summary>
         private BuildManagerState _buildManagerState;
 
+        private BuildExecutionInstrumentation.Scope _buildMeasurement;
+
         /// <summary>
         /// The name given to this BuildManager as the component host.
         /// </summary>
@@ -582,6 +584,9 @@ namespace Microsoft.Build.Execution
                 RequireState(BuildManagerState.Idle, "BuildInProgress");
 
                 MSBuildEventSource.Log.BuildStart();
+                _buildMeasurement =
+                    BuildExecutionInstrumentation.Measure(
+                        BuildExecutionMetric.BuildSession);
 
                 // Initiate build telemetry data
                 DateTime now = DateTime.UtcNow;
@@ -1265,11 +1270,11 @@ namespace Microsoft.Build.Execution
                         _legacyThreadingData.MainThreadSubmissionId = -1;
                     }
 
-                    EvaluationPerformanceInstrumentation
-                        .WriteReportSnapshot();
                     Reset();
                     _buildManagerState = BuildManagerState.Idle;
 
+                    _buildMeasurement.Dispose();
+                    _buildMeasurement = default;
                     MSBuildEventSource.Log.BuildStop();
 
                     if (_threadException is not null)

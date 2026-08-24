@@ -51,6 +51,8 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private AutoResetEvent _continueEvent;
 
+        private long _requestDispatchStartTimestamp;
+
         /// <summary>
         /// The results used when a build request entry continues.
         /// </summary>
@@ -399,6 +401,10 @@ namespace Microsoft.Build.BackEnd
         /// <param name="partialBuildResult">A BuildResult with results from an incomplete build request.</param>
         public async Task BlockOnTargetInProgress(int blockingGlobalRequestId, string blockingTarget, BuildResult partialBuildResult = null)
         {
+            using var blockedMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.ProjectBlocked,
+                    blockingTarget);
             VerifyIsNotZombie();
             SaveOperatingEnvironment();
 
@@ -643,6 +649,8 @@ namespace Microsoft.Build.BackEnd
             Assumed.Null(_requestTask, "Already have a task.");
 
             _cancellationTokenSource = new CancellationTokenSource();
+            _requestDispatchStartTimestamp =
+                BuildExecutionInstrumentation.StartTimestamp();
 
             // IMPLEMENTATION NOTE: It may look strange that we are creating new tasks here which immediately turn around and create
             // more tasks that look async.  The reason for this is that while these methods are technically async, they really only
@@ -781,6 +789,11 @@ namespace Microsoft.Build.BackEnd
             int globalRequestId = request.GlobalRequestId;
             int nodeRequestId = request.NodeRequestId;
             bool requestThreadProcEventSourceStarted = false;
+            BuildExecutionInstrumentation.RecordSince(
+                BuildExecutionMetric.ProjectDispatch,
+                _requestDispatchStartTimestamp,
+                projectPath);
+            _requestDispatchStartTimestamp = 0;
 
             try
             {
@@ -1208,6 +1221,10 @@ namespace Microsoft.Build.BackEnd
             }
 
 
+            using var projectBuildMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.ProjectBuild,
+                    _requestEntry.RequestConfiguration.ProjectFullPath);
             try
             {
                 // Determine the set of targets we need to build
