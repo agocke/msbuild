@@ -645,12 +645,15 @@ namespace Microsoft.Build.BackEnd
             try
             {
                 TaskPropertyInfo parameter = _taskFactoryWrapper.GetProperty(parameterName);
-                foreach (TaskPropertyInfo prop in _taskFactoryWrapper.TaskFactoryLoadedType.Properties)
+                if (_taskFactoryWrapper.TaskFactory is not AssemblyTaskFactory)
                 {
-                    if (prop.Name.Equals(parameterName, StringComparison.OrdinalIgnoreCase))
+                    foreach (TaskPropertyInfo prop in _taskFactoryWrapper.TaskFactoryLoadedType.Properties)
                     {
-                        parameter = prop;
-                        break;
+                        if (prop.Name.Equals(parameterName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            parameter = prop;
+                            break;
+                        }
                     }
                 }
 
@@ -1406,7 +1409,9 @@ namespace Microsoft.Build.BackEnd
                 Type parameterType = null;
                 if (indexOfParameter != -1)
                 {
-                    parameter = loadedType.Properties[indexOfParameter];
+                    parameter = _taskFactoryWrapper.TaskFactory is AssemblyTaskFactory
+                        ? _taskFactoryWrapper.GetProperty(indexOfParameter)
+                        : loadedType.Properties[indexOfParameter];
                     parameterType = ResolveTaskParameterType(loadedType, parameter, indexOfParameter);
                 }
                 else

@@ -39,16 +39,23 @@ namespace Microsoft.Build.Execution
             /// </summary>
             public readonly IReadOnlyDictionary<string, TaskPropertyInfo> PropertyInfoCache;
 
+            /// <summary>
+            /// Properties in the same order as <see cref="LoadedType.Properties"/>.
+            /// </summary>
+            public readonly TaskPropertyInfo[] Properties;
+
             public PropertyData(
                 IReadOnlyDictionary<string, string> namesOfPropertiesWithRequiredAttribute,
                 IReadOnlyDictionary<string, string> namesOfPropertiesWithOutputAttribute,
                 IReadOnlyDictionary<string, string> namesOfPropertiesWithAmbiguousMatches,
-                IReadOnlyDictionary<string, TaskPropertyInfo> propertyInfoCache)
+                IReadOnlyDictionary<string, TaskPropertyInfo> propertyInfoCache,
+                TaskPropertyInfo[] properties)
             {
                 NamesOfPropertiesWithRequiredAttribute = namesOfPropertiesWithRequiredAttribute;
                 NamesOfPropertiesWithOutputAttribute = namesOfPropertiesWithOutputAttribute;
                 NamesOfPropertiesWithAmbiguousMatches = namesOfPropertiesWithAmbiguousMatches;
                 PropertyInfoCache = propertyInfoCache;
+                Properties = properties;
             }
         }
 
@@ -197,6 +204,11 @@ namespace Microsoft.Build.Execution
         }
 
         /// <summary>
+        /// Gets a registration-local property wrapper by its position in <see cref="LoadedType.Properties"/>.
+        /// </summary>
+        internal TaskPropertyInfo GetProperty(int index) => _propertyData.Value.Properties[index];
+
+        /// <summary>
         /// Sets the given property on the task.
         /// </summary>
         internal void SetPropertyValue(ITask task, TaskPropertyInfo property, object value)
@@ -258,6 +270,7 @@ namespace Microsoft.Build.Execution
 
             bool taskTypeImplementsIGeneratedTask = typeof(IGeneratedTask).IsAssignableFrom(_taskFactory.TaskType);
             TaskPropertyInfo[] propertyInfos = _taskFactory.GetTaskParameters();
+            TaskPropertyInfo[] properties = new TaskPropertyInfo[propertyInfos.Length];
 
             for (int i = 0; i < propertyInfos.Length; i++)
             {
@@ -269,6 +282,8 @@ namespace Microsoft.Build.Execution
                 {
                     propertyInfo = new ReflectableTaskPropertyInfo(propertyInfo, _taskFactory.TaskType);
                 }
+
+                properties[i] = propertyInfo;
 
                 try
                 {
@@ -321,7 +336,8 @@ namespace Microsoft.Build.Execution
                 (IReadOnlyDictionary<string, string>?)namesOfPropertiesWithRequiredAttribute ?? ReadOnlyEmptyDictionary<string, string>.Instance,
                 (IReadOnlyDictionary<string, string>?)namesOfPropertiesWithOutputAttribute ?? ReadOnlyEmptyDictionary<string, string>.Instance,
                 (IReadOnlyDictionary<string, string>?)namesOfPropertiesWithAmbiguousMatches ?? ReadOnlyEmptyDictionary<string, string>.Instance,
-                (IReadOnlyDictionary<string, TaskPropertyInfo>?)propertyInfoCache ?? ReadOnlyEmptyDictionary<string, TaskPropertyInfo>.Instance);
+                (IReadOnlyDictionary<string, TaskPropertyInfo>?)propertyInfoCache ?? ReadOnlyEmptyDictionary<string, TaskPropertyInfo>.Instance,
+                properties);
         }
         #endregion
     }
