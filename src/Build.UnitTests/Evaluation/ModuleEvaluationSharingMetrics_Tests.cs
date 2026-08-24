@@ -2160,6 +2160,7 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     <TaskPrefix>Custom</TaskPrefix>
                     <TaskAssembly>missing.dll</TaskAssembly>
                     <HookTarget>Hook</HookTarget>
+                    <DeferredItemExpression>@(DynamicSource)</DeferredItemExpression>
                   </PropertyGroup>
                   <ItemDefinitionGroup>
                     <Compile Condition="'$(EnableDefinition)' == 'true'">
@@ -2177,11 +2178,15 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     <Removal Include="anything">
                       <Category>DROP</Category>
                     </Removal>
+                    <DynamicSource Include="nested.cs" />
                     <Compile Remove="@(Removal)"
                              MatchOnMetadata="Category"
                              MatchOnMetadataOptions="CaseInsensitive" />
                     <Compile Update="keep.cs">
                       <Updated Condition="'%(Compile.Filename)' == 'keep' and '$(EnableMetadata)' == 'true'">%(Filename)</Updated>
+                      <Combined>%(Filename)-$(EnableMetadata)</Combined>
+                      <FunctionValue>$([System.IO.Path]::GetFileName('function.txt'))</FunctionValue>
+                      <Nested>$(DeferredItemExpression)</Nested>
                       <Skipped Condition="'%(Filename)' != 'keep'">wrong</Skipped>
                     </Compile>
                     <Glob Include="*.generated.cs" />
@@ -2238,6 +2243,7 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     .Single(item =>
                         item.EvaluatedInclude == "keep.cs");
             updated.GetMetadataValue("Updated").ShouldBe("keep");
+            updated.GetMetadataValue("Nested").ShouldBe("nested.cs");
             updated.GetMetadataValue("Skipped").ShouldBe(string.Empty);
             Assert.Equal(
                 optimized.CreateProjectInstance().TaskRegistry,
@@ -2254,6 +2260,18 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 .Count(metadata =>
                     metadata.CompiledConditionId > 0)
                 .ShouldBeGreaterThanOrEqualTo(2);
+            module.Metadata
+                .Single(metadata =>
+                    module.GetStringValue(metadata.NameStringId) ==
+                    "Combined")
+                .CompiledValueParts.Count
+                .ShouldBe(3);
+            module.Metadata
+                .Single(metadata =>
+                    module.GetStringValue(metadata.NameStringId) ==
+                    "FunctionValue")
+                .CompiledValueParts.Start
+                .ShouldBe(-1);
             module.Items[0].MatchOnMetadataExpressionId.ShouldBe(0);
             module.CompiledItemSpecFragments
                 .Any(fragment =>

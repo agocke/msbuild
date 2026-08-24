@@ -16,7 +16,7 @@ namespace Microsoft.Build.Evaluation
         private class UpdateOperation : LazyItemOperation
         {
             private readonly DeferredMetadata _metadata;
-            private ImmutableList<ItemBatchingContext>.Builder _itemsToUpdate = null;
+            private List<ItemBatchingContext> _itemsToUpdate = null;
             private ItemSpecMatchesItem _matchItemSpec = null;
             private bool? _needToExpandMetadataForEachItem = null;
 
@@ -48,22 +48,39 @@ namespace Microsoft.Build.Evaluation
                 }
 
                 SetMatchItemSpec();
-                _itemsToUpdate ??= ImmutableList.CreateBuilder<ItemBatchingContext>();
+                _itemsToUpdate ??= new List<ItemBatchingContext>();
                 _itemsToUpdate.Clear();
 
-                for (int i = 0; i < listBuilder.Count; i++)
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric
+                               .LazyItemUpdateSelection))
                 {
-                    var itemData = listBuilder[i];
-
-                    var matchResult = _matchItemSpec(_itemSpec, itemData.Item);
-
-                    if (matchResult.IsMatch)
+                    for (int i = 0; i < listBuilder.Count; i++)
                     {
-                        listBuilder[i] = UpdateItem(listBuilder[i], matchResult.CapturedItemsFromReferencedItemTypes);
+                        var itemData = listBuilder[i];
+
+                        var matchResult =
+                            _matchItemSpec(_itemSpec, itemData.Item);
+
+                        if (matchResult.IsMatch)
+                        {
+                            listBuilder[i] = UpdateItem(
+                                listBuilder[i],
+                                matchResult
+                                    .CapturedItemsFromReferencedItemTypes);
+                        }
                     }
                 }
 
-                DecorateItemsWithMetadata(_itemsToUpdate.ToImmutableList(), _metadata, _needToExpandMetadataForEachItem);
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric
+                               .LazyItemMetadataDecoration))
+                {
+                    DecorateItemsWithMetadata(
+                        _itemsToUpdate,
+                        _metadata,
+                        _needToExpandMetadataForEachItem);
+                }
             }
 
             /// <summary>
@@ -76,13 +93,16 @@ namespace Microsoft.Build.Evaluation
                 if (_conditionResult)
                 {
                     SetMatchItemSpec();
-                    _itemsToUpdate ??= ImmutableList.CreateBuilder<ItemBatchingContext>();
+                    _itemsToUpdate ??= new List<ItemBatchingContext>();
                     _itemsToUpdate.Clear();
                     MatchResult matchResult = _matchItemSpec(_itemSpec, item.Item);
                     if (matchResult.IsMatch)
                     {
                         ItemData clonedData = UpdateItem(item, matchResult.CapturedItemsFromReferencedItemTypes);
-                        DecorateItemsWithMetadata(_itemsToUpdate.ToImmutableList(), _metadata, _needToExpandMetadataForEachItem);
+                        DecorateItemsWithMetadata(
+                            _itemsToUpdate,
+                            _metadata,
+                            _needToExpandMetadataForEachItem);
                         return clonedData;
                     }
                 }

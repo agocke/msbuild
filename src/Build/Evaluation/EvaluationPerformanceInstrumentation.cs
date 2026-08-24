@@ -45,6 +45,8 @@ namespace Microsoft.Build.Evaluation
         LazyItemIncludeApplication,
         LazyItemRemoveApplication,
         LazyItemUpdateApplication,
+        LazyItemUpdateSelection,
+        LazyItemMetadataDecoration,
         UsingTaskRegistration,
         PropertyReplayCacheHit,
         PropertyReplayCacheMiss,

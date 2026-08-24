@@ -715,6 +715,32 @@ namespace Microsoft.Build.Evaluation
         internal int Value { get; }
     }
 
+    internal enum CompiledMetadataValuePartKind : byte
+    {
+        Literal,
+        Property,
+        Metadata,
+    }
+
+    internal readonly struct CompiledMetadataValuePart
+    {
+        internal CompiledMetadataValuePart(
+            CompiledMetadataValuePartKind kind,
+            int value,
+            int count = 0)
+        {
+            Kind = kind;
+            Value = value;
+            Count = count;
+        }
+
+        internal CompiledMetadataValuePartKind Kind { get; }
+
+        internal int Value { get; }
+
+        internal int Count { get; }
+    }
+
     internal readonly struct CompiledConditionOperand
     {
         internal CompiledConditionOperand(
@@ -1084,12 +1110,14 @@ namespace Microsoft.Build.Evaluation
             int conditionId,
             int compiledConditionId,
             int valueExpressionId,
+            TableRange compiledValueParts,
             int sourceId)
         {
             NameStringId = nameStringId;
             ConditionId = conditionId;
             CompiledConditionId = compiledConditionId;
             ValueExpressionId = valueExpressionId;
+            CompiledValueParts = compiledValueParts;
             SourceId = sourceId;
         }
 
@@ -1100,6 +1128,8 @@ namespace Microsoft.Build.Evaluation
         internal int CompiledConditionId { get; }
 
         internal int ValueExpressionId { get; }
+
+        internal TableRange CompiledValueParts { get; }
 
         internal int SourceId { get; }
     }
@@ -1215,6 +1245,7 @@ namespace Microsoft.Build.Evaluation
             ItemGroupTemplate[] itemGroups,
             ItemTemplate[] items,
             CompiledItemSpecFragment[] compiledItemSpecFragments,
+            CompiledMetadataValuePart[] compiledMetadataValueParts,
             ItemDefinitionGroupTemplate[] itemDefinitionGroups,
             ItemDefinitionTemplate[] itemDefinitions,
             MetadataTemplate[] metadata,
@@ -1263,6 +1294,7 @@ namespace Microsoft.Build.Evaluation
             ItemGroups = itemGroups;
             Items = items;
             CompiledItemSpecFragments = compiledItemSpecFragments;
+            CompiledMetadataValueParts = compiledMetadataValueParts;
             ItemDefinitionGroups = itemDefinitionGroups;
             ItemDefinitions = itemDefinitions;
             Metadata = metadata;
@@ -1327,6 +1359,8 @@ namespace Microsoft.Build.Evaluation
         internal ItemTemplate[] Items { get; }
 
         internal CompiledItemSpecFragment[] CompiledItemSpecFragments { get; }
+
+        internal CompiledMetadataValuePart[] CompiledMetadataValueParts { get; }
 
         internal ItemDefinitionGroupTemplate[] ItemDefinitionGroups { get; }
 
@@ -1547,6 +1581,9 @@ namespace Microsoft.Build.Evaluation
             private readonly List<CompiledItemSpecFragment>
                 _compiledItemSpecFragments =
                     new List<CompiledItemSpecFragment>();
+            private readonly List<CompiledMetadataValuePart>
+                _compiledMetadataValueParts =
+                    new List<CompiledMetadataValuePart>();
             private readonly List<ItemDefinitionGroupTemplate> _itemDefinitionGroups =
                 new List<ItemDefinitionGroupTemplate>();
             private readonly List<ItemDefinitionTemplate> _itemDefinitions =
@@ -1652,6 +1689,7 @@ namespace Microsoft.Build.Evaluation
                     _itemGroups.ToArray(),
                     _items.ToArray(),
                     _compiledItemSpecFragments.ToArray(),
+                    _compiledMetadataValueParts.ToArray(),
                     _itemDefinitionGroups.ToArray(),
                     _itemDefinitions.ToArray(),
                     _metadata.ToArray(),
@@ -3922,10 +3960,137 @@ namespace Microsoft.Build.Evaluation
                             sourceId,
                             ParserOptions.AllowAll),
                         AddExpression(metadata.Value, sourceId),
+                        AddCompiledMetadataValue(metadata.Value),
                         sourceId));
                 }
 
                 return new TableRange(start, _metadata.Count - start);
+            }
+
+            private TableRange AddCompiledMetadataValue(string value)
+            {
+                if (value.Contains("@(", StringComparison.Ordinal))
+                {
+                    return new TableRange(-1, 0);
+                }
+
+                int partStart = _compiledMetadataValueParts.Count;
+                int readStart = _compiledConditionPropertyReads.Count;
+                int sourceIndex = 0;
+                while (sourceIndex < value.Length)
+                {
+                    int propertyStart = value.IndexOf(
+                        "$(",
+                        sourceIndex,
+                        StringComparison.Ordinal);
+                    int metadataStart = value.IndexOf(
+                        "%(",
+                        sourceIndex,
+                        StringComparison.Ordinal);
+                    int expressionStart = propertyStart < 0
+                        ? metadataStart
+                        : metadataStart < 0
+                            ? propertyStart
+                            : Math.Min(propertyStart, metadataStart);
+                    if (expressionStart < 0)
+                    {
+                        _compiledMetadataValueParts.Add(
+                            new CompiledMetadataValuePart(
+                                CompiledMetadataValuePartKind.Literal,
+                                GetStringId(value.Substring(sourceIndex))));
+                        sourceIndex = value.Length;
+                        break;
+                    }
+
+                    if (expressionStart > sourceIndex)
+                    {
+                        _compiledMetadataValueParts.Add(
+                            new CompiledMetadataValuePart(
+                                CompiledMetadataValuePartKind.Literal,
+                                GetStringId(value.Substring(
+                                    sourceIndex,
+                                    expressionStart - sourceIndex))));
+                    }
+
+                    if (expressionStart == propertyStart)
+                    {
+                        int propertyEnd =
+                            value.IndexOf(')', propertyStart + 2);
+                        if (propertyEnd < 0)
+                        {
+                            RollBack();
+                            return new TableRange(-1, 0);
+                        }
+
+                        string propertyName = value.Substring(
+                            propertyStart + 2,
+                            propertyEnd - propertyStart - 2);
+                        if (!IsValidPropertyName(propertyName) ||
+                            IsContextualPropertyName(propertyName) ||
+                            propertyName.Equals(
+                                "MSBuildToolsVersion",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            RollBack();
+                            return new TableRange(-1, 0);
+                        }
+
+                        int readIndex =
+                            _compiledConditionPropertyReads.Count;
+                        _compiledConditionPropertyReads.Add(
+                            new CompiledPropertyExternalRead(
+                                _propertyIdentities.GetOrCreate(propertyName),
+                                GetStringId(propertyName)));
+                        _compiledMetadataValueParts.Add(
+                            new CompiledMetadataValuePart(
+                                CompiledMetadataValuePartKind.Property,
+                                readIndex));
+                        sourceIndex = propertyEnd + 1;
+                    }
+                    else
+                    {
+                        int metadataEnd = metadataStart + 2;
+                        if (!ExpressionShredder.TryParseMetadataExpression(
+                                value,
+                                ref metadataEnd,
+                                value.Length,
+                                out string itemType,
+                                out string metadataName))
+                        {
+                            RollBack();
+                            return new TableRange(-1, 0);
+                        }
+
+                        _compiledMetadataValueParts.Add(
+                            new CompiledMetadataValuePart(
+                                CompiledMetadataValuePartKind.Metadata,
+                                GetStringId(itemType ?? string.Empty),
+                                GetStringId(metadataName)));
+                        sourceIndex = metadataEnd;
+                    }
+                }
+
+                if (_compiledMetadataValueParts.Count == partStart)
+                {
+                    _compiledMetadataValueParts.Add(
+                        new CompiledMetadataValuePart(
+                            CompiledMetadataValuePartKind.Literal,
+                            GetStringId(string.Empty)));
+                }
+
+                return new TableRange(
+                    partStart,
+                    _compiledMetadataValueParts.Count - partStart);
+
+                void RollBack()
+                {
+                    _compiledMetadataValueParts.RemoveRange(
+                        partStart,
+                        _compiledMetadataValueParts.Count - partStart);
+                    _compiledConditionPropertyReads.RemoveRange(
+                        readStart,
+                        _compiledConditionPropertyReads.Count - readStart);
+                }
             }
 
             private static ItemOperationKind GetItemOperationKind(

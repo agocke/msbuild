@@ -286,17 +286,13 @@ namespace Microsoft.Build.Evaluation
                                     continue;
                                 }
 
-                                string evaluatedValue =
-                                    _expander.ExpandIntoStringLeaveEscaped(
-                                        metadata.GetValue(i),
-                                        metadataExpansionOptions,
-                                        metadataElement.Location);
-
                                 itemContext.OperationItem.SetMetadata(
                                     metadataElement,
-                                    FileUtilities.MaybeAdjustFilePath(
-                                        evaluatedValue,
-                                        metadata.GetDirectory(i)));
+                                    ExpandMetadataValue(
+                                        metadata,
+                                        i,
+                                        metadataElement,
+                                        metadataExpansionOptions));
                             }
                         }
 
@@ -336,14 +332,11 @@ namespace Microsoft.Build.Evaluation
                                 continue;
                             }
 
-                            string evaluatedValue =
-                                _expander.ExpandIntoStringLeaveEscaped(
-                                    metadata.GetValue(i),
-                                    metadataExpansionOptions,
-                                    metadataElement.Location);
-                            evaluatedValue = FileUtilities.MaybeAdjustFilePath(
-                                evaluatedValue,
-                                metadata.GetDirectory(i));
+                            string evaluatedValue = ExpandMetadataValue(
+                                metadata,
+                                i,
+                                metadataElement,
+                                metadataExpansionOptions);
 
                             metadataTable.SetValue(metadataElement, evaluatedValue);
                             metadataList.Add(new KeyValuePair<ProjectMetadataElement, string>(metadataElement, evaluatedValue));
@@ -361,6 +354,165 @@ namespace Microsoft.Build.Evaluation
                         // End of legal area for metadata expressions.
                         _expander.Metadata = null;
                     }
+                }
+            }
+
+            private string ExpandMetadataValue(
+                DeferredMetadata metadata,
+                int index,
+                ProjectMetadataElement metadataElement,
+                ExpanderOptions expanderOptions)
+            {
+                TableRange compiledParts =
+                    metadata.GetCompiledValueParts(index);
+                if (_lazyEvaluator.EvaluationContext
+                        .UseCompiledModuleEffectBatches &&
+                    compiledParts.Start >= 0)
+                {
+                    string compiledValue =
+                        EvaluateCompiledMetadataValueExpansion(
+                            metadata.Module,
+                            compiledParts,
+                            metadataElement.Location,
+                            metadata.GetDirectory(index));
+
+                    if (!compiledValue.Contains(
+                            "$(",
+                            StringComparison.Ordinal) &&
+                        !compiledValue.Contains(
+                            "@(",
+                            StringComparison.Ordinal) &&
+                        !compiledValue.Contains(
+                            "%(",
+                            StringComparison.Ordinal))
+                    {
+                        return compiledValue;
+                    }
+                }
+
+                string evaluatedValue =
+                    _expander.ExpandIntoStringLeaveEscaped(
+                        metadata.GetValue(index),
+                        expanderOptions,
+                        metadataElement.Location);
+                return FileUtilities.MaybeAdjustFilePath(
+                    evaluatedValue,
+                    metadata.GetDirectory(index));
+            }
+
+            private string EvaluateCompiledMetadataValueExpansion(
+                EvaluationModule module,
+                TableRange parts,
+                IElementLocation location,
+                string directory)
+            {
+                string expanded;
+                if (parts.Count == 1)
+                {
+                    expanded = EvaluateCompiledMetadataValueExpansionPart(
+                        module,
+                        parts.Start,
+                        location);
+                }
+                else if (parts.Count == 2)
+                {
+                    expanded = string.Concat(
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start,
+                            location),
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start + 1,
+                            location));
+                }
+                else if (parts.Count == 3)
+                {
+                    expanded = string.Concat(
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start,
+                            location),
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start + 1,
+                            location),
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start + 2,
+                            location));
+                }
+                else if (parts.Count == 4)
+                {
+                    expanded = string.Concat(
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start,
+                            location),
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start + 1,
+                            location),
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start + 2,
+                            location),
+                        EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start + 3,
+                            location));
+                }
+                else
+                {
+                    var builder = new StringBuilder();
+                    int end = parts.Start + parts.Count;
+                    for (int i = parts.Start; i < end; i++)
+                    {
+                        builder.Append(
+                            EvaluateCompiledMetadataValueExpansionPart(
+                                module,
+                                i,
+                                location));
+                    }
+
+                    expanded = builder.ToString();
+                }
+
+                return FileUtilities.MaybeAdjustFilePath(
+                    expanded,
+                    directory);
+            }
+
+            private string EvaluateCompiledMetadataValueExpansionPart(
+                EvaluationModule module,
+                int partIndex,
+                IElementLocation location)
+            {
+                CompiledMetadataValuePart part =
+                    module.CompiledMetadataValueParts[partIndex];
+                switch (part.Kind)
+                {
+                    case CompiledMetadataValuePartKind.Literal:
+                        return module.GetStringValue(part.Value);
+                    case CompiledMetadataValuePartKind.Property:
+                        return EvaluateCompiledMetadataProperty(
+                            module,
+                            part.Value,
+                            location,
+                            unescape: false);
+                    case CompiledMetadataValuePartKind.Metadata:
+                        string itemType =
+                            module.GetStringValue(part.Value);
+                        string metadataName =
+                            module.GetStringValue(part.Count);
+                        return itemType.Length == 0
+                            ? _expander.Metadata.GetEscapedValue(metadataName)
+                            : _expander.Metadata.GetEscapedValue(
+                                itemType,
+                                metadataName);
+                    default:
+                        throw new InternalErrorException(
+                            "Unknown compiled metadata value part.");
                 }
             }
 

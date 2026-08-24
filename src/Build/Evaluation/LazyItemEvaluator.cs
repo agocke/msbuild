@@ -680,6 +680,11 @@ namespace Microsoft.Build.Evaluation
                     ? -1
                     : GetTemplate(index).CompiledConditionId;
 
+            internal TableRange GetCompiledValueParts(int index) =>
+                _module is null
+                    ? new TableRange(-1, 0)
+                    : GetTemplate(index).CompiledValueParts;
+
             internal EvaluationModule Module => _module;
 
             internal string GetValue(int index) =>
