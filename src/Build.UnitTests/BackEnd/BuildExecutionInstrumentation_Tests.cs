@@ -36,6 +36,13 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             {
             }
 
+            using (BuildExecutionInstrumentation.Measure(
+                       BuildExecutionMetric.TaskResolve,
+                       "GetRestoreProjectReferencesTask",
+                       "_GenerateRestoreGraphProjectEntry"))
+            {
+            }
+
             long dispatchStart =
                 BuildExecutionInstrumentation.StartTimestamp();
             BuildExecutionInstrumentation.RecordSince(
@@ -61,6 +68,15 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
                     measurement.Value == 1 &&
                     measurement.Tags["metric"] as string ==
                     nameof(BuildExecutionMetric.Task));
+            measurements.ShouldContain(
+                measurement =>
+                    measurement.MeterName ==
+                    BuildExecutionInstrumentation.MeterName &&
+                    measurement.InstrumentName ==
+                    BuildExecutionInstrumentation
+                        .ElapsedInstrumentName &&
+                    measurement.Tags["metric"] as string ==
+                    nameof(BuildExecutionMetric.TaskResolve));
             measurements.ShouldContain(
                 measurement =>
                     measurement.MeterName ==
