@@ -820,32 +820,61 @@ namespace Microsoft.Build.BackEnd
             WorkUnitResultCode aggregatedTaskResult = WorkUnitResultCode.Success;
             WorkUnitActionCode finalActionCode = WorkUnitActionCode.Continue;
             WorkUnitResult lastResult = new WorkUnitResult(WorkUnitResultCode.Success, WorkUnitActionCode.Continue, null);
+            FastTaskExecutionFrame fastTaskFrame = null;
 
             int currentTask = 0;
 
-            // Walk through all of the tasks and execute them in order.
-            for (; (currentTask < _target.Children.Count) && !_cancellationToken.IsCancellationRequested; ++currentTask)
+            try
             {
-                ProjectTargetInstanceChild targetChildInstance = _target.Children[currentTask];
-                CompiledTaskAction action = _compiledTargetPlan?.GetAction(currentTask);
-
-                // Execute the task.
-                lastResult = await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, action, mode, lookupForInference, lookupForExecution, _cancellationToken);
-
-                if (lastResult.ResultCode == WorkUnitResultCode.Failed)
+                // Walk through all of the tasks and execute them in order.
+                for (; (currentTask < _target.Children.Count) && !_cancellationToken.IsCancellationRequested; ++currentTask)
                 {
-                    aggregatedTaskResult = WorkUnitResultCode.Failed;
-                }
-                else if (lastResult.ResultCode == WorkUnitResultCode.Success && aggregatedTaskResult != WorkUnitResultCode.Failed)
-                {
-                    aggregatedTaskResult = WorkUnitResultCode.Success;
-                }
+                    ProjectTargetInstanceChild targetChildInstance = _target.Children[currentTask];
+                    CompiledTaskAction action = _compiledTargetPlan?.GetAction(currentTask);
+                    FastTaskAction fastAction = action?.GetFastAction();
 
-                if (lastResult.ActionCode == WorkUnitActionCode.Stop)
-                {
-                    finalActionCode = WorkUnitActionCode.Stop;
-                    break;
+                    if (fastAction != null &&
+                        (mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) != 0 &&
+                        targetChildInstance is ProjectTaskInstance taskInstance)
+                    {
+                        fastTaskFrame ??= new FastTaskExecutionFrame(
+                            _host,
+                            _requestEntry,
+                            _targetBuilderCallback,
+                            targetLoggingContext,
+                            taskInstance,
+                            lookupForExecution,
+                            _cancellationToken);
+                        fastTaskFrame.SetTaskInstance(taskInstance);
+
+                        lastResult = fastAction.CanExecute(fastTaskFrame)
+                            ? fastAction.Execute(fastTaskFrame)
+                            : await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, action, mode, lookupForInference, lookupForExecution, _cancellationToken);
+                    }
+                    else
+                    {
+                        lastResult = await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, action, mode, lookupForInference, lookupForExecution, _cancellationToken);
+                    }
+
+                    if (lastResult.ResultCode == WorkUnitResultCode.Failed)
+                    {
+                        aggregatedTaskResult = WorkUnitResultCode.Failed;
+                    }
+                    else if (lastResult.ResultCode == WorkUnitResultCode.Success && aggregatedTaskResult != WorkUnitResultCode.Failed)
+                    {
+                        aggregatedTaskResult = WorkUnitResultCode.Success;
+                    }
+
+                    if (lastResult.ActionCode == WorkUnitActionCode.Stop)
+                    {
+                        finalActionCode = WorkUnitActionCode.Stop;
+                        break;
+                    }
                 }
+            }
+            finally
+            {
+                fastTaskFrame?.Dispose();
             }
 
             if (_cancellationToken.IsCancellationRequested)

@@ -29,7 +29,7 @@ namespace Microsoft.Build.BackEnd
         internal const string EnablePartialEvaluationEnvVarName =
             "MSBUILDENABLEACTIONGRAPHPARTIALEVALUATION";
 
-        internal static readonly bool IsPartialEvaluationEnabled =
+        internal static bool IsPartialEvaluationEnabled =>
             Environment.GetEnvironmentVariable(EnablePartialEvaluationEnvVarName) == "1";
 
         private static readonly ConditionalWeakTable<ProjectInstance, PartiallyEvaluatedProject> s_projects = new();
@@ -159,6 +159,8 @@ namespace Microsoft.Build.BackEnd
                 : Bind(registration);
         }
 
+        internal FastTaskAction GetFastAction() => GetBoundAction()?.FastAction;
+
         internal BoundTaskAction TryBind(TaskRequirements requirements, TaskFactoryWrapper taskFactoryWrapper)
         {
             BoundTaskAction action = Volatile.Read(ref _boundAction);
@@ -247,13 +249,15 @@ namespace Microsoft.Build.BackEnd
             TaskActionTypeMetadata typeMetadata,
             BoundTaskParameter[] parameters,
             string[] requiredParameterNames,
-            ulong allRequiredParameters)
+            ulong allRequiredParameters,
+            FastTaskAction fastAction)
         {
             TaskFactoryWrapper = taskFactoryWrapper;
             TypeMetadata = typeMetadata;
             Parameters = parameters;
             RequiredParameterNames = requiredParameterNames;
             AllRequiredParameters = allRequiredParameters;
+            FastAction = fastAction;
         }
 
         internal TaskFactoryWrapper TaskFactoryWrapper { get; }
@@ -267,6 +271,8 @@ namespace Microsoft.Build.BackEnd
         internal string[] RequiredParameterNames { get; }
 
         internal ulong AllRequiredParameters { get; }
+
+        internal FastTaskAction FastAction { get; }
 
         internal static BoundTaskAction TryCreate(
             TaskActionTemplate template,
@@ -344,12 +350,23 @@ namespace Microsoft.Build.BackEnd
             ulong allRequiredParameters = requiredParameterNames.Length == 64
                 ? ulong.MaxValue
                 : (1UL << requiredParameterNames.Length) - 1;
+
+            FastTaskAction fastAction = FastTaskAction.TryCreate(
+                template,
+                taskFactoryWrapper,
+                loadedType,
+                metadata,
+                boundParameters,
+                requiredParameterNames,
+                allRequiredParameters);
+
             return new BoundTaskAction(
                 taskFactoryWrapper,
                 metadata,
                 boundParameters,
                 requiredParameterNames,
-                allRequiredParameters);
+                allRequiredParameters,
+                fastAction);
         }
 
         private static int FindPropertyIndex(LoadedType loadedType, string parameterName)

@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Threading;
 #if FEATURE_ASSEMBLYLOADCONTEXT
 using System.Reflection;
 using System.Runtime.Loader;
@@ -22,6 +23,12 @@ using Xunit;
 
 namespace Microsoft.Build.UnitTests.BackEnd
 {
+    [CollectionDefinition(nameof(CompiledActionGraph_Tests), DisableParallelization = true)]
+    public sealed class CompiledActionGraphTestCollection
+    {
+    }
+
+    [Collection(nameof(CompiledActionGraph_Tests))]
     public class CompiledActionGraph_Tests
     {
         [Fact]
@@ -75,6 +82,95 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Same(
                 firstAction.GetBoundAction().TaskFactoryWrapper,
                 secondAction.GetBoundAction().TaskFactoryWrapper);
+            Assert.NotNull(secondAction.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionPreservesConstructorFailure()
+        {
+            using TestEnvironment environment = TestEnvironment.Create(ignoreBuildErrorFiles: true);
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" Behavior="ArmConstructorFailure" />
+                <CompiledActionGraphTestTask Text="direct" ContinueOnError="WarnAndContinue" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(instance, instance.Targets["Build"]).GetAction(1);
+
+            MockLogger logger = Build(instance, out BuildResult result, allowTaskCrashes: true);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+            logger.AssertLogContains("fast-action-constructor-failure");
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionPreservesBodyExceptionAndWarnAndContinue()
+        {
+            using TestEnvironment environment = TestEnvironment.Create(ignoreBuildErrorFiles: true);
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" Behavior="Throw" ContinueOnError="WarnAndContinue" />
+                <CompiledActionGraphTestTask Text="after" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(instance, instance.Targets["Build"]).GetAction(1);
+
+            MockLogger logger = Build(instance, out BuildResult result, allowTaskCrashes: true);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("fast-action-body-failure");
+            logger.AssertLogContains("compiled-action:after:0:");
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionUsesPostBodyBuildEngineForFalseWithoutErrorPolicy()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" Behavior="ClearBuildEngineAndReturnFalse" ContinueOnError="ErrorAndContinue" />
+                <CompiledActionGraphTestTask Text="after" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(instance, instance.Targets["Build"]).GetAction(1);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+            logger.AssertLogDoesntContain("MSB4181");
+            logger.AssertLogContains("compiled-action:after:0:");
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionCancellationStateCancelsCurrentTask()
+        {
+            CompiledActionGraphTestTask.ResetState();
+            using var cancellationSource = new CancellationTokenSource();
+            using var cancellationState = new FastTaskCancellationState(cancellationSource.Token);
+            var task = new CompiledActionGraphTestTask();
+
+            cancellationSource.Cancel();
+            cancellationState.SetCurrentTask(task, taskLoggingContext: null, template: null);
+
+            Assert.True(CompiledActionGraphTestTask.CancellationObserved);
+            Assert.True(cancellationState.IsCancellationRequested);
         }
 
         [Fact]
@@ -304,10 +400,25 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
     }
 
-    public sealed class CompiledActionGraphTestTask : Microsoft.Build.Utilities.Task
+    public sealed class CompiledActionGraphTestTask : Microsoft.Build.Utilities.Task, ICancelableTask
     {
+        private static int s_failNextConstructor;
+        private static int s_cancellationObserved;
+
+        public CompiledActionGraphTestTask()
+        {
+            if (Interlocked.Exchange(ref s_failNextConstructor, 0) != 0)
+            {
+                throw new InvalidOperationException("fast-action-constructor-failure");
+            }
+        }
+
+        internal static bool CancellationObserved => Volatile.Read(ref s_cancellationObserved) != 0;
+
         [Required]
         public string Text { get; set; }
+
+        public string Behavior { get; set; }
 
         public int Number { get; set; }
 
@@ -329,8 +440,32 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
         public override bool Execute()
         {
+            if (string.Equals(Behavior, "ArmConstructorFailure", StringComparison.Ordinal))
+            {
+                Volatile.Write(ref s_failNextConstructor, 1);
+            }
+            else if (string.Equals(Behavior, "Throw", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("fast-action-body-failure");
+            }
+            else if (string.Equals(Behavior, "ClearBuildEngineAndReturnFalse", StringComparison.Ordinal))
+            {
+                BuildEngine = null;
+                return false;
+            }
             Log.LogMessage(MessageImportance.High, "compiled-action:{0}:{1}:{2}", Text, Number, string.Join(",", Values ?? Array.Empty<string>()));
             return true;
+        }
+
+        public void Cancel()
+        {
+            Volatile.Write(ref s_cancellationObserved, 1);
+        }
+
+        internal static void ResetState()
+        {
+            Volatile.Write(ref s_failNextConstructor, 0);
+            Volatile.Write(ref s_cancellationObserved, 0);
         }
     }
 }

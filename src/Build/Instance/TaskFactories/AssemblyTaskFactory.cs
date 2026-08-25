@@ -349,7 +349,7 @@ namespace Microsoft.Build.BackEnd
                 }
             }
 
-            taskLoggingContext?.TargetLoggingContext?.ProjectLoggingContext?.ProjectTelemetry?.AddTaskExecution(GetType().FullName, isTaskHost: useTaskFactory);
+            RecordTaskExecutionTelemetry(taskLoggingContext, isTaskHost: useTaskFactory);
 
             if (useTaskFactory)
             {
@@ -418,12 +418,25 @@ namespace Microsoft.Build.BackEnd
                 // Track non-sealed subclasses of Microsoft-owned MSBuild tasks
                 if (taskInstance != null)
                 {
-                    bool isMicrosoftOwned = IsMicrosoftAuthoredTask();
-                    taskLoggingContext?.TargetLoggingContext?.ProjectLoggingContext?.ProjectTelemetry?.TrackTaskSubclassing(_loadedType.Type, isMicrosoftOwned);
+                    RecordTaskSubclassingTelemetry(taskLoggingContext);
                 }
 
                 return taskInstance;
             }
+        }
+
+        internal void RecordTaskExecutionTelemetry(TaskLoggingContext taskLoggingContext, bool isTaskHost)
+        {
+            taskLoggingContext?.TargetLoggingContext?.ProjectLoggingContext?.ProjectTelemetry?.AddTaskExecution(
+                GetType().FullName,
+                isTaskHost);
+        }
+
+        internal void RecordTaskSubclassingTelemetry(TaskLoggingContext taskLoggingContext)
+        {
+            taskLoggingContext?.TargetLoggingContext?.ProjectLoggingContext?.ProjectTelemetry?.TrackTaskSubclassing(
+                _loadedType.Type,
+                IsMicrosoftAuthoredTask());
         }
 
         /// <summary>
