@@ -94,6 +94,11 @@ namespace Microsoft.Build.BackEnd
         private ProjectTargetInstance _target;
 
         /// <summary>
+        /// The optional compiled task-site plan for <see cref="_target"/>.
+        /// </summary>
+        private CompiledTargetPlan _compiledTargetPlan;
+
+        /// <summary>
         /// The current state of this entry
         /// </summary>
         private TargetEntryState _state;
@@ -822,9 +827,10 @@ namespace Microsoft.Build.BackEnd
             for (; (currentTask < _target.Children.Count) && !_cancellationToken.IsCancellationRequested; ++currentTask)
             {
                 ProjectTargetInstanceChild targetChildInstance = _target.Children[currentTask];
+                CompiledTaskAction action = _compiledTargetPlan?.GetAction(currentTask);
 
                 // Execute the task.
-                lastResult = await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, mode, lookupForInference, lookupForExecution, _cancellationToken);
+                lastResult = await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, action, mode, lookupForInference, lookupForExecution, _cancellationToken);
 
                 if (lastResult.ResultCode == WorkUnitResultCode.Failed)
                 {
@@ -930,6 +936,11 @@ namespace Microsoft.Build.BackEnd
                 _targetSpecification.ReferenceLocation ?? _requestEntry.RequestConfiguration.Project.ProjectFileLocation,
                 "TargetDoesNotExist",
                 _targetSpecification.TargetName);
+
+            if (CompiledTargetPlan.IsPartialEvaluationEnabled)
+            {
+                _compiledTargetPlan = CompiledTargetPlan.PartiallyEvaluate(_requestEntry.RequestConfiguration.Project, _target);
+            }
         }
     }
 }

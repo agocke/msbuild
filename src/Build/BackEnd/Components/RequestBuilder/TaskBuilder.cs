@@ -85,6 +85,11 @@ namespace Microsoft.Build.BackEnd
         private ProjectTaskInstance _taskNode;
 
         /// <summary>
+        /// The project-bound action for the current task site, when the action-graph feature is enabled.
+        /// </summary>
+        private CompiledTaskAction _compiledTaskAction;
+
+        /// <summary>
         /// Host callback for host-aware tasks.
         /// </summary>
         private ITaskHost _taskHostObject;
@@ -133,6 +138,7 @@ namespace Microsoft.Build.BackEnd
         /// <param name="requestEntry">The build request entry being built</param>
         /// <param name="targetBuilderCallback">The target builder callback.</param>
         /// <param name="taskInstance">The task instance.</param>
+        /// <param name="action">The optional compiled action for this task site.</param>
         /// <param name="mode">The mode in which to execute tasks.</param>
         /// <param name="inferLookup">The lookup to be used for inference.</param>
         /// <param name="executeLookup">The lookup to be used during execution.</param>
@@ -146,7 +152,7 @@ namespace Microsoft.Build.BackEnd
         /// 3. If the task is not batched, execute it.
         /// 4. If the task was batched, hold on to its Lookup until all of the natches are done, then merge them.
         /// </remarks>
-        public async Task<WorkUnitResult> ExecuteTask(TargetLoggingContext loggingContext, BuildRequestEntry requestEntry, ITargetBuilderCallback targetBuilderCallback, ProjectTargetInstanceChild taskInstance, TaskExecutionMode mode, Lookup inferLookup, Lookup executeLookup, CancellationToken cancellationToken)
+        public async Task<WorkUnitResult> ExecuteTask(TargetLoggingContext loggingContext, BuildRequestEntry requestEntry, ITargetBuilderCallback targetBuilderCallback, ProjectTargetInstanceChild taskInstance, CompiledTaskAction action, TaskExecutionMode mode, Lookup inferLookup, Lookup executeLookup, CancellationToken cancellationToken)
         {
             Assumed.NotNull(taskInstance, "Need to specify the task instance.");
 
@@ -155,6 +161,7 @@ namespace Microsoft.Build.BackEnd
             _targetBuilderCallback = targetBuilderCallback;
             _cancellationToken = cancellationToken;
             _targetChildInstance = taskInstance;
+            _compiledTaskAction = action;
 
             // In the case of Intrinsic tasks, taskNode will end up null.  Currently this is how we distinguish
             // intrinsic from extrinsic tasks.
@@ -456,18 +463,48 @@ namespace Microsoft.Build.BackEnd
 
                 if (howToExecuteTask == TaskExecutionMode.ExecuteTaskAndGatherOutputs)
                 {
-                    // We need to find the task before logging the task started event so that the using task statement comes before the task started event
-                    TaskHostParameters taskIdentityParameters = GatherTaskIdentityParameters(bucket.Expander);
-                    (TaskRequirements? requirements, TaskFactoryWrapper taskFactoryWrapper) task;
-                    using (BuildExecutionInstrumentation.Measure(
-                               BuildExecutionMetric.TaskResolve,
-                               BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
-                               _targetLoggingContext.Target.Name))
+                    BoundTaskAction boundAction = _compiledTaskAction?.GetBoundAction();
+                    if (!CanExecuteBoundAction(boundAction))
                     {
-                        task = _taskExecutionHost.FindTask(taskIdentityParameters);
+                        boundAction = null;
                     }
 
-                    (TaskRequirements? requirements, TaskFactoryWrapper taskFactoryWrapper) = task;
+                    TaskHostParameters taskIdentityParameters = TaskHostParameters.Empty;
+                    TaskRequirements? requirements;
+                    TaskFactoryWrapper taskFactoryWrapper;
+
+                    if (boundAction != null)
+                    {
+                        requirements = TaskRequirements.None;
+                        taskFactoryWrapper = boundAction.TaskFactoryWrapper;
+                    }
+                    else
+                    {
+                        // We need to find the task before logging the task started event so that the using task statement comes before the task started event.
+                        taskIdentityParameters = GatherTaskIdentityParameters(bucket.Expander);
+                        (TaskRequirements? resolvedRequirements, TaskFactoryWrapper resolvedTaskFactoryWrapper) task;
+                        using (BuildExecutionInstrumentation.Measure(
+                                   BuildExecutionMetric.TaskResolve,
+                                   BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
+                                   _targetLoggingContext.Target.Name))
+                        {
+                            task = _taskExecutionHost.FindTask(taskIdentityParameters);
+                        }
+
+                        requirements = task.resolvedRequirements;
+                        taskFactoryWrapper = task.resolvedTaskFactoryWrapper;
+                        if (requirements != null)
+                        {
+                            BoundTaskAction candidate = _compiledTaskAction?.TryBind(
+                                requirements.Value,
+                                taskFactoryWrapper);
+                            if (CanExecuteBoundAction(candidate))
+                            {
+                                boundAction = candidate;
+                            }
+                        }
+                    }
+
                     string taskAssemblyLocation = taskFactoryWrapper?.TaskFactoryLoadedType?.Path;
 
                     if (requirements != null)
@@ -503,7 +540,14 @@ namespace Microsoft.Build.BackEnd
                             }
                             else
                             {
-                                taskResult = await InitializeAndExecuteTask(taskLoggingContext, bucket, taskIdentityParameters, taskHost, howToExecuteTask);
+                                taskResult = await InitializeAndExecuteTask(
+                                    taskLoggingContext,
+                                    bucket,
+                                    taskIdentityParameters,
+                                    taskHost,
+                                    howToExecuteTask,
+                                    boundAction == null ? null : _compiledTaskAction,
+                                    boundAction);
                             }
 
                             if (lookupHash != null)
@@ -570,6 +614,17 @@ namespace Microsoft.Build.BackEnd
             }
 
             return taskResult;
+        }
+
+        private bool CanExecuteBoundAction(BoundTaskAction action)
+        {
+            if (action == null || _taskHostObject != null)
+            {
+                return false;
+            }
+
+            return !_componentHost.BuildParameters.MultiThreaded ||
+                !TaskRouter.NeedsTaskHostInMultiThreadedMode(action.TaskType);
         }
 
         /// <summary>
@@ -699,7 +754,14 @@ namespace Microsoft.Build.BackEnd
         /// <summary>
         /// Initializes and executes the task.
         /// </summary>
-        private async Task<WorkUnitResult> InitializeAndExecuteTask(TaskLoggingContext taskLoggingContext, ItemBucket bucket, TaskHostParameters taskIdentityParameters, TaskHost taskHost, TaskExecutionMode howToExecuteTask)
+        private async Task<WorkUnitResult> InitializeAndExecuteTask(
+            TaskLoggingContext taskLoggingContext,
+            ItemBucket bucket,
+            TaskHostParameters taskIdentityParameters,
+            TaskHost taskHost,
+            TaskExecutionMode howToExecuteTask,
+            CompiledTaskAction compiledTaskAction = null,
+            BoundTaskAction boundAction = null)
         {
             bool initialized;
             using (BuildExecutionInstrumentation.Measure(
@@ -707,7 +769,9 @@ namespace Microsoft.Build.BackEnd
                        BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
                        _targetLoggingContext.Target.Name))
             {
-                initialized = _taskExecutionHost.InitializeForBatch(taskLoggingContext, bucket, taskIdentityParameters, _buildRequestEntry.Request.ScheduledNodeId);
+                initialized = boundAction == null
+                    ? _taskExecutionHost.InitializeForBatch(taskLoggingContext, bucket, taskIdentityParameters, _buildRequestEntry.Request.ScheduledNodeId)
+                    : _taskExecutionHost.InitializeForCompiledBatch(taskLoggingContext, bucket, boundAction, _buildRequestEntry.Request.ScheduledNodeId);
             }
 
             if (!initialized)
@@ -721,7 +785,7 @@ namespace Microsoft.Build.BackEnd
             {
                 // UNDONE: Move this and the task host.
                 taskHost.LoggingContext = taskLoggingContext;
-                return await ExecuteInstantiatedTask(_taskExecutionHost, taskLoggingContext, taskHost, bucket, howToExecuteTask);
+                return await ExecuteInstantiatedTask(_taskExecutionHost, taskLoggingContext, taskHost, bucket, howToExecuteTask, compiledTaskAction, boundAction);
             }
             finally
             {
@@ -792,8 +856,17 @@ namespace Microsoft.Build.BackEnd
         /// <param name="taskHost">The task host for the task.</param>
         /// <param name="bucket">The batching bucket</param>
         /// <param name="howToExecuteTask">The task execution mode</param>
+        /// <param name="compiledTaskAction">The optional compiled action that binds the task site.</param>
+        /// <param name="boundAction">The selected project-bound task action.</param>
         /// <returns>The result of running the task.</returns>
-        private async ValueTask<WorkUnitResult> ExecuteInstantiatedTask(TaskExecutionHost taskExecutionHost, TaskLoggingContext taskLoggingContext, TaskHost taskHost, ItemBucket bucket, TaskExecutionMode howToExecuteTask)
+        private async ValueTask<WorkUnitResult> ExecuteInstantiatedTask(
+            TaskExecutionHost taskExecutionHost,
+            TaskLoggingContext taskLoggingContext,
+            TaskHost taskHost,
+            ItemBucket bucket,
+            TaskExecutionMode howToExecuteTask,
+            CompiledTaskAction compiledTaskAction = null,
+            BoundTaskAction boundAction = null)
         {
             UpdateContinueOnError(bucket, taskHost);
 
@@ -808,7 +881,9 @@ namespace Microsoft.Build.BackEnd
                        BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
                        _targetLoggingContext.Target.Name))
             {
-                parametersSet = taskExecutionHost.SetTaskParameters(_taskNode.ParametersForBuild);
+                parametersSet = compiledTaskAction == null
+                    ? taskExecutionHost.SetTaskParameters(_taskNode.ParametersForBuild)
+                    : compiledTaskAction.Invoke(new CompiledTaskActionFrame(taskExecutionHost, boundAction));
             }
 
             if (!parametersSet)

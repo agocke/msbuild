@@ -551,6 +551,22 @@ namespace Microsoft.Build.BackEnd
         }
 
         /// <summary>
+        /// Initializes a batch using a registration already selected by a compiled task action.
+        /// </summary>
+        internal bool InitializeForCompiledBatch(
+            TaskLoggingContext loggingContext,
+            ItemBucket batchBucket,
+            BoundTaskAction action,
+            int scheduledNodeId)
+        {
+            ArgumentNullException.ThrowIfNull(action);
+
+            _taskFactoryWrapper = action.TaskFactoryWrapper;
+            _registeredTaskFactory = null;
+            return InitializeForBatch(loggingContext, batchBucket, TaskHostParameters.Empty, scheduledNodeId);
+        }
+
+        /// <summary>
         /// Sets all of the specified parameters on the task.
         /// </summary>
         /// <param name="parameters">The name/value pairs for the parameters.</param>
@@ -630,6 +646,132 @@ namespace Microsoft.Build.BackEnd
             }
 
             return taskInitialized;
+        }
+
+        /// <summary>
+        /// Binds the prevalidated, source-ordered inputs of a compiled task action.
+        /// </summary>
+        internal bool SetCompiledTaskParameters(BoundTaskAction action, TaskActionTypeMetadata metadata)
+        {
+            ulong requiredSet = 0;
+            bool taskInitialized = true;
+
+            foreach (BoundTaskParameter binding in action.Parameters)
+            {
+                bool taskParameterSet = false;
+                bool success;
+                try
+                {
+                    success = SetCompiledTaskParameter(binding, metadata.GetProperty(binding.PropertyIndex), out taskParameterSet);
+                }
+                catch (Exception e) when (!ExceptionHandling.NotExpectedReflectionException(e))
+                {
+                    _taskLoggingContext.LogError(new BuildEventFileInfo(_taskLocation), "TaskParametersError", _taskName, e.Message);
+                    success = false;
+                }
+
+                if (!success)
+                {
+                    taskInitialized = false;
+                    break;
+                }
+
+                if (taskParameterSet)
+                {
+                    requiredSet |= binding.RequiredBit;
+                }
+            }
+
+            if (TaskInstance is IIncrementalTask incrementalTask)
+            {
+                incrementalTask.FailIfNotIncremental = _buildComponentHost.BuildParameters.Question;
+            }
+
+            if (taskInitialized && requiredSet != action.AllRequiredParameters)
+            {
+                for (int i = 0; i < action.RequiredParameterNames.Length; i++)
+                {
+                    if ((requiredSet & (1UL << i)) == 0)
+                    {
+                        ProjectErrorUtilities.VerifyThrowInvalidProject(
+                            false,
+                            _taskLocation,
+                            "RequiredPropertyNotSetError",
+                            _taskName,
+                            action.RequiredParameterNames[i]);
+                    }
+                }
+            }
+
+            return taskInitialized;
+        }
+
+        private bool SetCompiledTaskParameter(
+            BoundTaskParameter binding,
+            TaskActionPropertyMetadata propertyMetadata,
+            out bool parameterSet)
+        {
+            TaskActionParameter source = binding.Source;
+            parameterSet = false;
+
+            try
+            {
+                EnsureParameterInitialized(binding.Property, _batchBucket.Lookup);
+
+                bool success;
+                if (TaskParameterTypeVerifier.IsValidScalarInputParameter(propertyMetadata.ParameterType))
+                {
+                    success = InitializeTaskScalarParameter(
+                        binding.Property,
+                        propertyMetadata.ParameterType,
+                        source.Value,
+                        source.Location,
+                        out parameterSet,
+                        propertyMetadata.Setter);
+                }
+                else if (TaskParameterTypeVerifier.IsValidVectorInputParameter(propertyMetadata.ParameterType))
+                {
+                    success = InitializeTaskVectorParameter(
+                        binding.Property,
+                        propertyMetadata.ParameterType,
+                        source.Value,
+                        source.Location,
+                        binding.RequiredBit != 0,
+                        out parameterSet,
+                        propertyMetadata.Setter);
+                }
+                else
+                {
+                    _taskLoggingContext.LogError(
+                        new BuildEventFileInfo(source.Location),
+                        "UnsupportedTaskParameterTypeError",
+                        propertyMetadata.ParameterType.FullName,
+                        binding.Property.Name,
+                        _taskName);
+                    success = false;
+                }
+
+                if (!success)
+                {
+                    _taskLoggingContext.LogError(
+                        new BuildEventFileInfo(source.Location),
+                        "InvalidTaskAttributeError",
+                        source.Name,
+                        source.Value,
+                        _taskName);
+                }
+
+                return success;
+            }
+            catch (ArgumentException)
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    source.Location,
+                    "SetAccessorNotAvailableOnTaskParameter",
+                    source.Name,
+                    _taskName);
+                return false;
+            }
         }
 
         /// <summary>
@@ -958,17 +1100,21 @@ namespace Microsoft.Build.BackEnd
         /// <summary>
         /// Called on the local side.
         /// </summary>
-        private bool SetTaskItemParameter(TaskPropertyInfo parameter, ITaskItem item)
+        private bool SetTaskItemParameter(TaskPropertyInfo parameter, ITaskItem item, Action<ITask, object> setter = null)
         {
-            return InternalSetTaskParameter(parameter, item);
+            return InternalSetTaskParameter(parameter, item, setter);
         }
 
         /// <summary>
         /// Called on the local side.
         /// </summary>
-        private bool SetValueParameter(TaskPropertyInfo parameter, Type parameterType, string expandedParameterValue)
+        private bool SetValueParameter(
+            TaskPropertyInfo parameter,
+            Type parameterType,
+            string expandedParameterValue,
+            Action<ITask, object> setter = null)
         {
-            return InternalSetTaskParameter(parameter, ConvertStringToParameterValue(expandedParameterValue, parameterType));
+            return InternalSetTaskParameter(parameter, ConvertStringToParameterValue(expandedParameterValue, parameterType), setter);
         }
 
         /// <summary>
@@ -1000,7 +1146,12 @@ namespace Microsoft.Build.BackEnd
         /// <summary>
         /// Called on the local side.
         /// </summary>
-        private bool SetParameterArray(TaskPropertyInfo parameter, Type parameterType, IList<TaskItem> taskItems, ElementLocation parameterLocation)
+        private bool SetParameterArray(
+            TaskPropertyInfo parameter,
+            Type parameterType,
+            IList<TaskItem> taskItems,
+            ElementLocation parameterLocation,
+            Action<ITask, object> setter = null)
         {
             TaskItem currentItem = null;
 
@@ -1022,7 +1173,7 @@ namespace Microsoft.Build.BackEnd
                         finalInputs[i] = item;
                     }
 
-                    return InternalSetTaskParameter(parameter, finalInputs);
+                    return InternalSetTaskParameter(parameter, finalInputs, setter);
                 }
                 else if (TaskParameterTypeVerifier.TryGetSupportedTaskItemValueType(elementType, out Type taskItemValueType))
                 {
@@ -1042,7 +1193,7 @@ namespace Microsoft.Build.BackEnd
                         finalInputs.SetValue(taskItemOfT, i);
                     }
 
-                    return InternalSetTaskParameter(parameter, finalInputs);
+                    return InternalSetTaskParameter(parameter, finalInputs, setter);
                 }
                 else if (parameterType == typeof(string[]))
                 {
@@ -1053,7 +1204,7 @@ namespace Microsoft.Build.BackEnd
                         finalInputs[i] = currentItem.ItemSpec;
                     }
 
-                    return InternalSetTaskParameter(parameter, finalInputs);
+                    return InternalSetTaskParameter(parameter, finalInputs, setter);
                 }
                 else if (parameterType == typeof(bool[]))
                 {
@@ -1064,7 +1215,7 @@ namespace Microsoft.Build.BackEnd
                         finalInputs[i] = ConversionUtilities.ConvertStringToBool(currentItem.ItemSpec);
                     }
 
-                    return InternalSetTaskParameter(parameter, finalInputs);
+                    return InternalSetTaskParameter(parameter, finalInputs, setter);
                 }
                 else
                 {
@@ -1082,7 +1233,7 @@ namespace Microsoft.Build.BackEnd
                         finalTaskInputs.SetValue(ConvertStringToParameterValue(item.ItemSpec, elementType), i);
                     }
 
-                    return InternalSetTaskParameter(parameter, finalTaskInputs);
+                    return InternalSetTaskParameter(parameter, finalTaskInputs, setter);
                 }
             }
             catch (Exception ex)
@@ -1547,7 +1698,8 @@ namespace Microsoft.Build.BackEnd
             Type parameterType,
             string parameterValue,
             ElementLocation parameterLocation,
-            out bool taskParameterSet)
+            out bool taskParameterSet,
+            Action<ITask, object> setter = null)
         {
             taskParameterSet = false;
 
@@ -1587,11 +1739,11 @@ namespace Microsoft.Build.BackEnd
                         if (isSupportedTypedTaskItem)
                         {
                             ITaskItem taskItemOfT = CreateTaskItemOfT(taskItemValueType, finalTaskItems[0]);
-                            success = InternalSetTaskParameter(parameter, taskItemOfT);
+                            success = InternalSetTaskParameter(parameter, taskItemOfT, setter);
                         }
                         else
                         {
-                            success = SetTaskItemParameter(parameter, finalTaskItems[0]);
+                            success = SetTaskItemParameter(parameter, finalTaskItems[0], setter);
                         }
 
                         taskParameterSet = true;
@@ -1608,7 +1760,7 @@ namespace Microsoft.Build.BackEnd
                     }
                     else
                     {
-                        success = SetValueParameter(parameter, parameterType, expandedParameterValue);
+                        success = SetValueParameter(parameter, parameterType, expandedParameterValue, setter);
                         taskParameterSet = true;
                     }
                 }
@@ -1685,7 +1837,8 @@ namespace Microsoft.Build.BackEnd
             string parameterValue,
             ElementLocation parameterLocation,
             bool isRequired,
-            out bool taskParameterSet)
+            out bool taskParameterSet,
+            Action<ITask, object> setter = null)
         {
             Assumed.NotNull(parameterValue, "Didn't expect null parameterValue in InitializeTaskVectorParameter");
 
@@ -1702,7 +1855,7 @@ namespace Microsoft.Build.BackEnd
             {
                 // If the task parameter is not a ITaskItem[], then we need to convert
                 // all the TaskItem's in our arraylist to the appropriate datatype.
-                success = SetParameterArray(parameter, parameterType, finalTaskItems, parameterLocation);
+                success = SetParameterArray(parameter, parameterType, finalTaskItems, parameterLocation, setter);
                 taskParameterSet = true;
             }
             else
@@ -1718,7 +1871,8 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private bool InternalSetTaskParameter(
             TaskPropertyInfo parameter,
-            object parameterValue)
+            object parameterValue,
+            Action<ITask, object> setter = null)
         {
             bool success = false;
 
@@ -1742,6 +1896,31 @@ namespace Microsoft.Build.BackEnd
                             parameterValueAsList ?? (object[])[parameterValue],
                             parameter.LogItemMetadata);
                     }
+                }
+            }
+
+            if (setter != null)
+            {
+                try
+                {
+                    setter(TaskInstance, parameterValue);
+                    return true;
+                }
+                catch (TargetInvocationException e)
+                {
+                    _taskLoggingContext.LogFatalTaskError(
+                        e.InnerException,
+                        new BuildEventFileInfo(_taskLocation),
+                        _taskName);
+                    return false;
+                }
+                catch (Exception e)
+                {
+                    _taskLoggingContext.LogFatalTaskError(
+                        e,
+                        new BuildEventFileInfo(_taskLocation),
+                        _taskName);
+                    return false;
                 }
             }
 

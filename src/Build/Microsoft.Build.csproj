@@ -393,6 +393,7 @@
     <Compile Include="BackEnd\Components\RequestBuilder\IRequestBuilderCallback.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\ITargetBuilder.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\ITaskBuilder.cs" />
+    <Compile Include="BackEnd\Components\RequestBuilder\CompiledActionGraph.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\ItemBucket.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\Lookup.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\RequestBuilder.cs" />
