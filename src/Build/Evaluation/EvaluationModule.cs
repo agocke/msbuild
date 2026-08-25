@@ -1187,11 +1187,13 @@ namespace Microsoft.Build.Evaluation
             int nameStringId,
             int beforeTargetsExpressionId,
             int afterTargetsExpressionId,
+            TableRange taskPrograms,
             int sourceId)
         {
             NameStringId = nameStringId;
             BeforeTargetsExpressionId = beforeTargetsExpressionId;
             AfterTargetsExpressionId = afterTargetsExpressionId;
+            TaskPrograms = taskPrograms;
             SourceId = sourceId;
         }
 
@@ -1200,6 +1202,8 @@ namespace Microsoft.Build.Evaluation
         internal int BeforeTargetsExpressionId { get; }
 
         internal int AfterTargetsExpressionId { get; }
+
+        internal TableRange TaskPrograms { get; }
 
         internal int SourceId { get; }
     }
@@ -1251,6 +1255,7 @@ namespace Microsoft.Build.Evaluation
             MetadataTemplate[] metadata,
             UsingTaskTemplate[] usingTasks,
             TargetTemplate[] targets,
+            CompiledTaskSourceProgram[] taskPrograms,
             ExpressionCallSite[] expressions,
             ConditionCallSite[] conditions,
             string[] strings,
@@ -1300,6 +1305,7 @@ namespace Microsoft.Build.Evaluation
             Metadata = metadata;
             UsingTasks = usingTasks;
             Targets = targets;
+            TaskPrograms = taskPrograms;
             ExpressionCallSites = expressions;
             ConditionCallSites = conditions;
             _strings = strings;
@@ -1371,6 +1377,8 @@ namespace Microsoft.Build.Evaluation
         internal UsingTaskTemplate[] UsingTasks { get; }
 
         internal TargetTemplate[] Targets { get; }
+
+        internal CompiledTaskSourceProgram[] TaskPrograms { get; }
 
         internal ExpressionCallSite[] ExpressionCallSites { get; }
 
@@ -1594,6 +1602,8 @@ namespace Microsoft.Build.Evaluation
                 new List<UsingTaskTemplate>();
             private readonly List<TargetTemplate> _targets =
                 new List<TargetTemplate>();
+            private readonly List<CompiledTaskSourceProgram> _taskPrograms =
+                new List<CompiledTaskSourceProgram>();
             private readonly List<ExpressionCallSite> _expressions =
                 new List<ExpressionCallSite> { default };
             private readonly List<ConditionCallSite> _conditions =
@@ -1695,6 +1705,7 @@ namespace Microsoft.Build.Evaluation
                     _metadata.ToArray(),
                     _usingTasks.ToArray(),
                     _targets.ToArray(),
+                    _taskPrograms.ToArray(),
                     _expressions.ToArray(),
                     _conditions.ToArray(),
                     _strings.ToArray(),
@@ -1962,6 +1973,125 @@ namespace Microsoft.Build.Evaluation
             }
 
             private int AddCompiledCondition(
+                string condition,
+                int sourceId,
+                ParserOptions parserOptions =
+                    ParserOptions.AllowProperties)
+            {
+                if (string.IsNullOrEmpty(condition))
+                {
+                    return 0;
+                }
+
+                if (!CompiledConditionCompiler.TryCompile(
+                        condition,
+                        parserOptions,
+                        _sources[sourceId].ConditionLocation,
+                        out CompiledConditionProgramData program))
+                {
+                    return -1;
+                }
+
+                int propertyReadStart =
+                    _compiledConditionPropertyReads.Count;
+                for (int i = 0; i < program.PropertyNames.Length; i++)
+                {
+                    string propertyName = program.PropertyNames[i];
+                    _compiledConditionPropertyReads.Add(
+                        new CompiledPropertyExternalRead(
+                            _propertyIdentities.GetOrCreate(propertyName),
+                            GetStringId(propertyName)));
+                }
+
+                int valuePartStart = _compiledConditionValueParts.Count;
+                for (int i = 0; i < program.ValueParts.Length; i++)
+                {
+                    CompiledConditionValuePart part = program.ValueParts[i];
+                    _compiledConditionValueParts.Add(
+                        new CompiledConditionValuePart(
+                            part.Kind,
+                            part.Kind == CompiledConditionValuePartKind.Literal
+                                ? GetStringId(program.Strings[part.Value])
+                                : propertyReadStart + part.Value));
+                }
+
+                int comparisonStart =
+                    _compiledConditionComparisons.Count;
+                for (int i = 0; i < program.Comparisons.Length; i++)
+                {
+                    CompiledConditionComparison comparison =
+                        program.Comparisons[i];
+                    _compiledConditionComparisons.Add(
+                        new CompiledConditionComparison(
+                            comparison.Kind,
+                            RemapOperand(comparison.Left),
+                            RemapOperand(comparison.Right),
+                            GetStringId(
+                                program.Strings[
+                                    comparison.LeftRawStringId]),
+                            GetStringId(
+                                program.Strings[
+                                    comparison.RightRawStringId])));
+                }
+
+                int instructionStart =
+                    _compiledConditionInstructions.Count;
+                for (int i = 0; i < program.Instructions.Length; i++)
+                {
+                    CompiledConditionInstruction instruction =
+                        program.Instructions[i];
+                    int argument0 =
+                        instruction.Kind is
+                            CompiledConditionInstructionKind.BranchIfComparisonFalse or
+                            CompiledConditionInstructionKind.BranchIfComparisonTrue or
+                            CompiledConditionInstructionKind.ReturnComparison
+                            ? comparisonStart + instruction.Argument0
+                            : instruction.Argument0;
+                    _compiledConditionInstructions.Add(
+                        new CompiledConditionInstruction(
+                            instruction.Kind,
+                            argument0,
+                            instruction.Argument1));
+                }
+
+                _compiledConditions.Add(
+                    new CompiledCondition(
+                        new TableRange(
+                            instructionStart,
+                            program.Instructions.Length),
+                        sourceId));
+                return _compiledConditions.Count - 1;
+
+                CompiledConditionOperand RemapOperand(
+                    CompiledConditionOperand operand)
+                {
+                    return operand.Kind switch
+                    {
+                        CompiledConditionOperandKind.Literal =>
+                            new CompiledConditionOperand(
+                                operand.Kind,
+                                GetStringId(program.Strings[operand.Value])),
+                        CompiledConditionOperandKind.Property =>
+                            new CompiledConditionOperand(
+                                operand.Kind,
+                                propertyReadStart + operand.Value),
+                        CompiledConditionOperandKind.ExpandedValue =>
+                            new CompiledConditionOperand(
+                                operand.Kind,
+                                valuePartStart + operand.Value,
+                                operand.Count),
+                        CompiledConditionOperandKind.Metadata =>
+                            new CompiledConditionOperand(
+                                operand.Kind,
+                                GetStringId(program.Strings[operand.Value]),
+                                GetStringId(program.Strings[operand.Count])),
+                        _ => throw new InternalErrorException(
+                            "Unknown compiled condition operand."),
+                    };
+                }
+            }
+
+            private int AddCompiledConditionLegacy(
                 string condition,
                 int sourceId,
                 ParserOptions parserOptions =
@@ -3732,10 +3862,27 @@ namespace Microsoft.Build.Evaluation
             {
                 _supportsReturns |= target.Returns is not null;
                 int sourceId = AddSource(target);
+                int taskProgramStart = _taskPrograms.Count;
+                foreach (ProjectElement child in target.ChildrenEnumerable)
+                {
+                    if (child is ProjectOnErrorElement)
+                    {
+                        continue;
+                    }
+
+                    _taskPrograms.Add(
+                        child is ProjectTaskElement task
+                            ? CompiledTaskSourceProgram.Create(task)
+                            : null);
+                }
+
                 _targets.Add(new TargetTemplate(
                     GetStringId(target.Name),
                     AddExpression(target.BeforeTargets, sourceId),
                     AddExpression(target.AfterTargets, sourceId),
+                    new TableRange(
+                        taskProgramStart,
+                        _taskPrograms.Count - taskProgramStart),
                     sourceId));
                 return _targets.Count - 1;
             }

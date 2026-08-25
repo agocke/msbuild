@@ -711,7 +711,7 @@ namespace Microsoft.Build.BackEnd
             TaskActionPropertyMetadata propertyMetadata,
             out bool parameterSet)
         {
-            TaskActionParameter source = binding.Source;
+            CompiledTaskParameterProgram source = binding.Source;
             parameterSet = false;
 
             try

@@ -49,6 +49,16 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Same(originalPlan, CompiledTargetPlan.PartiallyEvaluate(original, originalTarget));
             Assert.Same(originalPlan.GetAction(0), CompiledTargetPlan.PartiallyEvaluate(original, originalTarget).GetAction(0));
 
+            ProjectInstance peer =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan peerPlan =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    peer,
+                    peer.Targets["Build"]);
+            Assert.Same(
+                originalPlan.GetAction(0).Program,
+                peerPlan.GetAction(0).Program);
+
             original.TranslateEntireState = true;
             ((ITranslatable)original).Translate(TranslationHelpers.GetWriteTranslator());
             ProjectInstance translated = ProjectInstance.FactoryForDeserialization(TranslationHelpers.GetReadTranslator());
@@ -66,8 +76,14 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             using ProjectFromString projectFromString = new(CreateProject(
                 """
-                <CompiledActionGraphTestTask Text="$(Text)" Number="42" Values="a;b" />
-                <CompiledActionGraphTestTask Text="second" Number="84" Values="c;d" />
+                <CompiledActionGraphTestTask Text="$(Text)" Number="42" Values="@(FirstValues)" />
+                <CompiledActionGraphTestTask Text="second" Number="84" Values="@(SecondValues)" />
+                """,
+                """
+                <ItemGroup>
+                  <FirstValues Include="a;b" />
+                  <SecondValues Include="c;d" />
+                </ItemGroup>
                 """));
             ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
             CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(instance, instance.Targets["Build"]);
@@ -109,6 +125,97 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
+        public void FastActionReadsItemArrayInputWithoutGenericExpansion()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="$(Text)" Items="@(Input)" />
+                """,
+                """
+                <ItemGroup>
+                  <Input Include="a%3bb">
+                    <Source>value%3bwith%3bsemicolons</Source>
+                  </Input>
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(1);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains(
+                "compiled-item:a;b:value;with;semicolons");
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void SemicolonVectorInputFallsBackToGenericExpansion()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" Values="a;b" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(1);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("compiled-action:direct:0:a,b");
+            Assert.Null(action.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionPreservesRequiredParameterFailure()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Number="1" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(1);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
         public void FastActionPreservesBodyExceptionAndWarnAndContinue()
         {
             using TestEnvironment environment = TestEnvironment.Create(ignoreBuildErrorFiles: true);
@@ -131,6 +238,46 @@ namespace Microsoft.Build.UnitTests.BackEnd
             logger.AssertLogContains("fast-action-body-failure");
             logger.AssertLogContains("compiled-action:after:0:");
             Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionEvaluatesDynamicConditionAndContinueOnError()
+        {
+            using TestEnvironment environment = TestEnvironment.Create(ignoreBuildErrorFiles: true);
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <RunDirect>true</RunDirect>
+                  <Continue>WarnAndContinue</Continue>
+                </PropertyGroup>
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" Behavior="Throw"
+                                             Condition="'$(RunDirect)' == 'true'"
+                                             ContinueOnError="$(Continue)" />
+                <CompiledActionGraphTestTask Text="skipped"
+                                             Condition="'$(RunSkipped)' == 'true'" />
+                <CompiledActionGraphTestTask Text="after" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"]);
+
+            MockLogger logger = Build(
+                instance,
+                out BuildResult result,
+                allowTaskCrashes: true);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("fast-action-body-failure");
+            logger.AssertLogDoesntContain("compiled-action:skipped:");
+            logger.AssertLogContains("compiled-action:after:0:");
+            Assert.NotNull(plan.GetAction(2).GetFastAction());
+            Assert.NotNull(plan.GetAction(3).GetFastAction());
         }
 
         [Fact]
@@ -218,7 +365,65 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
-        public void TaskSiteWithDeclaredOutputFallsBackToGenericExecutor()
+        public void FastActionPublishesItemArrayOutputWithMetadata()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="a%3bb">
+                  <Output TaskParameter="OutputItems" ItemName="%43aptured" />
+                </CompiledActionGraphTestTask>
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(1);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            ProjectItemInstance output = Assert.Single(
+                instance.GetItems("Captured"));
+            Assert.Equal("a;b", output.EvaluatedInclude);
+            Assert.Equal("value;with;semicolons", output.GetMetadataValue("Source"));
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void ValueTypeItemArrayOutputFallsBackToGenericExecutor()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="output">
+                  <Output TaskParameter="ValueTypeOutputItems" ItemName="Numbers" />
+                </CompiledActionGraphTestTask>
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(0);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "42",
+                Assert.Single(instance.GetItems("Numbers")).EvaluatedInclude);
+            Assert.Null(action.GetFastAction());
+        }
+
+        [Fact]
+        public void PropertyOutputFallsBackToGenericExecutor()
         {
             using TestEnvironment environment = TestEnvironment.Create();
             environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
@@ -236,7 +441,38 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.Equal("output", instance.GetPropertyValue("Result"));
-            Assert.Null(action.GetBoundAction());
+            Assert.Null(action.GetFastAction());
+        }
+
+        [Fact]
+        public void ConditionalOutputFallsBackToGenericExecutor()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <Capture>true</Capture>
+                </PropertyGroup>
+                <CompiledActionGraphTestTask Text="output">
+                  <Output TaskParameter="OutputItems"
+                          ItemName="Captured"
+                          Condition="'$(Capture)' == 'true'" />
+                </CompiledActionGraphTestTask>
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(1);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Single(instance.GetItems("Captured"));
+            Assert.Null(action.GetFastAction());
         }
 
         [Fact]
@@ -356,13 +592,16 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 #endif
 
-        private static string CreateProject(string targetContents) =>
+        private static string CreateProject(
+            string targetContents,
+            string projectContents = "") =>
             $"""
             <Project>
               <UsingTask TaskName="{typeof(CompiledActionGraphTestTask).FullName}" AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
               <PropertyGroup>
                 <Text>first</Text>
               </PropertyGroup>
+              {projectContents}
               <Target Name="Build">
                 {targetContents}
               </Target>
@@ -424,8 +663,25 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
         public string[] Values { get; set; }
 
+        public ITaskItem[] Items { get; set; }
+
         [Output]
         public string Result => Text;
+
+        [Output]
+        public ITaskItem[] OutputItems
+        {
+            get
+            {
+                var item = new Microsoft.Build.Utilities.TaskItem(Text);
+                item.SetMetadata("Source", "value;with;semicolons");
+                return new ITaskItem[] { item };
+            }
+        }
+
+        [Output]
+        public TaskItem<int>[] ValueTypeOutputItems =>
+            new TaskItem<int>[] { new(42) };
 
         public string Throwing
         {
@@ -454,6 +710,18 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 return false;
             }
             Log.LogMessage(MessageImportance.High, "compiled-action:{0}:{1}:{2}", Text, Number, string.Join(",", Values ?? Array.Empty<string>()));
+            if (Items != null)
+            {
+                for (int i = 0; i < Items.Length; i++)
+                {
+                    Log.LogMessage(
+                        MessageImportance.High,
+                        "compiled-item:{0}:{1}",
+                        Items[i].ItemSpec,
+                        Items[i].GetMetadata("Source"));
+                }
+            }
+
             return true;
         }
 

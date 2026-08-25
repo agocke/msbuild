@@ -2,8 +2,10 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 #if NET
 using System.Runtime.CompilerServices;
@@ -11,6 +13,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using Microsoft.Build.BackEnd.Components.RequestBuilder;
 using Microsoft.Build.BackEnd.Logging;
+using Microsoft.Build.Collections;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Exceptions;
@@ -25,80 +28,210 @@ using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 
 namespace Microsoft.Build.BackEnd
 {
+    internal readonly struct FastTaskInvocation
+    {
+        private readonly FastTaskAction _action;
+        private readonly TaskFactoryWrapper _taskFactoryWrapper;
+
+        internal FastTaskInvocation(
+            FastTaskAction action,
+            TaskFactoryWrapper taskFactoryWrapper)
+        {
+            _action = action;
+            _taskFactoryWrapper = taskFactoryWrapper;
+        }
+
+        internal bool IsValid =>
+            _action != null && _taskFactoryWrapper != null;
+
+        internal bool CanExecute(FastTaskExecutionFrame frame) =>
+            _action.CanExecute(frame);
+
+        internal WorkUnitResult Execute(FastTaskExecutionFrame frame) =>
+            _action.Execute(frame, _taskFactoryWrapper);
+    }
+
     /// <summary>
-    /// A complete residual program for an ordinary, in-process, single-batch task with no outputs.
+    /// A complete residual program for an ordinary, in-process, single-batch task.
     /// </summary>
     internal sealed class FastTaskAction
     {
-        private readonly TaskActionTemplate _template;
-        private readonly TaskFactoryWrapper _taskFactoryWrapper;
+        private readonly CompiledTaskSourceProgram _template;
         private readonly LoadedType _loadedType;
+        private readonly CompiledConditionProgram _condition;
+        private readonly CompiledScalarProgram _conditionDisplay;
+        private readonly CompiledScalarProgram _continueOnError;
         private readonly FastTaskInputOperation[] _inputs;
+        private readonly FastTaskOutputOperation[] _outputs;
         private readonly string[] _requiredParameterNames;
         private readonly ulong _allRequiredParameters;
-        private readonly ContinueOnError _continueOnError;
 
         private FastTaskAction(
-            TaskActionTemplate template,
-            TaskFactoryWrapper taskFactoryWrapper,
+            CompiledTaskSourceProgram program,
             LoadedType loadedType,
+            CompiledConditionProgram condition,
+            CompiledScalarProgram conditionDisplay,
+            CompiledScalarProgram continueOnError,
             FastTaskInputOperation[] inputs,
+            FastTaskOutputOperation[] outputs,
             string[] requiredParameterNames,
-            ulong allRequiredParameters,
-            ContinueOnError continueOnError)
+            ulong allRequiredParameters)
         {
-            _template = template;
-            _taskFactoryWrapper = taskFactoryWrapper;
+            _template = program;
             _loadedType = loadedType;
+            _condition = condition;
+            _conditionDisplay = conditionDisplay;
+            _continueOnError = continueOnError;
             _inputs = inputs;
+            _outputs = outputs;
             _requiredParameterNames = requiredParameterNames;
             _allRequiredParameters = allRequiredParameters;
-            _continueOnError = continueOnError;
         }
 
         internal Type TaskType => _loadedType.Type;
 
-        internal static FastTaskAction TryCreate(
-            TaskActionTemplate template,
-            TaskFactoryWrapper taskFactoryWrapper,
-            LoadedType loadedType,
-            TaskActionTypeMetadata metadata,
-            BoundTaskParameter[] parameters,
-            string[] requiredParameterNames,
-            ulong allRequiredParameters)
+        internal static FastTaskAction TryGetOrCreate(
+            CompiledTaskSourceProgram program,
+            ResolvedTaskRegistration registration)
         {
-            if (!string.IsNullOrEmpty(template.Condition) ||
-                !TryCompileContinueOnError(template, out ContinueOnError continueOnError))
+            TaskFactoryWrapper taskFactoryWrapper =
+                registration.TaskFactoryWrapper;
+            if (!program.HasStaticCurrentProcessIdentity ||
+                registration.Requirements != TaskRequirements.None ||
+                taskFactoryWrapper?.TaskFactory is not AssemblyTaskFactory ||
+                !taskFactoryWrapper.FactoryIdentityParameters.IsEmpty)
             {
                 return null;
             }
 
-            var inputs = new FastTaskInputOperation[parameters.Length];
-            for (int i = 0; i < parameters.Length; i++)
+            LoadedType loadedType =
+                taskFactoryWrapper.TaskFactoryLoadedType;
+            if (loadedType?.Type == null ||
+                loadedType.LoadedViaMetadataLoadContext ||
+                typeof(IGeneratedTask).IsAssignableFrom(loadedType.Type) ||
+                typeof(MSBuild).IsAssignableFrom(loadedType.Type) ||
+                typeof(CallTarget).IsAssignableFrom(loadedType.Type) ||
+                typeof(TaskHostTask).IsAssignableFrom(loadedType.Type))
             {
-                BoundTaskParameter parameter = parameters[i];
-                if (ExpressionShredder.ContainsMetadataExpressionOutsideTransform(parameter.Source.Value))
+                return null;
+            }
+
+#if FEATURE_APPDOMAIN
+            if (loadedType.IsMarshalByRef ||
+                loadedType.HasLoadInSeparateAppDomainAttribute)
+            {
+                return null;
+            }
+#endif
+
+            TaskActionTypeMetadata metadata =
+                TaskActionTypeMetadata.GetOrCreate(loadedType);
+            return metadata.GetOrCreateFastAction(
+                program,
+                taskFactoryWrapper,
+                loadedType);
+        }
+
+        internal static FastTaskAction TryCreate(
+            CompiledTaskSourceProgram program,
+            TaskFactoryWrapper taskFactoryWrapper,
+            LoadedType loadedType,
+            TaskActionTypeMetadata metadata)
+        {
+            if (!program.SupportsFastExecution)
+            {
+                return null;
+            }
+
+            IReadOnlyDictionary<string, string> requiredParameters =
+                taskFactoryWrapper.GetNamesOfPropertiesWithRequiredAttribute;
+            if (requiredParameters.Count > 64)
+            {
+                return null;
+            }
+
+            string[] requiredParameterNames =
+                requiredParameters.Keys.ToArray();
+            var inputs =
+                new FastTaskInputOperation[program.Parameters.Length];
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                CompiledTaskParameterProgram parameter =
+                    program.Parameters[i];
+                try
+                {
+                    if (taskFactoryWrapper.GetProperty(parameter.Name) == null)
+                    {
+                        return null;
+                    }
+                }
+                catch (AmbiguousMatchException)
                 {
                     return null;
                 }
 
+                int propertyIndex = BoundTaskAction.FindPropertyIndex(
+                    loadedType,
+                    parameter.Name);
+                if (propertyIndex < 0)
+                {
+                    return null;
+                }
+
+                ulong requiredBit = 0;
+                for (int requiredIndex = 0;
+                     requiredIndex < requiredParameterNames.Length;
+                     requiredIndex++)
+                {
+                    if (requiredParameterNames[requiredIndex].Equals(
+                            parameter.Name,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        requiredBit = 1UL << requiredIndex;
+                        break;
+                    }
+                }
+
                 inputs[i] = FastTaskInputOperation.TryCreate(
                     parameter,
-                    metadata.GetProperty(parameter.PropertyIndex));
-                if (inputs[i] == null)
+                    metadata.GetProperty(propertyIndex),
+                    requiredBit);
+                if (!inputs[i].IsValid)
                 {
                     return null;
                 }
             }
 
+            var outputs =
+                new FastTaskOutputOperation[program.Outputs.Length];
+            for (int i = 0; i < outputs.Length; i++)
+            {
+                outputs[i] = FastTaskOutputOperation.TryCreate(
+                    program.Outputs[i],
+                    taskFactoryWrapper,
+                    loadedType,
+                    metadata);
+                if (!outputs[i].IsValid)
+                {
+                    return null;
+                }
+            }
+
+            ulong allRequiredParameters =
+                requiredParameterNames.Length == 64
+                    ? ulong.MaxValue
+                    : (1UL << requiredParameterNames.Length) - 1;
+
             return new FastTaskAction(
-                template,
-                taskFactoryWrapper,
+                program,
                 loadedType,
+                program.ConditionProgram,
+                program.ConditionDisplayProgram,
+                program.ContinueOnErrorProgram,
                 inputs,
+                outputs,
                 requiredParameterNames,
-                allRequiredParameters,
-                continueOnError);
+                allRequiredParameters);
         }
 
         internal bool CanExecute(FastTaskExecutionFrame frame)
@@ -110,14 +243,67 @@ namespace Microsoft.Build.BackEnd
                     !TaskRouter.NeedsTaskHostInMultiThreadedMode(TaskType));
         }
 
-        internal WorkUnitResult Execute(FastTaskExecutionFrame frame)
+        internal WorkUnitResult Execute(
+            FastTaskExecutionFrame frame,
+            TaskFactoryWrapper taskFactoryWrapper)
         {
+            using var actionMeasurement =
+                BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                    BuildExecutionMetric.FastTaskAction,
+                    _template.Name,
+                    frame.TargetLoggingContext.Target.Name);
+
+            bool conditionResult = true;
+            if (_condition != null)
+            {
+                using var conditionMeasurement =
+                    BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                        BuildExecutionMetric.FastTaskCondition,
+                        _template.Name,
+                        frame.TargetLoggingContext.Target.Name);
+                conditionResult =
+                    _condition.Evaluate(
+                        frame,
+                        _template.ConditionLocation);
+            }
+
+            if (!conditionResult)
+            {
+                if (frame.TargetLoggingContext.LoggingService.MinimumRequiredMessageImportance >
+                        MessageImportance.Low &&
+                    !frame.TargetLoggingContext.LoggingService.OnlyLogCriticalEvents)
+                {
+                    frame.TargetLoggingContext.LogComment(
+                        MessageImportance.Low,
+                        "TaskSkippedFalseCondition",
+                        _template.Name,
+                        _template.Condition,
+                        _conditionDisplay.Evaluate(
+                            frame,
+                            _template.ConditionLocation));
+                }
+
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Skipped,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+
             string projectFullPath = frame.RequestEntry.RequestConfiguration.Project.FullPath;
-            TaskLoggingContext taskLoggingContext = frame.TargetLoggingContext.LogTaskBatchStarted(
-                projectFullPath,
-                frame.TaskInstance,
-                _loadedType.Path);
-            MSBuildEventSource.Log.ExecuteTaskStart(_template.Name, taskLoggingContext.BuildEventContext.TaskId);
+            TaskLoggingContext taskLoggingContext;
+            using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                       BuildExecutionMetric.FastTaskLoggingStart,
+                       _template.Name,
+                       frame.TargetLoggingContext.Target.Name))
+            {
+                taskLoggingContext = frame.TargetLoggingContext.LogTaskBatchStarted(
+                    projectFullPath,
+                    frame.TaskInstance,
+                    _loadedType.Path);
+                MSBuildEventSource.Log.ExecuteTaskStart(
+                    _template.Name,
+                    taskLoggingContext.BuildEventContext.TaskId);
+            }
 
             using var taskMeasurement = BuildExecutionInstrumentation.Measure(
                 BuildExecutionMetric.Task,
@@ -126,16 +312,21 @@ namespace Microsoft.Build.BackEnd
 
             if (frame.Host.BuildParameters.IsTelemetryEnabled)
             {
-                _taskFactoryWrapper.Statistics?.ExecutionStarted();
+                taskFactoryWrapper.Statistics?.ExecutionStarted();
             }
 
             frame.RequestEntry.Request.CurrentTaskContext = taskLoggingContext.BuildEventContext;
             WorkUnitResult result = new(WorkUnitResultCode.Failed, WorkUnitActionCode.Stop, null);
             bool allowWarnAndContinueCoercion = true;
+            ContinueOnError continueOnError = ContinueOnError.ErrorAndStop;
 
             try
             {
-                result = ExecuteCore(frame, taskLoggingContext);
+                result = ExecuteCore(
+                    frame,
+                    taskLoggingContext,
+                    taskFactoryWrapper,
+                    out continueOnError);
             }
             catch (InvalidProjectFileException e)
             {
@@ -145,52 +336,92 @@ namespace Microsoft.Build.BackEnd
             }
             finally
             {
-                frame.RequestEntry.Request.CurrentTaskContext = null;
-                taskLoggingContext.LogTaskBatchFinished(
-                    projectFullPath,
-                    result.ResultCode == WorkUnitResultCode.Success || result.ResultCode == WorkUnitResultCode.Skipped);
-
-                if (frame.Host.BuildParameters.IsTelemetryEnabled)
+                using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                           BuildExecutionMetric.FastTaskLoggingFinish,
+                           _template.Name,
+                           frame.TargetLoggingContext.Target.Name))
                 {
-                    _taskFactoryWrapper.Statistics?.ExecutionStopped();
-                }
+                    frame.RequestEntry.Request.CurrentTaskContext = null;
+                    taskLoggingContext.LogTaskBatchFinished(
+                        projectFullPath,
+                        result.ResultCode == WorkUnitResultCode.Success || result.ResultCode == WorkUnitResultCode.Skipped);
 
-                if (result.ResultCode == WorkUnitResultCode.Failed &&
-                    allowWarnAndContinueCoercion &&
-                    _continueOnError == ContinueOnError.WarnAndContinue)
-                {
-                    result = new WorkUnitResult(WorkUnitResultCode.Success, result.ActionCode, result.Exception);
-                }
+                    if (frame.Host.BuildParameters.IsTelemetryEnabled)
+                    {
+                        taskFactoryWrapper.Statistics?.ExecutionStopped();
+                    }
 
-                MSBuildEventSource.Log.ExecuteTaskStop(_template.Name, taskLoggingContext.BuildEventContext.TaskId);
+                    if (result.ResultCode == WorkUnitResultCode.Failed &&
+                        allowWarnAndContinueCoercion &&
+                        continueOnError == ContinueOnError.WarnAndContinue)
+                    {
+                        result = new WorkUnitResult(WorkUnitResultCode.Success, result.ActionCode, result.Exception);
+                    }
+
+                    MSBuildEventSource.Log.ExecuteTaskStop(
+                        _template.Name,
+                        taskLoggingContext.BuildEventContext.TaskId);
+                }
             }
 
             return result;
         }
 
-        private WorkUnitResult ExecuteCore(FastTaskExecutionFrame frame, TaskLoggingContext taskLoggingContext)
+        private WorkUnitResult ExecuteCore(
+            FastTaskExecutionFrame frame,
+            TaskLoggingContext taskLoggingContext,
+            TaskFactoryWrapper taskFactoryWrapper,
+            out ContinueOnError continueOnError)
         {
-            if (frame.Host.BuildParameters.SaveOperatingEnvironment)
+            string continueOnErrorValue;
+            using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                       BuildExecutionMetric.FastTaskContinueOnError,
+                       _template.Name,
+                       frame.TargetLoggingContext.Target.Name))
             {
-                frame.RequestEntry.TaskEnvironment.ProjectDirectory =
-                    new AbsolutePath(frame.RequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
+                continueOnError = EvaluateContinueOnError(
+                    frame,
+                    out continueOnErrorValue);
             }
 
-            var taskHost = new TaskHost(
-                frame.Host,
-                frame.RequestEntry,
-                _template.Location,
-                frame.TargetBuilderCallback)
+            TaskHost taskHost;
+            using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                       BuildExecutionMetric.FastTaskHost,
+                       _template.Name,
+                       frame.TargetLoggingContext.Target.Name))
             {
-                LoggingContext = taskLoggingContext,
-                ContinueOnError = _continueOnError != ContinueOnError.ErrorAndStop,
-                ConvertErrorsToWarnings = _continueOnError == ContinueOnError.WarnAndContinue,
-            };
+                if (frame.Host.BuildParameters.SaveOperatingEnvironment)
+                {
+                    frame.RequestEntry.TaskEnvironment.ProjectDirectory =
+                        new AbsolutePath(frame.RequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
+                }
+
+                taskHost = new TaskHost(
+                    frame.Host,
+                    frame.RequestEntry,
+                    _template.Location,
+                    frame.TargetBuilderCallback)
+                {
+                    LoggingContext = taskLoggingContext,
+                    ContinueOnError = continueOnError != ContinueOnError.ErrorAndStop,
+                    ConvertErrorsToWarnings = continueOnError == ContinueOnError.WarnAndContinue,
+                };
+            }
 
             ITask task = null;
             try
             {
-                task = CreateTask(frame, taskLoggingContext);
+                using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                           BuildExecutionMetric.FastTaskCreate,
+                           _template.Name,
+                           frame.TargetLoggingContext.Target.Name))
+                {
+                    task = CreateTask(
+                        frame,
+                        taskLoggingContext,
+                        taskFactoryWrapper);
+                }
+
                 if (task == null)
                 {
                     ProjectErrorUtilities.ThrowInvalidProject(
@@ -199,27 +430,47 @@ namespace Microsoft.Build.BackEnd
                         _template.Name);
                 }
 
-                frame.SetCurrentTask(task, taskLoggingContext, _template);
-
-                task.BuildEngine = taskHost;
-                task.HostObject = null;
-                if (task is IMultiThreadableTask multiThreadableTask)
+                IDisposable assemblyLoadsTracker;
+                using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                           BuildExecutionMetric.FastTaskSetup,
+                           _template.Name,
+                           frame.TargetLoggingContext.Target.Name))
                 {
-                    multiThreadableTask.TaskEnvironment = frame.RequestEntry.TaskEnvironment;
+                    frame.SetCurrentTask(task, taskLoggingContext, _template);
+
+                    task.BuildEngine = taskHost;
+                    task.HostObject = null;
+                    if (task is IMultiThreadableTask multiThreadableTask)
+                    {
+                        multiThreadableTask.TaskEnvironment = frame.RequestEntry.TaskEnvironment;
+                    }
+
+                    if (task is IIncrementalTask incrementalTask)
+                    {
+                        incrementalTask.FailIfNotIncremental = frame.Host.BuildParameters.Question;
+                    }
+
+                    assemblyLoadsTracker = AssemblyLoadsTracker.StartTracking(
+                        taskLoggingContext,
+                        AssemblyLoadingContext.TaskRun,
+                        task.GetType());
                 }
 
-                if (task is IIncrementalTask incrementalTask)
+                using var assemblyLoadsTrackerScope = assemblyLoadsTracker;
+                using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                           BuildExecutionMetric.FastTaskInputs,
+                           _template.Name,
+                           frame.TargetLoggingContext.Target.Name))
                 {
-                    incrementalTask.FailIfNotIncremental = frame.Host.BuildParameters.Question;
+                    SetInputs(frame, task, taskLoggingContext);
                 }
 
-                using var assemblyLoadsTracker = AssemblyLoadsTracker.StartTracking(
+                bool taskResult = ExecuteBody(
+                    frame,
+                    task,
                     taskLoggingContext,
-                    AssemblyLoadingContext.TaskRun,
-                    task.GetType());
-
-                SetInputs(frame, task, taskLoggingContext);
-                bool taskResult = ExecuteBody(frame, task, taskLoggingContext, out bool taskReturned);
+                    continueOnError,
+                    out bool taskReturned);
 
                 if (taskReturned)
                 {
@@ -244,7 +495,7 @@ namespace Microsoft.Build.BackEnd
                             "TaskReturnedFalseButDidNotLogError",
                             _template.Name);
                     }
-                    else if (_continueOnError == ContinueOnError.WarnAndContinue)
+                    else if (continueOnError == ContinueOnError.WarnAndContinue)
                     {
                         taskLoggingContext.LogWarning(
                             null,
@@ -262,13 +513,25 @@ namespace Microsoft.Build.BackEnd
                     }
                 }
 
+                if (taskReturned && _outputs.Length != 0)
+                {
+                    using var outputMeasurement =
+                        BuildExecutionInstrumentation.Measure(
+                            BuildExecutionMetric.FastTaskOutputs,
+                            _template.Name,
+                            frame.TargetLoggingContext.Target.Name);
+                    taskResult =
+                        GatherOutputs(frame, task, taskLoggingContext) &&
+                        taskResult;
+                }
+
                 WorkUnitResultCode resultCode =
                     taskResult ? WorkUnitResultCode.Success : WorkUnitResultCode.Failed;
                 WorkUnitActionCode actionCode = WorkUnitActionCode.Continue;
 
                 if (!taskResult)
                 {
-                    if (_continueOnError == ContinueOnError.ErrorAndStop)
+                    if (continueOnError == ContinueOnError.ErrorAndStop)
                     {
                         actionCode = WorkUnitActionCode.Stop;
                     }
@@ -279,7 +542,7 @@ namespace Microsoft.Build.BackEnd
                             "TaskContinuedDueToContinueOnError",
                             "ContinueOnError",
                             _template.Name,
-                            _template.ContinueOnError);
+                            continueOnErrorValue);
                     }
                 }
 
@@ -287,19 +550,30 @@ namespace Microsoft.Build.BackEnd
             }
             finally
             {
-                frame.ClearCurrentTask(task);
-                if (task != null)
+                using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                           BuildExecutionMetric.FastTaskCleanup,
+                           _template.Name,
+                           frame.TargetLoggingContext.Target.Name))
                 {
-                    ((AssemblyTaskFactory)_taskFactoryWrapper.TaskFactory).CleanupTask(task);
-                }
+                    frame.ClearCurrentTask(task);
+                    if (task != null)
+                    {
+                        ((AssemblyTaskFactory)taskFactoryWrapper.TaskFactory)
+                            .CleanupTask(task);
+                    }
 
-                taskHost.MarkAsInactive();
+                    taskHost.MarkAsInactive();
+                }
             }
         }
 
-        private ITask CreateTask(FastTaskExecutionFrame frame, TaskLoggingContext taskLoggingContext)
+        private ITask CreateTask(
+            FastTaskExecutionFrame frame,
+            TaskLoggingContext taskLoggingContext,
+            TaskFactoryWrapper taskFactoryWrapper)
         {
-            var assemblyTaskFactory = (AssemblyTaskFactory)_taskFactoryWrapper.TaskFactory;
+            var assemblyTaskFactory =
+                (AssemblyTaskFactory)taskFactoryWrapper.TaskFactory;
             assemblyTaskFactory.RecordTaskExecutionTelemetry(taskLoggingContext, isTaskHost: false);
 
             try
@@ -333,7 +607,7 @@ namespace Microsoft.Build.BackEnd
                     new BuildEventFileInfo(_template.Location),
                     "TaskInstantiationFailureErrorInvalidCast",
                     _template.Name,
-                    _taskFactoryWrapper.TaskFactory.FactoryName,
+                    taskFactoryWrapper.TaskFactory.FactoryName,
                     e.Message);
             }
             catch (TargetInvocationException e)
@@ -342,7 +616,7 @@ namespace Microsoft.Build.BackEnd
                     new BuildEventFileInfo(_template.Location),
                     "TaskInstantiationFailureError",
                     _template.Name,
-                    _taskFactoryWrapper.TaskFactory.FactoryName,
+                    taskFactoryWrapper.TaskFactory.FactoryName,
                     Environment.NewLine + e.InnerException);
             }
             catch (Exception e) when (!ExceptionHandling.IsCriticalException(e))
@@ -351,7 +625,7 @@ namespace Microsoft.Build.BackEnd
                     new BuildEventFileInfo(_template.Location),
                     "TaskInstantiationFailureError",
                     _template.Name,
-                    _taskFactoryWrapper.TaskFactory.FactoryName,
+                    taskFactoryWrapper.TaskFactory.FactoryName,
                     e.Message);
             }
 
@@ -392,10 +666,84 @@ namespace Microsoft.Build.BackEnd
             }
         }
 
+        private ContinueOnError EvaluateContinueOnError(
+            FastTaskExecutionFrame frame,
+            out string expandedValue)
+        {
+            if (_continueOnError == null)
+            {
+                expandedValue = "false";
+                return ContinueOnError.ErrorAndStop;
+            }
+
+            expandedValue = _continueOnError.Evaluate(
+                frame,
+                _template.ContinueOnErrorLocation);
+            if (string.Equals(
+                    XMakeAttributes.ContinueOnErrorValues.errorAndContinue,
+                    expandedValue,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return ContinueOnError.ErrorAndContinue;
+            }
+
+            if (string.Equals(
+                    XMakeAttributes.ContinueOnErrorValues.warnAndContinue,
+                    expandedValue,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return ContinueOnError.WarnAndContinue;
+            }
+
+            if (string.Equals(
+                    XMakeAttributes.ContinueOnErrorValues.errorAndStop,
+                    expandedValue,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return ContinueOnError.ErrorAndStop;
+            }
+
+            try
+            {
+                return ConversionUtilities.ConvertStringToBool(expandedValue)
+                    ? ContinueOnError.WarnAndContinue
+                    : ContinueOnError.ErrorAndStop;
+            }
+            catch (ArgumentException e)
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    _template.ContinueOnErrorLocation,
+                    "InvalidContinueOnErrorAttribute",
+                    _template.Name,
+                    e.Message);
+                return ContinueOnError.ErrorAndStop;
+            }
+        }
+
+        private bool GatherOutputs(
+            FastTaskExecutionFrame frame,
+            ITask task,
+            TaskLoggingContext taskLoggingContext)
+        {
+            for (int i = 0; i < _outputs.Length; i++)
+            {
+                if (!_outputs[i].Apply(
+                        frame,
+                        task,
+                        taskLoggingContext))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private bool ExecuteBody(
             FastTaskExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
+            ContinueOnError continueOnError,
             out bool taskReturned)
         {
             bool taskResult = false;
@@ -451,13 +799,19 @@ namespace Microsoft.Build.BackEnd
             }
             else
             {
-                HandleTaskException(taskException, taskLoggingContext);
+                HandleTaskException(
+                    taskException,
+                    taskLoggingContext,
+                    continueOnError);
             }
 
             return taskResult;
         }
 
-        private void HandleTaskException(Exception taskException, TaskLoggingContext taskLoggingContext)
+        private void HandleTaskException(
+            Exception taskException,
+            TaskLoggingContext taskLoggingContext,
+            ContinueOnError continueOnError)
         {
             Type type = taskException.GetType();
             if (type == typeof(LoggerException))
@@ -502,7 +856,7 @@ namespace Microsoft.Build.BackEnd
             {
                 var invalidProject = (InvalidProjectFileException)taskException;
                 invalidProject.HasBeenLogged = false;
-                if (_continueOnError != ContinueOnError.ErrorAndStop)
+                if (continueOnError != ContinueOnError.ErrorAndStop)
                 {
                     taskLoggingContext.LogInvalidProjectFileError(invalidProject);
                     taskLoggingContext.LogComment(MessageImportance.Normal, "ErrorConvertedIntoWarning");
@@ -520,7 +874,7 @@ namespace Microsoft.Build.BackEnd
                     ? invocationException.InnerException
                     : taskException;
 
-            if (_continueOnError == ContinueOnError.WarnAndContinue)
+            if (continueOnError == ContinueOnError.WarnAndContinue)
             {
                 taskLoggingContext.LogTaskWarningFromException(
                     exceptionToLog,
@@ -536,87 +890,66 @@ namespace Microsoft.Build.BackEnd
                     _template.Name);
             }
         }
-
-        private static bool TryCompileContinueOnError(
-            TaskActionTemplate template,
-            out ContinueOnError continueOnError)
-        {
-            continueOnError = ContinueOnError.ErrorAndStop;
-            if (template.ContinueOnErrorLocation == null)
-            {
-                return true;
-            }
-
-            string value = template.ContinueOnError;
-            if (string.Equals(
-                    XMakeAttributes.ContinueOnErrorValues.errorAndContinue,
-                    value,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                continueOnError = ContinueOnError.ErrorAndContinue;
-                return true;
-            }
-
-            if (string.Equals(
-                    XMakeAttributes.ContinueOnErrorValues.warnAndContinue,
-                    value,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                continueOnError = ContinueOnError.WarnAndContinue;
-                return true;
-            }
-
-            if (string.Equals(
-                    XMakeAttributes.ContinueOnErrorValues.errorAndStop,
-                    value,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            if (ConversionUtilities.TryConvertStringToBool(value, out bool boolValue))
-            {
-                continueOnError =
-                    boolValue ? ContinueOnError.WarnAndContinue : ContinueOnError.ErrorAndStop;
-                return true;
-            }
-
-            return false;
-        }
     }
 
     /// <summary>
     /// One prebound input expression, conversion, and setter call.
     /// </summary>
-    internal sealed class FastTaskInputOperation
+    internal readonly struct FastTaskInputOperation
     {
-        private readonly BoundTaskParameter _binding;
+        private readonly CompiledTaskParameterProgram _source;
         private readonly TaskActionPropertyMetadata _property;
+        private readonly ulong _requiredBit;
 
         private FastTaskInputOperation(
-            BoundTaskParameter binding,
-            TaskActionPropertyMetadata property)
+            CompiledTaskParameterProgram source,
+            TaskActionPropertyMetadata property,
+            ulong requiredBit)
         {
-            _binding = binding;
+            _source = source;
             _property = property;
+            _requiredBit = requiredBit;
         }
 
+        internal bool IsValid => _property != null;
+
         internal static FastTaskInputOperation TryCreate(
-            BoundTaskParameter binding,
-            TaskActionPropertyMetadata property)
+            CompiledTaskParameterProgram source,
+            TaskActionPropertyMetadata property,
+            ulong requiredBit)
         {
             Type parameterType = property.ParameterType;
+            bool validParameterType = parameterType.IsArray
+                ? TaskParameterTypeVerifier.IsValidVectorInputParameter(
+                    parameterType)
+                : TaskParameterTypeVerifier.IsValidScalarInputParameter(
+                    parameterType);
             if (property.Setter == null ||
+                !validParameterType ||
                 TaskParameterTypeVerifier.TryGetSupportedTaskItemValueType(parameterType, out _) ||
                 (parameterType.IsArray &&
                     TaskParameterTypeVerifier.TryGetSupportedTaskItemValueType(
                         parameterType.GetElementType(),
                         out _)))
             {
-                return null;
+                return default;
             }
 
-            return new FastTaskInputOperation(binding, property);
+            if ((parameterType.IsArray &&
+                    source.Kind != CompiledTaskValueKind.ItemVector) ||
+                (parameterType == typeof(ITaskItem) &&
+                    source.Kind != CompiledTaskValueKind.ItemVector) ||
+                (!parameterType.IsArray &&
+                    source.Kind == CompiledTaskValueKind.ItemVector &&
+                    parameterType != typeof(ITaskItem)))
+            {
+                return default;
+            }
+
+            return new FastTaskInputOperation(
+                source,
+                property,
+                requiredBit);
         }
 
         internal bool Apply(
@@ -640,13 +973,10 @@ namespace Microsoft.Build.BackEnd
                     ex is OverflowException)
             {
                 ProjectErrorUtilities.ThrowInvalidProject(
-                    _binding.Source.Location,
+                    _source.Location,
                     "InvalidTaskParameterValueError",
-                    frame.Expander.ExpandIntoStringAndUnescape(
-                        _binding.Source.Value,
-                        ExpanderOptions.ExpandAll,
-                        _binding.Source.Location),
-                    _binding.Property.Name,
+                    GetDisplayValue(frame),
+                    _source.Name,
                     _property.ParameterType.FullName,
                     frame.TaskInstance.Name);
                 return false;
@@ -655,17 +985,17 @@ namespace Microsoft.Build.BackEnd
             if (!success)
             {
                 taskLoggingContext.LogError(
-                    new BuildEventFileInfo(_binding.Source.Location),
+                    new BuildEventFileInfo(_source.Location),
                     "InvalidTaskAttributeError",
-                    _binding.Source.Name,
-                    _binding.Source.Value,
+                    _source.Name,
+                    _source.Value,
                     frame.TaskInstance.Name);
                 return false;
             }
 
             if (parameterSet)
             {
-                requiredSet |= _binding.RequiredBit;
+                requiredSet |= _requiredBit;
             }
 
             return true;
@@ -682,12 +1012,10 @@ namespace Microsoft.Build.BackEnd
 
             if (parameterType == typeof(ITaskItem))
             {
-                IList<TaskItem> items = frame.Expander.ExpandIntoTaskItemsLeaveEscaped(
-                    _binding.Source.Value,
-                    ExpanderOptions.ExpandAll,
-                    _binding.Source.Location);
+                ICollection<ProjectItemInstance> items =
+                    frame.Lookup.GetItems(_source.ItemType);
 
-                if (items.Count == 0)
+                if (items == null || items.Count == 0)
                 {
                     return true;
                 }
@@ -695,25 +1023,32 @@ namespace Microsoft.Build.BackEnd
                 if (items.Count != 1)
                 {
                     ProjectErrorUtilities.ThrowInvalidProject(
-                        _binding.Source.Location,
+                        _source.Location,
                         "CannotPassMultipleItemsIntoScalarParameter",
-                        frame.Expander.ExpandIntoStringAndUnescape(
-                            _binding.Source.Value,
-                            ExpanderOptions.ExpandAll,
-                            _binding.Source.Location),
-                        _binding.Property.Name,
+                        _source.Value,
+                        _source.Name,
                         parameterType.FullName,
                         frame.TaskInstance.Name);
                 }
 
+                ProjectItemInstance item = null;
+                foreach (ProjectItemInstance candidate in items)
+                {
+                    item = candidate;
+                    break;
+                }
+
                 parameterSet = true;
-                return SetValue(task, items[0], taskLoggingContext, frame);
+                return SetValue(
+                    task,
+                    new TaskItem(item),
+                    taskLoggingContext,
+                    frame);
             }
 
-            string expandedValue = frame.Expander.ExpandIntoStringAndUnescape(
-                _binding.Source.Value,
-                ExpanderOptions.ExpandAll,
-                _binding.Source.Location);
+            string expandedValue = _source.ScalarProgram.Evaluate(
+                frame,
+                _source.Location);
             if (expandedValue.Length == 0)
             {
                 return true;
@@ -733,12 +1068,13 @@ namespace Microsoft.Build.BackEnd
             TaskLoggingContext taskLoggingContext,
             out bool parameterSet)
         {
-            IList<TaskItem> items = frame.Expander.ExpandIntoTaskItemsLeaveEscaped(
-                _binding.Source.Value,
-                ExpanderOptions.ExpandAll,
-                _binding.Source.Location);
+            ICollection<ProjectItemInstance> items =
+                frame.Lookup.GetItems(_source.ItemType);
+            int itemCount = items?.Count ?? 0;
+            IEnumerable<ProjectItemInstance> visibleItems =
+                items ?? Array.Empty<ProjectItemInstance>();
 
-            parameterSet = items.Count > 0 || _binding.RequiredBit != 0;
+            parameterSet = itemCount > 0 || _requiredBit != 0;
             if (!parameterSet)
             {
                 return true;
@@ -748,30 +1084,35 @@ namespace Microsoft.Build.BackEnd
             object value;
             if (parameterType == typeof(ITaskItem[]))
             {
-                var values = new ITaskItem[items.Count];
-                for (int i = 0; i < values.Length; i++)
+                var values = new ITaskItem[itemCount];
+                int index = 0;
+                foreach (ProjectItemInstance item in visibleItems)
                 {
-                    values[i] = items[i];
+                    values[index++] = new TaskItem(item);
                 }
 
                 value = values;
             }
             else if (parameterType == typeof(string[]))
             {
-                var values = new string[items.Count];
-                for (int i = 0; i < values.Length; i++)
+                var values = new string[itemCount];
+                int index = 0;
+                foreach (ProjectItemInstance item in visibleItems)
                 {
-                    values[i] = items[i].ItemSpec;
+                    values[index++] = item.EvaluatedInclude;
                 }
 
                 value = values;
             }
             else if (parameterType == typeof(bool[]))
             {
-                var values = new bool[items.Count];
-                for (int i = 0; i < values.Length; i++)
+                var values = new bool[itemCount];
+                int index = 0;
+                foreach (ProjectItemInstance item in visibleItems)
                 {
-                    values[i] = ConversionUtilities.ConvertStringToBool(items[i].ItemSpec);
+                    values[index++] =
+                        ConversionUtilities.ConvertStringToBool(
+                            item.EvaluatedInclude);
                 }
 
                 value = values;
@@ -779,19 +1120,26 @@ namespace Microsoft.Build.BackEnd
             else
             {
 #if NET
-                Array values = Array.CreateInstanceFromArrayType(parameterType, items.Count);
+                Array values =
+                    Array.CreateInstanceFromArrayType(
+                        parameterType,
+                        itemCount);
 #else
-                Array values = Array.CreateInstance(parameterType.GetElementType(), items.Count);
+                Array values =
+                    Array.CreateInstance(
+                        parameterType.GetElementType(),
+                        itemCount);
 #endif
                 Type elementType = parameterType.GetElementType();
-                for (int i = 0; i < values.Length; i++)
+                int index = 0;
+                foreach (ProjectItemInstance item in visibleItems)
                 {
                     values.SetValue(
                         ConvertStringToValue(
-                            items[i].ItemSpec,
+                            item.EvaluatedInclude,
                             elementType,
                             frame.RequestEntry.TaskEnvironment),
-                        i);
+                        index++);
                 }
 
                 value = values;
@@ -815,19 +1163,27 @@ namespace Microsoft.Build.BackEnd
             {
                 taskLoggingContext.LogFatalTaskError(
                     e.InnerException,
-                    new BuildEventFileInfo(_binding.Source.Location),
+                    new BuildEventFileInfo(_source.Location),
                     frame.TaskInstance.Name);
             }
             catch (Exception e)
             {
                 taskLoggingContext.LogFatalTaskError(
                     e,
-                    new BuildEventFileInfo(_binding.Source.Location),
+                    new BuildEventFileInfo(_source.Location),
                     frame.TaskInstance.Name);
             }
 
             return false;
         }
+
+        private string GetDisplayValue(
+            FastTaskExecutionFrame frame) =>
+            _source.Kind == CompiledTaskValueKind.Scalar
+                ? _source.ScalarProgram.Evaluate(
+                    frame,
+                    _source.Location)
+                : _source.Value;
 
         private static object ConvertStringToValue(
             string value,
@@ -854,9 +1210,244 @@ namespace Microsoft.Build.BackEnd
     }
 
     /// <summary>
+    /// One prebound task getter and item lookup publication.
+    /// </summary>
+    internal readonly struct FastTaskOutputOperation
+    {
+        private readonly CompiledTaskOutputProgram _source;
+        private readonly TaskActionPropertyMetadata _property;
+        private readonly string _destinationName;
+
+        private FastTaskOutputOperation(
+            CompiledTaskOutputProgram source,
+            TaskActionPropertyMetadata property,
+            string destinationName)
+        {
+            _source = source;
+            _property = property;
+            _destinationName = destinationName;
+        }
+
+        internal bool IsValid => _property != null;
+
+        internal static FastTaskOutputOperation TryCreate(
+            CompiledTaskOutputProgram source,
+            TaskFactoryWrapper taskFactoryWrapper,
+            LoadedType loadedType,
+            TaskActionTypeMetadata metadata)
+        {
+            if (!source.IsItem ||
+                !string.IsNullOrEmpty(source.Condition) ||
+                ContainsExpansion(source.TaskParameter) ||
+                ContainsExpansion(source.DestinationName))
+            {
+                return default;
+            }
+
+            string destinationName =
+                EscapingUtilities.UnescapeAll(source.DestinationName);
+            if (!XmlUtilities.IsValidElementName(destinationName))
+            {
+                return default;
+            }
+
+            try
+            {
+                if (taskFactoryWrapper.GetProperty(
+                        source.TaskParameter) == null)
+                {
+                    return default;
+                }
+            }
+            catch (AmbiguousMatchException)
+            {
+                return default;
+            }
+
+            int propertyIndex = BoundTaskAction.FindPropertyIndex(
+                loadedType,
+                source.TaskParameter);
+            if (propertyIndex < 0 ||
+                !taskFactoryWrapper.GetNamesOfPropertiesWithOutputAttribute.ContainsKey(
+                    source.TaskParameter))
+            {
+                return default;
+            }
+
+            TaskActionPropertyMetadata property =
+                metadata.GetProperty(propertyIndex);
+            Type parameterType = property.ParameterType;
+            if (property.Getter == null ||
+                !typeof(ITaskItem[]).IsAssignableFrom(parameterType))
+            {
+                return default;
+            }
+
+            return new FastTaskOutputOperation(
+                source,
+                property,
+                destinationName);
+        }
+
+        internal bool Apply(
+            FastTaskExecutionFrame frame,
+            ITask task,
+            TaskLoggingContext taskLoggingContext)
+        {
+            try
+            {
+                var outputs = (ITaskItem[])_property.Getter(task);
+                if (outputs == null)
+                {
+                    return true;
+                }
+
+                ProjectInstance project =
+                    frame.RequestEntry.RequestConfiguration.Project;
+                string locationEscaped = EscapingUtilities.Escape(
+                    _source.Location.File,
+                    cache: true);
+                for (int i = 0; i < outputs.Length; i++)
+                {
+                    ITaskItem output = outputs[i];
+                    if (output != null)
+                    {
+                        frame.Lookup.AddNewItem(
+                            CreateOutputItem(
+                                project,
+                                output,
+                                locationEscaped));
+                    }
+                }
+
+                return true;
+            }
+            catch (InvalidOperationException e)
+            {
+                taskLoggingContext.LogError(
+                    new BuildEventFileInfo(_source.Location),
+                    "InvalidTaskItemsInTaskOutputs",
+                    frame.TaskInstance.Name,
+                    _source.TaskParameter,
+                    e.Message);
+                return false;
+            }
+            catch (TargetInvocationException e)
+            {
+                taskLoggingContext.LogFatalTaskError(
+                    e.InnerException,
+                    new BuildEventFileInfo(_source.Location),
+                    frame.TaskInstance.Name);
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    _source.Location,
+                    "FailedToRetrieveTaskOutputs",
+                    frame.TaskInstance.Name,
+                    _source.TaskParameter,
+                    e.InnerException?.Message);
+                return false;
+            }
+            catch (Exception e)
+                when (!ExceptionHandling.NotExpectedReflectionException(e))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    _source.Location,
+                    "FailedToRetrieveTaskOutputs",
+                    frame.TaskInstance.Name,
+                    _source.TaskParameter,
+                    e.Message);
+                return false;
+            }
+        }
+
+        private ProjectItemInstance CreateOutputItem(
+            ProjectInstance project,
+            ITaskItem output,
+            string locationEscaped)
+        {
+            ProjectItemInstance newItem;
+            if (output is TaskItem outputAsProjectItem)
+            {
+                newItem = new ProjectItemInstance(
+                    project,
+                    _destinationName,
+                    outputAsProjectItem.IncludeEscaped,
+                    locationEscaped);
+                newItem.SetMetadata(outputAsProjectItem.MetadataCollection);
+                return newItem;
+            }
+
+            if (output is ITaskItem2 outputAsTaskItem2)
+            {
+                newItem = new ProjectItemInstance(
+                    project,
+                    _destinationName,
+                    outputAsTaskItem2.EvaluatedIncludeEscaped,
+                    locationEscaped);
+                SerializableMetadata backingMetadata =
+                    (output as IMetadataContainer)?.BackingMetadata ?? default;
+                newItem.SetMetadataOnTaskOutput(
+                    backingMetadata.HasValue
+                        ? backingMetadata.Dictionary
+                        : outputAsTaskItem2
+                            .CloneCustomMetadataEscaped()
+                            .Cast<KeyValuePair<string, string>>());
+                return newItem;
+            }
+
+            newItem = new ProjectItemInstance(
+                project,
+                _destinationName,
+                EscapingUtilities.Escape(output.ItemSpec),
+                locationEscaped);
+            newItem.SetMetadataOnTaskOutput(
+                EnumerateMetadata(output.CloneCustomMetadata()));
+            return newItem;
+        }
+
+        private static IEnumerable<KeyValuePair<string, string>> EnumerateMetadata(
+            IDictionary metadata)
+        {
+            if (metadata is CopyOnWriteDictionary<string> copyOnWriteDictionary)
+            {
+                foreach (KeyValuePair<string, string> pair in copyOnWriteDictionary)
+                {
+                    yield return new KeyValuePair<string, string>(
+                        pair.Key,
+                        EscapingUtilities.Escape(pair.Value));
+                }
+            }
+            else if (metadata is Dictionary<string, string> dictionary)
+            {
+                foreach (KeyValuePair<string, string> pair in dictionary)
+                {
+                    yield return new KeyValuePair<string, string>(
+                        pair.Key,
+                        EscapingUtilities.Escape(pair.Value));
+                }
+            }
+            else
+            {
+                foreach (DictionaryEntry entry in metadata)
+                {
+                    yield return new KeyValuePair<string, string>(
+                        (string)entry.Key,
+                        EscapingUtilities.Escape((string)entry.Value));
+                }
+            }
+        }
+
+        private static bool ContainsExpansion(string value) =>
+            value.Contains("$(", StringComparison.Ordinal) ||
+            value.Contains("@(", StringComparison.Ordinal) ||
+            value.Contains("%(", StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Reused dynamic state for all fast actions in one target bucket.
     /// </summary>
-    internal sealed class FastTaskExecutionFrame : IDisposable
+    internal sealed class FastTaskExecutionFrame :
+        IDisposable,
+        ICompiledExpressionEnvironment
     {
         private readonly FastTaskCancellationState _cancellationState;
 
@@ -903,12 +1494,22 @@ namespace Microsoft.Build.BackEnd
 
         internal Expander<ProjectPropertyInstance, ProjectItemInstance> Expander { get; }
 
+        string ICompiledExpressionEnvironment.GetEscapedPropertyValue(
+            string propertyName,
+            IElementLocation location)
+        {
+            ProjectPropertyInstance property = Lookup.GetProperty(propertyName);
+            return property == null
+                ? string.Empty
+                : ((IProperty)property).GetEvaluatedValueEscaped(location);
+        }
+
         internal void SetTaskInstance(ProjectTaskInstance taskInstance) => TaskInstance = taskInstance;
 
         internal void SetCurrentTask(
             ITask task,
             TaskLoggingContext taskLoggingContext,
-            TaskActionTemplate template) =>
+            CompiledTaskSourceProgram template) =>
             _cancellationState.SetCurrentTask(task, taskLoggingContext, template);
 
         internal void ClearCurrentTask(ITask task) => _cancellationState.ClearCurrentTask(task);
@@ -926,7 +1527,7 @@ namespace Microsoft.Build.BackEnd
         private ITask _currentTask;
         private ITask _taskCancellationIssued;
         private TaskLoggingContext _currentTaskLoggingContext;
-        private TaskActionTemplate _currentTemplate;
+        private CompiledTaskSourceProgram _currentTemplate;
 
         internal FastTaskCancellationState(CancellationToken cancellationToken)
         {
@@ -938,7 +1539,7 @@ namespace Microsoft.Build.BackEnd
         internal void SetCurrentTask(
             ITask task,
             TaskLoggingContext taskLoggingContext,
-            TaskActionTemplate template)
+            CompiledTaskSourceProgram template)
         {
             _currentTaskLoggingContext = taskLoggingContext;
             _currentTemplate = template;
@@ -980,7 +1581,7 @@ namespace Microsoft.Build.BackEnd
             catch (Exception e) when (!ExceptionHandling.IsCriticalException(e))
             {
                 TaskLoggingContext loggingContext = _currentTaskLoggingContext;
-                TaskActionTemplate template = _currentTemplate;
+                CompiledTaskSourceProgram template = _currentTemplate;
                 if (loggingContext?.IsValid == true && template != null)
                 {
                     loggingContext.LogFatalTaskError(

@@ -831,25 +831,77 @@ namespace Microsoft.Build.BackEnd
                 {
                     ProjectTargetInstanceChild targetChildInstance = _target.Children[currentTask];
                     CompiledTaskAction action = _compiledTargetPlan?.GetAction(currentTask);
-                    FastTaskAction fastAction = action?.GetFastAction();
+                    string fastTaskName =
+                        (targetChildInstance as ProjectTaskInstance)?.Name;
+                    long fastTaskSiteStart =
+                        action == null
+                            ? 0
+                            : BuildExecutionInstrumentation.StartTimestamp();
+                    FastTaskInvocation fastInvocation;
+                    using (action != null
+                               ? BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                                   BuildExecutionMetric.FastTaskLookup,
+                                   fastTaskName,
+                                   targetLoggingContext.Target.Name)
+                               : default)
+                    {
+                        fastInvocation = action == null
+                            ? default
+                            : action.GetFastInvocation();
+                    }
 
-                    if (fastAction != null &&
-                        (mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) != 0 &&
+                    if (fastInvocation.IsValid &&
+                        mode == TaskExecutionMode.ExecuteTaskAndGatherOutputs &&
                         targetChildInstance is ProjectTaskInstance taskInstance)
                     {
-                        fastTaskFrame ??= new FastTaskExecutionFrame(
-                            _host,
-                            _requestEntry,
-                            _targetBuilderCallback,
-                            targetLoggingContext,
-                            taskInstance,
-                            lookupForExecution,
-                            _cancellationToken);
+                        if (fastTaskFrame == null)
+                        {
+                            using var frameMeasurement =
+                                BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                                    BuildExecutionMetric.FastTaskFrame,
+                                    taskInstance.Name,
+                                    targetLoggingContext.Target.Name);
+                            fastTaskFrame = new FastTaskExecutionFrame(
+                                _host,
+                                _requestEntry,
+                                _targetBuilderCallback,
+                                targetLoggingContext,
+                                taskInstance,
+                                lookupForExecution,
+                                _cancellationToken);
+                        }
+
                         fastTaskFrame.SetTaskInstance(taskInstance);
 
-                        lastResult = fastAction.CanExecute(fastTaskFrame)
-                            ? fastAction.Execute(fastTaskFrame)
-                            : await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, action, mode, lookupForInference, lookupForExecution, _cancellationToken);
+                        if (fastInvocation.CanExecute(fastTaskFrame))
+                        {
+                            try
+                            {
+                                lastResult =
+                                    fastInvocation.Execute(fastTaskFrame);
+                            }
+                            finally
+                            {
+                                BuildExecutionInstrumentation.RecordSince(
+                                    BuildExecutionMetric.FastTaskSite,
+                                    fastTaskSiteStart,
+                                    taskInstance.Name,
+                                    targetLoggingContext.Target.Name);
+                            }
+                        }
+                        else
+                        {
+                            lastResult = await taskBuilder.ExecuteTask(
+                                targetLoggingContext,
+                                _requestEntry,
+                                _targetBuilderCallback,
+                                targetChildInstance,
+                                action,
+                                mode,
+                                lookupForInference,
+                                lookupForExecution,
+                                _cancellationToken);
+                        }
                     }
                     else
                     {

@@ -210,6 +210,7 @@
     <Compile Include="Evaluation\PropertiesUseTracker.cs" />
     <Compile Include="Evaluation\Compact\CompactPropertyEnvironment.cs" />
     <Compile Include="Evaluation\EvaluationModule.cs" />
+    <Compile Include="Evaluation\CompiledExpressionProgram.cs" />
     <Compile Include="Evaluation\EvaluationPerformanceInstrumentation.cs" />
     <Compile Include="Evaluation\ModuleEvaluationSharingMetrics.cs" />
     <Compile Include="Evaluation\PropertyFunctionReceiver.cs" />

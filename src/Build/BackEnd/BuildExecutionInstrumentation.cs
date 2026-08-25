@@ -26,6 +26,20 @@ namespace Microsoft.Build.BackEnd
         TaskParameters,
         TaskBody,
         TaskOutputs,
+        FastTaskSite,
+        FastTaskLookup,
+        FastTaskFrame,
+        FastTaskAction,
+        FastTaskCondition,
+        FastTaskLoggingStart,
+        FastTaskContinueOnError,
+        FastTaskHost,
+        FastTaskCreate,
+        FastTaskSetup,
+        FastTaskInputs,
+        FastTaskOutputs,
+        FastTaskCleanup,
+        FastTaskLoggingFinish,
         IntrinsicTask,
         TaskYield,
         TaskReacquire,
@@ -67,6 +81,12 @@ namespace Microsoft.Build.BackEnd
                 EventInstrumentName,
                 "{event}",
                 "Build execution event count by name.");
+        private static readonly bool s_fastTaskDetailsRequested =
+            string.Equals(
+                Environment.GetEnvironmentVariable(
+                    "MSBUILDENABLEFASTTASKDETAILSPANS"),
+                "1",
+                StringComparison.Ordinal);
 #endif
 
         internal static bool DetailsEnabled =>
@@ -76,11 +96,26 @@ namespace Microsoft.Build.BackEnd
             s_detailElapsed.Enabled || s_detailEvents.Enabled;
 #endif
 
+        internal static bool FastTaskDetailsEnabled =>
+#if NETFRAMEWORK
+            false;
+#else
+            s_fastTaskDetailsRequested && DetailsEnabled;
+#endif
+
         internal static Scope Measure(
             BuildExecutionMetric metric,
             string name = null,
             string parentName = null) =>
             new(metric, name, parentName);
+
+        internal static Scope MeasureFastTaskDetail(
+            BuildExecutionMetric metric,
+            string name,
+            string parentName) =>
+            FastTaskDetailsEnabled
+                ? new Scope(metric, name, parentName)
+                : default;
 
         internal static long StartTimestamp() =>
 #if NETFRAMEWORK

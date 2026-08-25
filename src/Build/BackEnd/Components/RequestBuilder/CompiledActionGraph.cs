@@ -11,7 +11,7 @@ using System.Threading;
 #if NET && FEATURE_ASSEMBLYLOADCONTEXT
 using System.Runtime.Loader;
 #endif
-using Microsoft.Build.Construction;
+using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -43,10 +43,11 @@ namespace Microsoft.Build.BackEnd
             {
                 if (target.Children[i] is ProjectTaskInstance task)
                 {
-                    TaskActionTemplate template = TaskActionTemplate.Lower(task);
+                    CompiledTaskSourceProgram program =
+                        CompiledTaskSourceProgram.GetOrCreate(task);
                     _actions[i] = new CompiledTaskAction(
-                        template,
-                        project.GetTaskRegistration(template.Name));
+                        program,
+                        project.GetTaskRegistration(program.Name));
                 }
             }
         }
@@ -80,70 +81,25 @@ namespace Microsoft.Build.BackEnd
     }
 
     /// <summary>
-    /// Immutable source state needed to specialize one ordinary task site.
-    /// </summary>
-    internal sealed record TaskActionTemplate(
-        string Name,
-        string Condition,
-        string ContinueOnError,
-        string MSBuildRuntime,
-        string MSBuildArchitecture,
-        ElementLocation Location,
-        ElementLocation ConditionLocation,
-        ElementLocation ContinueOnErrorLocation,
-        TaskActionParameter[] Parameters,
-        bool HasDeclaredOutputs)
-    {
-        internal bool HasStaticCurrentProcessIdentity =>
-            string.IsNullOrEmpty(MSBuildRuntime) &&
-            string.IsNullOrEmpty(MSBuildArchitecture);
-
-        internal static TaskActionTemplate Lower(ProjectTaskInstance task)
-        {
-            var parameters = new TaskActionParameter[task.ParametersForBuild.Count];
-            int index = 0;
-            foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.ParametersForBuild)
-            {
-                parameters[index++] = new TaskActionParameter(parameter.Key, parameter.Value.Item1, parameter.Value.Item2);
-            }
-
-            return new TaskActionTemplate(
-                task.Name,
-                task.Condition,
-                task.ContinueOnError,
-                task.MSBuildRuntime,
-                task.MSBuildArchitecture,
-                task.Location,
-                task.ConditionLocation,
-                task.ContinueOnErrorLocation,
-                parameters,
-                task.Outputs.Count != 0);
-        }
-    }
-
-    /// <summary>
-    /// A source parameter retained in source order so the bound action does not rediscover task-site shape.
-    /// </summary>
-    internal sealed record TaskActionParameter(string Name, string Value, ElementLocation Location);
-
-    /// <summary>
     /// Project-bound action for an ordinary, in-process assembly task site.
     /// </summary>
     internal sealed class CompiledTaskAction
     {
-        private readonly TaskActionTemplate _template;
+        private readonly CompiledTaskSourceProgram _program;
         private readonly PartiallyEvaluatedTaskRegistration _registration;
         private BoundTaskAction _boundAction;
 
         internal CompiledTaskAction(
-            TaskActionTemplate template,
+            CompiledTaskSourceProgram program,
             PartiallyEvaluatedTaskRegistration registration)
         {
-            _template = template;
+            _program = program;
             _registration = registration;
         }
 
-        internal TaskActionTemplate Template => _template;
+        internal CompiledTaskSourceProgram Program => _program;
+
+        internal CompiledTaskSourceProgram Template => _program;
 
         internal BoundTaskAction GetBoundAction()
         {
@@ -159,7 +115,32 @@ namespace Microsoft.Build.BackEnd
                 : Bind(registration);
         }
 
-        internal FastTaskAction GetFastAction() => GetBoundAction()?.FastAction;
+        internal FastTaskInvocation GetFastInvocation()
+        {
+            ResolvedTaskRegistration registration = _registration.Get();
+            if (registration == null)
+            {
+                return default;
+            }
+
+            FastTaskAction action =
+                FastTaskAction.TryGetOrCreate(_program, registration);
+            return action == null
+                ? default
+                : new FastTaskInvocation(
+                    action,
+                    registration.TaskFactoryWrapper);
+        }
+
+        internal FastTaskAction GetFastAction()
+        {
+            ResolvedTaskRegistration registration = _registration.Get();
+            return registration == null
+                ? null
+                : FastTaskAction.TryGetOrCreate(
+                    _program,
+                    registration);
+        }
 
         internal BoundTaskAction TryBind(TaskRequirements requirements, TaskFactoryWrapper taskFactoryWrapper)
         {
@@ -170,7 +151,7 @@ namespace Microsoft.Build.BackEnd
             }
 
             var registration = new ResolvedTaskRegistration(requirements, taskFactoryWrapper);
-            BoundTaskAction candidate = BoundTaskAction.TryCreate(_template, registration);
+            BoundTaskAction candidate = BoundTaskAction.TryCreate(_program, registration);
             if (candidate == null)
             {
                 return null;
@@ -187,7 +168,7 @@ namespace Microsoft.Build.BackEnd
                 return action;
             }
 
-            BoundTaskAction candidate = BoundTaskAction.TryCreate(_template, registration);
+            BoundTaskAction candidate = BoundTaskAction.TryCreate(_program, registration);
             return candidate == null
                 ? null
                 : Interlocked.CompareExchange(ref _boundAction, candidate, null) ?? candidate;
@@ -275,13 +256,12 @@ namespace Microsoft.Build.BackEnd
         internal FastTaskAction FastAction { get; }
 
         internal static BoundTaskAction TryCreate(
-            TaskActionTemplate template,
+            CompiledTaskSourceProgram program,
             ResolvedTaskRegistration registration)
         {
             TaskRequirements requirements = registration.Requirements;
             TaskFactoryWrapper taskFactoryWrapper = registration.TaskFactoryWrapper;
-            if (template.HasDeclaredOutputs ||
-                !template.HasStaticCurrentProcessIdentity ||
+            if (!program.HasStaticCurrentProcessIdentity ||
                 requirements != TaskRequirements.None ||
                 taskFactoryWrapper?.TaskFactory is not AssemblyTaskFactory ||
                 !taskFactoryWrapper.FactoryIdentityParameters.IsEmpty)
@@ -314,12 +294,12 @@ namespace Microsoft.Build.BackEnd
             }
 
             TaskActionTypeMetadata metadata = TaskActionTypeMetadata.GetOrCreate(loadedType);
-            var boundParameters = new BoundTaskParameter[template.Parameters.Length];
+            var boundParameters = new BoundTaskParameter[program.Parameters.Length];
             string[] requiredParameterNames = requiredParameters.Keys.ToArray();
 
-            for (int parameterIndex = 0; parameterIndex < template.Parameters.Length; parameterIndex++)
+            for (int parameterIndex = 0; parameterIndex < program.Parameters.Length; parameterIndex++)
             {
-                TaskActionParameter parameter = template.Parameters[parameterIndex];
+                CompiledTaskParameterProgram parameter = program.Parameters[parameterIndex];
                 int propertyIndex = FindPropertyIndex(loadedType, parameter.Name);
                 if (propertyIndex < 0)
                 {
@@ -351,14 +331,10 @@ namespace Microsoft.Build.BackEnd
                 ? ulong.MaxValue
                 : (1UL << requiredParameterNames.Length) - 1;
 
-            FastTaskAction fastAction = FastTaskAction.TryCreate(
-                template,
+            FastTaskAction fastAction = metadata.GetOrCreateFastAction(
+                program,
                 taskFactoryWrapper,
-                loadedType,
-                metadata,
-                boundParameters,
-                requiredParameterNames,
-                allRequiredParameters);
+                loadedType);
 
             return new BoundTaskAction(
                 taskFactoryWrapper,
@@ -369,7 +345,7 @@ namespace Microsoft.Build.BackEnd
                 fastAction);
         }
 
-        private static int FindPropertyIndex(LoadedType loadedType, string parameterName)
+        internal static int FindPropertyIndex(LoadedType loadedType, string parameterName)
         {
             int caseInsensitiveIndex = -1;
             int caseInsensitiveMatches = 0;
@@ -397,7 +373,7 @@ namespace Microsoft.Build.BackEnd
     /// </summary>
     internal sealed class BoundTaskParameter
     {
-        internal BoundTaskParameter(TaskActionParameter source, TaskPropertyInfo property, int propertyIndex, ulong requiredBit)
+        internal BoundTaskParameter(CompiledTaskParameterProgram source, TaskPropertyInfo property, int propertyIndex, ulong requiredBit)
         {
             Source = source;
             Property = property;
@@ -405,7 +381,7 @@ namespace Microsoft.Build.BackEnd
             RequiredBit = requiredBit;
         }
 
-        internal TaskActionParameter Source { get; }
+        internal CompiledTaskParameterProgram Source { get; }
 
         internal TaskPropertyInfo Property { get; }
 
@@ -427,6 +403,9 @@ namespace Microsoft.Build.BackEnd
 #endif
 
         private readonly TaskActionPropertyMetadata[] _properties;
+        private readonly ConditionalWeakTable<
+            CompiledTaskSourceProgram,
+            FastTaskActionBinding> _fastActions = new();
 
         private TaskActionTypeMetadata(LoadedType loadedType)
         {
@@ -436,7 +415,8 @@ namespace Microsoft.Build.BackEnd
                 ReflectableTaskPropertyInfo property = loadedType.Properties[i];
                 _properties[i] = new TaskActionPropertyMetadata(
                     property.PropertyType,
-                    CompileSetter(loadedType.Type, property));
+                    CompileSetter(loadedType.Type, property),
+                    CompileGetter(loadedType.Type, property));
             }
         }
 
@@ -457,6 +437,19 @@ namespace Microsoft.Build.BackEnd
 
         internal TaskActionPropertyMetadata GetProperty(int propertyIndex) => _properties[propertyIndex];
 
+        internal FastTaskAction GetOrCreateFastAction(
+            CompiledTaskSourceProgram program,
+            TaskFactoryWrapper taskFactoryWrapper,
+            LoadedType loadedType) =>
+            _fastActions.GetValue(
+                program,
+                source => new FastTaskActionBinding(
+                    FastTaskAction.TryCreate(
+                        source,
+                        taskFactoryWrapper,
+                        loadedType,
+                        this))).Action;
+
         private static Action<ITask, object> CompileSetter(Type taskType, ReflectableTaskPropertyInfo property)
         {
             MethodInfo setter = property.Reflection?.SetMethod;
@@ -471,6 +464,32 @@ namespace Microsoft.Build.BackEnd
 #else
             return null;
 #endif
+        }
+
+        private static Func<ITask, object> CompileGetter(Type taskType, ReflectableTaskPropertyInfo property)
+        {
+            MethodInfo getter = property.Reflection?.GetMethod;
+            if (getter?.IsPublic != true || !taskType.IsVisible)
+            {
+                return null;
+            }
+
+#if NET
+            MethodInvoker invoker = MethodInvoker.Create(getter);
+            return task => invoker.Invoke(task);
+#else
+            return null;
+#endif
+        }
+
+        private sealed class FastTaskActionBinding
+        {
+            internal FastTaskActionBinding(FastTaskAction action)
+            {
+                Action = action;
+            }
+
+            internal FastTaskAction Action { get; }
         }
 
 #if NET && FEATURE_ASSEMBLYLOADCONTEXT
@@ -496,14 +515,20 @@ namespace Microsoft.Build.BackEnd
     /// </summary>
     internal sealed class TaskActionPropertyMetadata
     {
-        internal TaskActionPropertyMetadata(Type parameterType, Action<ITask, object> setter)
+        internal TaskActionPropertyMetadata(
+            Type parameterType,
+            Action<ITask, object> setter,
+            Func<ITask, object> getter)
         {
             ParameterType = parameterType;
             Setter = setter;
+            Getter = getter;
         }
 
         internal Type ParameterType { get; }
 
         internal Action<ITask, object> Setter { get; }
+
+        internal Func<ITask, object> Getter { get; }
     }
 }

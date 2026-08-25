@@ -2991,7 +2991,9 @@ namespace Microsoft.Build.Evaluation
                 module.GetExpressionValue(
                     template.BeforeTargetsExpressionId),
                 module.GetExpressionValue(
-                    template.AfterTargetsExpressionId));
+                    template.AfterTargetsExpressionId),
+                module,
+                template.TaskPrograms);
         }
 
         private readonly struct TargetEvaluationEntry
@@ -3009,12 +3011,16 @@ namespace Microsoft.Build.Evaluation
                 ProjectTargetElement element,
                 string name,
                 string beforeTargets,
-                string afterTargets)
+                string afterTargets,
+                EvaluationModule module = null,
+                TableRange taskPrograms = default)
             {
                 Element = element;
                 Name = name;
                 BeforeTargets = beforeTargets;
                 AfterTargets = afterTargets;
+                Module = module;
+                TaskPrograms = taskPrograms;
             }
 
             internal ProjectTargetElement Element { get; }
@@ -3024,6 +3030,10 @@ namespace Microsoft.Build.Evaluation
             internal string BeforeTargets { get; }
 
             internal string AfterTargets { get; }
+
+            internal EvaluationModule Module { get; }
+
+            internal TableRange TaskPrograms { get; }
         }
 
         /// <summary>
@@ -3041,6 +3051,25 @@ namespace Microsoft.Build.Evaluation
             ProjectTargetElement targetElement = target.Element;
             // If we already have read a target instance for this element, use that.
             ProjectTargetInstance targetInstance = targetElement.TargetInstance ?? ReadNewTargetElement(targetElement, _projectSupportsReturnsAttribute[(ProjectRootElement)targetElement.Parent], _evaluationProfiler);
+            if (target.Module != null)
+            {
+                Assumed.Equal(
+                    targetInstance.Children.Count,
+                    target.TaskPrograms.Count);
+                for (int childIndex = 0;
+                     childIndex < target.TaskPrograms.Count;
+                     childIndex++)
+                {
+                    if (targetInstance.Children[childIndex]
+                            is ProjectTaskInstance task)
+                    {
+                        CompiledTaskSourceProgram.Associate(
+                            task,
+                            target.Module.TaskPrograms[
+                                target.TaskPrograms.Start + childIndex]);
+                    }
+                }
+            }
 
             string targetName = target.Name;
             ProjectTargetInstance otherTarget = _data.GetTarget(targetName);
