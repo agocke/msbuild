@@ -10,6 +10,7 @@ using System.Runtime.Remoting;
 using System.Runtime.Remoting.Lifetime;
 #endif
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Build.BackEnd.Components.Caching;
 using Microsoft.Build.Collections;
@@ -129,7 +130,6 @@ namespace Microsoft.Build.BackEnd
             _activeProxy = true;
             _callbackMonitor = new object();
             _disableInprocNode = Traits.Instance.InProcNodeDisabled || host.BuildParameters.DisableInProcNode;
-            EngineServices = new EngineServicesImpl(this);
         }
 
         /// <summary>
@@ -972,7 +972,12 @@ namespace Microsoft.Build.BackEnd
 #endif
         }
 
-        public EngineServices EngineServices { get; }
+        private EngineServices _engineServices;
+
+        public EngineServices EngineServices =>
+            LazyInitializer.EnsureInitialized(
+                ref _engineServices,
+                () => new EngineServicesImpl(this));
 
         #endregion
 

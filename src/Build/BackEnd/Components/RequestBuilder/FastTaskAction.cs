@@ -65,6 +65,7 @@ namespace Microsoft.Build.BackEnd
         private readonly FastTaskOutputOperation[] _outputs;
         private readonly string[] _requiredParameterNames;
         private readonly ulong _allRequiredParameters;
+        private readonly bool _requiresEagerTaskEnvironmentSetup;
 
         private FastTaskAction(
             CompiledTaskSourceProgram program,
@@ -86,6 +87,11 @@ namespace Microsoft.Build.BackEnd
             _outputs = outputs;
             _requiredParameterNames = requiredParameterNames;
             _allRequiredParameters = allRequiredParameters;
+            _requiresEagerTaskEnvironmentSetup =
+                !TaskRouter.HasMultiThreadableTaskAttribute(loadedType.Type) ||
+                typeof(IMultiThreadableTask).IsAssignableFrom(loadedType.Type) ||
+                loadedType.RequiresTaskEnvironmentForConstruction ||
+                inputs.Any(static input => input.RequiresTaskEnvironment);
         }
 
         internal Type TaskType => _loadedType.Type;
@@ -384,28 +390,27 @@ namespace Microsoft.Build.BackEnd
                     out continueOnErrorValue);
             }
 
-            TaskHost taskHost;
+            ResidualTaskExecutionContext executionContext;
             using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
                        BuildExecutionMetric.FastTaskHost,
                        _template.Name,
                        frame.TargetLoggingContext.Target.Name))
             {
-                if (frame.Host.BuildParameters.SaveOperatingEnvironment)
-                {
-                    frame.RequestEntry.TaskEnvironment.ProjectDirectory =
-                        new AbsolutePath(frame.RequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
-                }
-
-                taskHost = new TaskHost(
+                executionContext = new ResidualTaskExecutionContext(
                     frame.Host,
                     frame.RequestEntry,
                     _template.Location,
-                    frame.TargetBuilderCallback)
-                {
-                    LoggingContext = taskLoggingContext,
-                    ContinueOnError = continueOnError != ContinueOnError.ErrorAndStop,
-                    ConvertErrorsToWarnings = continueOnError == ContinueOnError.WarnAndContinue,
-                };
+                    frame.TargetBuilderCallback,
+                    taskLoggingContext,
+                    continueOnError != ContinueOnError.ErrorAndStop,
+                    continueOnError == ContinueOnError.WarnAndContinue,
+                    _template.Name,
+                    frame.TargetLoggingContext.Target.Name);
+            }
+
+            if (_requiresEagerTaskEnvironmentSetup)
+            {
+                executionContext.EnsureTaskEnvironmentInitialized();
             }
 
             ITask task = null;
@@ -438,7 +443,7 @@ namespace Microsoft.Build.BackEnd
                 {
                     frame.SetCurrentTask(task, taskLoggingContext, _template);
 
-                    task.BuildEngine = taskHost;
+                    task.BuildEngine = executionContext;
                     task.HostObject = null;
                     if (task is IMultiThreadableTask multiThreadableTask)
                     {
@@ -485,7 +490,8 @@ namespace Microsoft.Build.BackEnd
                 if (taskReturned &&
                     !taskResult &&
                     !taskLoggingContext.HasLoggedErrors &&
-                    (task.BuildEngine is TaskHost returnedTaskHost && returnedTaskHost.BuildRequestsSucceeded) &&
+                    (task.BuildEngine is ResidualTaskExecutionContext returnedContext &&
+                        returnedContext.BuildRequestsSucceeded) &&
                     !frame.CancellationToken.IsCancellationRequested)
                 {
                     if (task.BuildEngine is IBuildEngine7 buildEngine7 && buildEngine7.AllowFailureWithoutError)
@@ -562,7 +568,7 @@ namespace Microsoft.Build.BackEnd
                             .CleanupTask(task);
                     }
 
-                    taskHost.MarkAsInactive();
+                    executionContext.MarkAsInactive();
                 }
             }
         }
@@ -912,6 +918,22 @@ namespace Microsoft.Build.BackEnd
         }
 
         internal bool IsValid => _property != null;
+
+        internal bool RequiresTaskEnvironment
+        {
+            get
+            {
+                Type parameterType = _property.ParameterType;
+                if (parameterType.IsArray)
+                {
+                    parameterType = parameterType.GetElementType();
+                }
+
+                return parameterType == typeof(AbsolutePath) ||
+                    parameterType == typeof(FileInfo) ||
+                    parameterType == typeof(DirectoryInfo);
+            }
+        }
 
         internal static FastTaskInputOperation TryCreate(
             CompiledTaskParameterProgram source,

@@ -67,7 +67,7 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         /// <param name="taskType">The task type to check.</param>
         /// <returns>True if the task has the attribute; false otherwise.</returns>
-        private static bool HasMultiThreadableTaskAttribute(Type taskType)
+        internal static bool HasMultiThreadableTaskAttribute(Type taskType)
         {
             return s_multiThreadableTaskCache.GetOrAdd(
                 taskType,

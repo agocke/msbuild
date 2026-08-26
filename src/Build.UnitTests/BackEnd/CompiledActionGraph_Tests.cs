@@ -306,6 +306,307 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
+        public void FastActionDoesNotMaterializeTaskHostWhenTaskDoesNotUseBuildEngine()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" Behavior="DoNotUseBuildEngine" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(instance, instance.Targets["Build"]).GetAction(1);
+
+            ResidualTaskExecutionContext observedContext = null;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
+            BuildResult result;
+            try
+            {
+                Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.NotNull(observedContext);
+            Assert.False(observedContext.TaskHostMaterialized);
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionDoesNotInitializeTaskEnvironmentForLoggingOnly()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+
+            ResidualTaskExecutionContext observedContext = null;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
+            BuildResult result;
+            try
+            {
+                Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.NotNull(observedContext);
+            Assert.True(observedContext.TaskHostMaterialized);
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+        }
+
+        [Fact]
+        public void FastActionMaterializesTaskHostWhenEngineServicesAreRequested()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" Behavior="UseEngineServices" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+
+            ResidualTaskExecutionContext observedContext = null;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
+            BuildResult result;
+            try
+            {
+                Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.NotNull(observedContext);
+            Assert.True(observedContext.TaskHostMaterialized);
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+        }
+
+        [Fact]
+        public void FastActionInitializesTaskEnvironmentForInterfaceInjection()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+
+            Type taskType = typeof(CompiledActionGraphEnvironmentInterfaceTask);
+            using ProjectFromString projectFromString = new(CreateProjectForTask(
+                taskType,
+                $"""
+                <{taskType.FullName} />
+                <{taskType.FullName} />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+
+            ResidualTaskExecutionContext observedContext = null;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
+            BuildResult result;
+            try
+            {
+                Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.NotNull(observedContext);
+            Assert.True(observedContext.TaskEnvironmentInitialized);
+        }
+
+        [Fact]
+        public void FastActionInitializesTaskEnvironmentForConstructorInjection()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+
+            Type taskType = typeof(CompiledActionGraphEnvironmentConstructorTask);
+            using ProjectFromString projectFromString = new(CreateProjectForTask(
+                taskType,
+                $"""
+                <{taskType.FullName} />
+                <{taskType.FullName} />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+
+            ResidualTaskExecutionContext observedContext = null;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
+            BuildResult result;
+            try
+            {
+                Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.NotNull(observedContext);
+            Assert.True(observedContext.TaskEnvironmentInitialized);
+        }
+
+        [Fact]
+        public void FastActionInitializesTaskEnvironmentForPathConversion()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" Behavior="DoNotUseBuildEngine" />
+                <CompiledActionGraphTestTask Text="direct" Path="relative.txt" Behavior="DoNotUseBuildEngine" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+
+            ResidualTaskExecutionContext observedContext = null;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
+            BuildResult result;
+            try
+            {
+                Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.NotNull(observedContext);
+            Assert.True(observedContext.TaskEnvironmentInitialized);
+        }
+
+        [Fact]
+        public void FastActionPreservesEagerTaskEnvironmentForUnmarkedTask()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+
+            Type taskType = typeof(CompiledActionGraphLegacyEnvironmentTask);
+            using ProjectFromString projectFromString = new(CreateProjectForTask(
+                taskType,
+                $"""
+                <{taskType.FullName} />
+                <{taskType.FullName} />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+
+            ResidualTaskExecutionContext observedContext = null;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
+            BuildResult result;
+            try
+            {
+                Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.NotNull(observedContext);
+            Assert.True(observedContext.TaskEnvironmentInitialized);
+        }
+
+        [Fact]
+        public void FastActionResidualContextPreservesContinueOnErrorWithoutTaskHost()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" Behavior="ReadContinueOnError" ContinueOnError="WarnAndContinue" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+
+            ResidualTaskExecutionContext observedContext = null;
+            bool observedContinueOnError = false;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context =>
+            {
+                observedContext = context;
+                observedContinueOnError = context.ContinueOnError;
+            };
+            BuildResult result;
+            try
+            {
+                Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.True(observedContinueOnError);
+            Assert.NotNull(observedContext);
+            Assert.False(observedContext.TaskHostMaterialized);
+        }
+
+        [Fact]
+        public void FastActionResidualContextDoesNotMaterializeAfterTaskReturns()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
+            CompiledActionGraphTestTask.ResetState();
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="direct" Behavior="CaptureBuildEngine" />
+                """));
+            ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            ResidualTaskExecutionContext observedContext = null;
+            ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
+            MockLogger logger;
+            BuildResult result;
+            try
+            {
+                logger = Build(instance, out result);
+            }
+            finally
+            {
+                ResidualTaskExecutionContext.TestOnlyHookOnCreate = null;
+            }
+
+            Assert.NotNull(observedContext);
+            observedContext.LogMessageEvent(
+                new BuildMessageEventArgs(
+                    "late-residual-message",
+                    helpKeyword: null,
+                    senderName: nameof(CompiledActionGraphTestTask),
+                    MessageImportance.High));
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogDoesntContain("late-residual-message");
+            Assert.False(observedContext.TaskHostMaterialized);
+        }
+
+        [Fact]
         public void FastActionCancellationStateCancelsCurrentTask()
         {
             CompiledActionGraphTestTask.ResetState();
@@ -608,6 +909,18 @@ namespace Microsoft.Build.UnitTests.BackEnd
             </Project>
             """;
 
+        private static string CreateProjectForTask(
+            Type taskType,
+            string targetContents) =>
+            $"""
+            <Project>
+              <UsingTask TaskName="{taskType.FullName}" AssemblyFile="{taskType.Assembly.Location}" />
+              <Target Name="Build">
+                {targetContents}
+              </Target>
+            </Project>
+            """;
+
         private static MockLogger Build(ProjectInstance instance)
         {
             return Build(instance, out _);
@@ -639,6 +952,7 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
     }
 
+    [MSBuildMultiThreadableTask]
     public sealed class CompiledActionGraphTestTask : Microsoft.Build.Utilities.Task, ICancelableTask
     {
         private static int s_failNextConstructor;
@@ -664,6 +978,8 @@ namespace Microsoft.Build.UnitTests.BackEnd
         public string[] Values { get; set; }
 
         public ITaskItem[] Items { get; set; }
+
+        public AbsolutePath Path { get; set; }
 
         [Output]
         public string Result => Text;
@@ -709,6 +1025,28 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 BuildEngine = null;
                 return false;
             }
+            else if (string.Equals(Behavior, "DoNotUseBuildEngine", StringComparison.Ordinal))
+            {
+                return true;
+            }
+            else if (string.Equals(Behavior, "UseEngineServices", StringComparison.Ordinal))
+            {
+                if (BuildEngine is IBuildEngine10 buildEngine10)
+                {
+                    _ = buildEngine10.EngineServices;
+                }
+
+                return true;
+            }
+            else if (string.Equals(Behavior, "ReadContinueOnError", StringComparison.Ordinal))
+            {
+                return BuildEngine.ContinueOnError;
+            }
+            else if (string.Equals(Behavior, "CaptureBuildEngine", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
             Log.LogMessage(MessageImportance.High, "compiled-action:{0}:{1}:{2}", Text, Number, string.Join(",", Values ?? Array.Empty<string>()));
             if (Items != null)
             {
@@ -735,5 +1073,29 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Volatile.Write(ref s_failNextConstructor, 0);
             Volatile.Write(ref s_cancellationObserved, 0);
         }
+    }
+
+    [MSBuildMultiThreadableTask]
+    public sealed class CompiledActionGraphEnvironmentInterfaceTask : Microsoft.Build.Utilities.Task, IMultiThreadableTask
+    {
+        public TaskEnvironment TaskEnvironment { get; set; }
+
+        public override bool Execute() => TaskEnvironment != null;
+    }
+
+    [MSBuildMultiThreadableTask]
+    public sealed class CompiledActionGraphEnvironmentConstructorTask : Microsoft.Build.Utilities.Task
+    {
+        public CompiledActionGraphEnvironmentConstructorTask(TaskEnvironment taskEnvironment)
+        {
+            ArgumentNullException.ThrowIfNull(taskEnvironment);
+        }
+
+        public override bool Execute() => true;
+    }
+
+    public sealed class CompiledActionGraphLegacyEnvironmentTask : Microsoft.Build.Utilities.Task
+    {
+        public override bool Execute() => true;
     }
 }
