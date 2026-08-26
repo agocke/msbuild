@@ -452,15 +452,6 @@ namespace Microsoft.Build.BackEnd
             }
             else
             {
-                if (_componentHost.BuildParameters.SaveOperatingEnvironment)
-                {
-                    // Change to the project root directory.
-                    // If that directory does not exist, do nothing. (Do not check first as it is almost always there and it is slow)
-                    // This is because if the project has not been saved, this directory may not exist, yet it is often useful to still be able to build the project.
-                    // No errors are masked by doing this: errors loading the project from disk are reported at load time, if necessary.
-                    _buildRequestEntry.TaskEnvironment.ProjectDirectory = new AbsolutePath(_buildRequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
-                }
-
                 if (howToExecuteTask == TaskExecutionMode.ExecuteTaskAndGatherOutputs)
                 {
                     BoundTaskAction boundAction = _compiledTaskAction?.GetBoundAction();
@@ -509,6 +500,20 @@ namespace Microsoft.Build.BackEnd
 
                     if (requirements != null)
                     {
+                        LoadedType loadedType = taskFactoryWrapper?.TaskFactoryLoadedType;
+                        if (_componentHost.BuildParameters.SaveOperatingEnvironment &&
+                            (loadedType?.Type == null ||
+                             loadedType.LoadedViaMetadataLoadContext ||
+                             TaskRouter.NeedsProjectDirectoryReset(
+                                 _buildRequestEntry.TaskEnvironment,
+                                 loadedType.Type)))
+                        {
+                            // Legacy tasks may depend on the ambient current directory. Multi-threadable
+                            // tasks use the request's already-rooted virtual environment instead.
+                            _buildRequestEntry.TaskEnvironment.ProjectDirectory =
+                                new AbsolutePath(_buildRequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
+                        }
+
                         TaskLoggingContext taskLoggingContext = _targetLoggingContext.LogTaskBatchStarted(_projectFullPath, _targetChildInstance, taskAssemblyLocation);
                         MSBuildEventSource.Log.ExecuteTaskStart(_taskNode?.Name, taskLoggingContext.BuildEventContext.TaskId);
                         using var taskMeasurement =

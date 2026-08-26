@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using Microsoft.Build.BackEnd;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -42,6 +43,37 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         public void Dispose()
         {
             _env.Dispose();
+        }
+
+        [Fact]
+        public void ProjectDirectoryResetPolicy_UsesVirtualEnvironmentAndTaskContract()
+        {
+            TaskEnvironment taskEnvironment =
+                TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(_testProjectsDir);
+
+            try
+            {
+                TaskRouter.NeedsProjectDirectoryReset(
+                    taskEnvironment,
+                    typeof(AttributeTestTask)).ShouldBeFalse();
+                TaskRouter.NeedsProjectDirectoryReset(
+                    taskEnvironment,
+                    typeof(InterfaceTestTask)).ShouldBeFalse();
+                TaskRouter.NeedsProjectDirectoryReset(
+                    taskEnvironment,
+                    typeof(NonEnlightenedTestTask)).ShouldBeTrue();
+            }
+            finally
+            {
+                taskEnvironment.Dispose();
+            }
+
+            TaskRouter.NeedsProjectDirectoryReset(
+                TaskEnvironment.Fallback,
+                typeof(AttributeTestTask)).ShouldBeTrue();
+            TaskRouter.NeedsProjectDirectoryReset(
+                TaskEnvironment.Fallback,
+                typeof(InterfaceTestTask)).ShouldBeTrue();
         }
 
         /// <summary>

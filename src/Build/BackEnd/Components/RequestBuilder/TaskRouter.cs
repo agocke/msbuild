@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using Microsoft.Build.Framework;
 
 namespace Microsoft.Build.BackEnd
 {
@@ -58,6 +59,26 @@ namespace Microsoft.Build.BackEnd
         // Tasks without the thread-safety attribute need isolation in a TaskHost sidecar
         return !HasMultiThreadableTaskAttribute(taskType);
     }
+
+        internal static bool IsMultiThreadableTask(Type taskType)
+        {
+            ArgumentNullException.ThrowIfNull(taskType);
+
+            return typeof(IMultiThreadableTask).IsAssignableFrom(taskType) ||
+                HasMultiThreadableTaskAttribute(taskType);
+        }
+
+        internal static bool NeedsProjectDirectoryReset(TaskEnvironment taskEnvironment, bool isMultiThreadableTask)
+        {
+            ArgumentNullException.ThrowIfNull(taskEnvironment);
+
+            return !taskEnvironment.IsMultiThreaded || !isMultiThreadableTask;
+        }
+
+        internal static bool NeedsProjectDirectoryReset(TaskEnvironment taskEnvironment, Type taskType)
+        {
+            return NeedsProjectDirectoryReset(taskEnvironment, IsMultiThreadableTask(taskType));
+        }
 
         /// <summary>
         /// Checks if a task type is marked with MSBuildMultiThreadableTaskAttribute.

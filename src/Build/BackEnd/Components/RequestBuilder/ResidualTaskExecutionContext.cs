@@ -86,6 +86,11 @@ namespace Microsoft.Build.BackEnd
 
         internal bool TaskEnvironmentInitialized => Volatile.Read(ref _taskEnvironmentState) == 2;
 
+        internal void MarkTaskEnvironmentInitialized()
+        {
+            Volatile.Write(ref _taskEnvironmentState, 2);
+        }
+
         internal void EnsureTaskEnvironmentInitialized()
         {
             if (Volatile.Read(ref _taskEnvironmentState) == 2)

@@ -336,12 +336,12 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
             Assert.False(observedContext.TaskHostMaterialized);
-            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.True(observedContext.TaskEnvironmentInitialized);
             Assert.NotNull(action.GetFastAction());
         }
 
         [Fact]
-        public void FastActionDoesNotInitializeTaskEnvironmentForLoggingOnly()
+        public void FastActionInitializesTaskEnvironmentForLoggingOnlyInTraditionalMode()
         {
             using TestEnvironment environment = TestEnvironment.Create();
             environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
@@ -369,7 +369,7 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
             Assert.True(observedContext.TaskHostMaterialized);
-            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.True(observedContext.TaskEnvironmentInitialized);
         }
 
         [Fact]
@@ -401,7 +401,7 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
             Assert.True(observedContext.TaskHostMaterialized);
-            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.True(observedContext.TaskEnvironmentInitialized);
         }
 
         [Fact]

@@ -65,7 +65,7 @@ namespace Microsoft.Build.BackEnd
         private readonly FastTaskOutputOperation[] _outputs;
         private readonly string[] _requiredParameterNames;
         private readonly ulong _allRequiredParameters;
-        private readonly bool _requiresEagerTaskEnvironmentSetup;
+        private readonly bool _isMultiThreadableTask;
 
         private FastTaskAction(
             CompiledTaskSourceProgram program,
@@ -87,11 +87,7 @@ namespace Microsoft.Build.BackEnd
             _outputs = outputs;
             _requiredParameterNames = requiredParameterNames;
             _allRequiredParameters = allRequiredParameters;
-            _requiresEagerTaskEnvironmentSetup =
-                !TaskRouter.HasMultiThreadableTaskAttribute(loadedType.Type) ||
-                typeof(IMultiThreadableTask).IsAssignableFrom(loadedType.Type) ||
-                loadedType.RequiresTaskEnvironmentForConstruction ||
-                inputs.Any(static input => input.RequiresTaskEnvironment);
+            _isMultiThreadableTask = TaskRouter.IsMultiThreadableTask(loadedType.Type);
         }
 
         internal Type TaskType => _loadedType.Type;
@@ -390,6 +386,23 @@ namespace Microsoft.Build.BackEnd
                     out continueOnErrorValue);
             }
 
+            bool taskEnvironmentInitialized = false;
+            using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                       BuildExecutionMetric.FastTaskEnvironment,
+                       _template.Name,
+                       frame.TargetLoggingContext.Target.Name))
+            {
+                if (frame.Host.BuildParameters.SaveOperatingEnvironment &&
+                    TaskRouter.NeedsProjectDirectoryReset(
+                        frame.RequestEntry.TaskEnvironment,
+                        _isMultiThreadableTask))
+                {
+                    frame.RequestEntry.TaskEnvironment.ProjectDirectory =
+                        new AbsolutePath(frame.RequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
+                    taskEnvironmentInitialized = true;
+                }
+            }
+
             ResidualTaskExecutionContext executionContext;
             using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
                        BuildExecutionMetric.FastTaskHost,
@@ -408,9 +421,9 @@ namespace Microsoft.Build.BackEnd
                     frame.TargetLoggingContext.Target.Name);
             }
 
-            if (_requiresEagerTaskEnvironmentSetup)
+            if (taskEnvironmentInitialized)
             {
-                executionContext.EnsureTaskEnvironmentInitialized();
+                executionContext.MarkTaskEnvironmentInitialized();
             }
 
             ITask task = null;
