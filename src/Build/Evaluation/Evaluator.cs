@@ -1958,11 +1958,13 @@ namespace Microsoft.Build.Evaluation
                             .ToString()
                             .ToLowerInvariant();
                         break;
+#if NET
                     case CompiledPropertyFunctionKind
                         .RuntimeInformationRuntimeIdentifier:
                         result = System.Runtime.InteropServices
                             .RuntimeInformation.RuntimeIdentifier;
                         break;
+#endif
                     case CompiledPropertyFunctionKind.StringContains:
                         result = Convert.ToString(
                             receiver.Contains(argument0),

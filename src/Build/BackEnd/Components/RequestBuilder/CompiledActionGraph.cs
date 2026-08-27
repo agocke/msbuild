@@ -5,7 +5,9 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+#if NET
 using System.Linq.Expressions;
+#endif
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;

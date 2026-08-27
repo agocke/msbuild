@@ -3251,6 +3251,7 @@ namespace Microsoft.Build.Evaluation
                             CompiledPropertyFunctionKind
                                 .RuntimeInformationProcessArchitectureLowerInvariant;
                     }
+#if NET
                     else if (methodName.Equals(
                                  "RuntimeIdentifier",
                                  StringComparison.OrdinalIgnoreCase))
@@ -3259,6 +3260,7 @@ namespace Microsoft.Build.Evaluation
                             CompiledPropertyFunctionKind
                                 .RuntimeInformationRuntimeIdentifier;
                     }
+#endif
                     else
                     {
                         kind = default;
