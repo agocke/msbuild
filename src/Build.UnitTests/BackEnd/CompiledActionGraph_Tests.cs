@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
 #if FEATURE_ASSEMBLYLOADCONTEXT
@@ -271,6 +272,34 @@ namespace Microsoft.Build.UnitTests.BackEnd
                     out _));
         }
 
+        [UnixOnlyFact]
+        public void ScalarProgramUsesExplicitProjectRootForPathAdjustment()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            string projectRoot = environment.CreateFolder().Path;
+            Directory.CreateDirectory(Path.Combine(projectRoot, "directory"));
+            string unrelatedDirectory = environment.CreateFolder().Path;
+            string originalDirectory = Directory.GetCurrentDirectory();
+            CompiledScalarProgram program =
+                CompiledScalarProgram.TryCreate(@"directory\file");
+
+            try
+            {
+                Directory.SetCurrentDirectory(unrelatedDirectory);
+
+                Assert.Equal(
+                    "directory/file",
+                    program.Evaluate(
+                        environment: null,
+                        ElementLocation.EmptyLocation,
+                        projectRoot));
+            }
+            finally
+            {
+                Directory.SetCurrentDirectory(originalDirectory);
+            }
+        }
+
         [Fact]
         public void SemicolonVectorInputFallsBackToGenericExpansion()
         {
@@ -447,12 +476,14 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
             Assert.False(observedContext.TaskHostMaterialized);
-            Assert.True(observedContext.TaskEnvironmentInitialized);
-            Assert.NotNull(action.GetFastAction());
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.Equal(
+                FastTaskEnvironmentMode.None,
+                action.GetFastAction().EnvironmentMode);
         }
 
         [Fact]
-        public void FastActionInitializesTaskEnvironmentForLoggingOnlyInTraditionalMode()
+        public void FastActionDoesNotInitializeEnvironmentForLogging()
         {
             using TestEnvironment environment = TestEnvironment.Create();
             environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
@@ -464,6 +495,10 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 <CompiledActionGraphTestTask Text="direct" />
                 """));
             ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"]).GetAction(1);
 
             ResidualTaskExecutionContext observedContext = null;
             ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
@@ -480,7 +515,10 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
             Assert.True(observedContext.TaskHostMaterialized);
-            Assert.True(observedContext.TaskEnvironmentInitialized);
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.Equal(
+                FastTaskEnvironmentMode.None,
+                action.GetFastAction().EnvironmentMode);
         }
 
         [Fact]
@@ -496,6 +534,10 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 <CompiledActionGraphTestTask Text="direct" Behavior="UseEngineServices" />
                 """));
             ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"]).GetAction(1);
 
             ResidualTaskExecutionContext observedContext = null;
             ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
@@ -512,11 +554,14 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
             Assert.True(observedContext.TaskHostMaterialized);
-            Assert.True(observedContext.TaskEnvironmentInitialized);
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.Equal(
+                FastTaskEnvironmentMode.None,
+                action.GetFastAction().EnvironmentMode);
         }
 
         [Fact]
-        public void FastActionInitializesTaskEnvironmentForInterfaceInjection()
+        public void FastActionUsesProjectRootedEnvironmentForInterfaceInjection()
         {
             using TestEnvironment environment = TestEnvironment.Create();
             environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
@@ -525,17 +570,22 @@ namespace Microsoft.Build.UnitTests.BackEnd
             using ProjectFromString projectFromString = new(CreateProjectForTask(
                 taskType,
                 $"""
-                <{taskType.FullName} />
-                <{taskType.FullName} />
+                <{taskType.FullName} ExpectedProjectDirectory="$(MSBuildProjectDirectory)" />
+                <{taskType.FullName} ExpectedProjectDirectory="$(MSBuildProjectDirectory)" />
                 """));
             ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"]).GetAction(1);
 
             ResidualTaskExecutionContext observedContext = null;
             ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
             BuildResult result;
+            MockLogger logger;
             try
             {
-                Build(instance, out result);
+                logger = Build(instance, out result);
             }
             finally
             {
@@ -544,11 +594,15 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
-            Assert.True(observedContext.TaskEnvironmentInitialized);
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.Equal(
+                FastTaskEnvironmentMode.ProjectRooted,
+                action.GetFastAction().EnvironmentMode);
+            logger.AssertLogContains("interface-environment:True:True");
         }
 
         [Fact]
-        public void FastActionInitializesTaskEnvironmentForConstructorInjection()
+        public void FastActionUsesProjectRootedEnvironmentForConstructorInjection()
         {
             using TestEnvironment environment = TestEnvironment.Create();
             environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
@@ -557,17 +611,22 @@ namespace Microsoft.Build.UnitTests.BackEnd
             using ProjectFromString projectFromString = new(CreateProjectForTask(
                 taskType,
                 $"""
-                <{taskType.FullName} />
-                <{taskType.FullName} />
+                <{taskType.FullName} ExpectedProjectDirectory="$(MSBuildProjectDirectory)" />
+                <{taskType.FullName} ExpectedProjectDirectory="$(MSBuildProjectDirectory)" />
                 """));
             ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"]).GetAction(1);
 
             ResidualTaskExecutionContext observedContext = null;
             ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
             BuildResult result;
+            MockLogger logger;
             try
             {
-                Build(instance, out result);
+                logger = Build(instance, out result);
             }
             finally
             {
@@ -576,11 +635,15 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
-            Assert.True(observedContext.TaskEnvironmentInitialized);
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.Equal(
+                FastTaskEnvironmentMode.ProjectRooted,
+                action.GetFastAction().EnvironmentMode);
+            logger.AssertLogContains("constructor-environment:True:True");
         }
 
         [Fact]
-        public void FastActionInitializesTaskEnvironmentForPathConversion()
+        public void FastActionUsesProjectRootForPathConversion()
         {
             using TestEnvironment environment = TestEnvironment.Create();
             environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "1");
@@ -588,9 +651,16 @@ namespace Microsoft.Build.UnitTests.BackEnd
             using ProjectFromString projectFromString = new(CreateProject(
                 """
                 <CompiledActionGraphTestTask Text="warmup" Behavior="DoNotUseBuildEngine" />
-                <CompiledActionGraphTestTask Text="direct" Path="relative.txt" Behavior="DoNotUseBuildEngine" />
+                <CompiledActionGraphTestTask Text="direct"
+                                             Path="relative.txt"
+                                             ExpectedPath="$(MSBuildProjectDirectory)"
+                                             Behavior="ValidatePath" />
                 """));
             ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"]).GetAction(1);
 
             ResidualTaskExecutionContext observedContext = null;
             ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
@@ -606,7 +676,10 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
-            Assert.True(observedContext.TaskEnvironmentInitialized);
+            Assert.False(observedContext.TaskEnvironmentInitialized);
+            Assert.Equal(
+                FastTaskEnvironmentMode.ProjectRooted,
+                action.GetFastAction().EnvironmentMode);
         }
 
         [Fact]
@@ -623,6 +696,10 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 <{taskType.FullName} />
                 """));
             ProjectInstance instance = projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"]).GetAction(1);
 
             ResidualTaskExecutionContext observedContext = null;
             ResidualTaskExecutionContext.TestOnlyHookOnCreate = context => observedContext = context;
@@ -639,6 +716,9 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(BuildResultCode.Success, result.OverallResult);
             Assert.NotNull(observedContext);
             Assert.True(observedContext.TaskEnvironmentInitialized);
+            Assert.Equal(
+                FastTaskEnvironmentMode.AmbientProcess,
+                action.GetFastAction().EnvironmentMode);
         }
 
         [Fact]
@@ -1092,6 +1172,8 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
         public AbsolutePath Path { get; set; }
 
+        public string ExpectedPath { get; set; }
+
         [Output]
         public string Result => Text;
 
@@ -1149,6 +1231,11 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
                 return true;
             }
+            else if (string.Equals(Behavior, "ValidatePath", StringComparison.Ordinal))
+            {
+                return Path.Value ==
+                    System.IO.Path.Combine(ExpectedPath, "relative.txt");
+            }
             else if (string.Equals(Behavior, "ReadContinueOnError", StringComparison.Ordinal))
             {
                 return BuildEngine.ContinueOnError;
@@ -1197,7 +1284,19 @@ namespace Microsoft.Build.UnitTests.BackEnd
     {
         public TaskEnvironment TaskEnvironment { get; set; }
 
-        public override bool Execute() => TaskEnvironment != null;
+        public string ExpectedProjectDirectory { get; set; }
+
+        public override bool Execute()
+        {
+            bool matchesProjectDirectory =
+                TaskEnvironment.ProjectDirectory.Value == ExpectedProjectDirectory;
+            Log.LogMessage(
+                MessageImportance.High,
+                "interface-environment:{0}:{1}",
+                ReferenceEquals(TaskEnvironment, TaskEnvironment.Fallback),
+                matchesProjectDirectory);
+            return matchesProjectDirectory;
+        }
     }
 
     [MSBuildMultiThreadableTask]
@@ -1240,12 +1339,27 @@ namespace Microsoft.Build.UnitTests.BackEnd
     [MSBuildMultiThreadableTask]
     public sealed class CompiledActionGraphEnvironmentConstructorTask : Microsoft.Build.Utilities.Task
     {
+        private readonly TaskEnvironment _taskEnvironment;
+
         public CompiledActionGraphEnvironmentConstructorTask(TaskEnvironment taskEnvironment)
         {
             ArgumentNullException.ThrowIfNull(taskEnvironment);
+            _taskEnvironment = taskEnvironment;
         }
 
-        public override bool Execute() => true;
+        public string ExpectedProjectDirectory { get; set; }
+
+        public override bool Execute()
+        {
+            bool matchesProjectDirectory =
+                _taskEnvironment.ProjectDirectory.Value == ExpectedProjectDirectory;
+            Log.LogMessage(
+                MessageImportance.High,
+                "constructor-environment:{0}:{1}",
+                ReferenceEquals(_taskEnvironment, TaskEnvironment.Fallback),
+                matchesProjectDirectory);
+            return matchesProjectDirectory;
+        }
     }
 
     public sealed class CompiledActionGraphLegacyEnvironmentTask : Microsoft.Build.Utilities.Task

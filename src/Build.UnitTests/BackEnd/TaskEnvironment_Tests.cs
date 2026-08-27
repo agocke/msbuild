@@ -22,7 +22,7 @@ namespace Microsoft.Build.UnitTests
             new TheoryData<string>
             {
                 StubEnvironmentName,
-                MultithreadedEnvironmentName
+                MultithreadedEnvironmentName,
             };
 
         // CA2000 is suppressed because the caller is responsible for disposal via DisposeTaskEnvironment
@@ -291,6 +291,38 @@ namespace Microsoft.Build.UnitTests
             finally
             {
                 DisposeTaskEnvironment(taskEnvironment);
+            }
+        }
+
+        [Fact]
+        public void FallbackProjectDirectoryScopeDoesNotChangeProcessDirectory()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            string ambientDirectory = environment.CreateFolder().Path;
+            string projectDirectory = environment.CreateFolder().Path;
+            string originalDirectory = Directory.GetCurrentDirectory();
+
+            try
+            {
+                Directory.SetCurrentDirectory(ambientDirectory);
+
+                using (TaskEnvironment.Fallback.EnterProjectDirectoryScope(
+                           new AbsolutePath(projectDirectory, ignoreRootedCheck: true)))
+                {
+                    Directory.GetCurrentDirectory().ShouldBe(ambientDirectory);
+                    TaskEnvironment.Fallback.ProjectDirectory.Value.ShouldBe(projectDirectory);
+                    TaskEnvironment.Fallback.GetAbsolutePath("relative.txt").Value.ShouldBe(
+                        Path.Combine(projectDirectory, "relative.txt"));
+                    TaskEnvironment.Fallback.GetProcessStartInfo().WorkingDirectory.ShouldBe(
+                        projectDirectory);
+                }
+
+                TaskEnvironment.Fallback.ProjectDirectory.Value.ShouldBe(ambientDirectory);
+                TaskEnvironment.Fallback.GetProcessStartInfo().WorkingDirectory.ShouldBeEmpty();
+            }
+            finally
+            {
+                Directory.SetCurrentDirectory(originalDirectory);
             }
         }
 

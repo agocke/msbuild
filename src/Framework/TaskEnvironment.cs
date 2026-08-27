@@ -106,6 +106,9 @@ namespace Microsoft.Build.Framework
         /// <param name="newEnvironment">The new environment variables to set.</param>
         internal void SetEnvironment(IDictionary<string, string> newEnvironment) => _driver.SetEnvironment(newEnvironment);
 
+        internal IDisposable EnterProjectDirectoryScope(AbsolutePath projectDirectory) =>
+            ((MultiProcessTaskEnvironmentDriver)_driver).EnterProjectDirectoryScope(projectDirectory);
+
         /// <summary>
         /// Creates a new ProcessStartInfo configured for the current task execution environment.
         /// </summary>

@@ -562,7 +562,8 @@ namespace Microsoft.Build.Evaluation
 
         internal string Evaluate(
             ICompiledExpressionEnvironment environment,
-            IElementLocation location)
+            IElementLocation location,
+            string baseDirectory = "")
         {
             string escapedValue;
             if (_parts.Length == 1)
@@ -583,7 +584,7 @@ namespace Microsoft.Build.Evaluation
             string adjustedValue =
                 escapedValue.IndexOf('\\') == -1
                     ? escapedValue
-                    : FileUtilities.MaybeAdjustFilePath(escapedValue);
+                    : FileUtilities.MaybeAdjustFilePath(escapedValue, baseDirectory);
             return EscapingUtilities.UnescapeAll(adjustedValue);
         }
 

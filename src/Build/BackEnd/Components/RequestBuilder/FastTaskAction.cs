@@ -28,6 +28,13 @@ using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 
 namespace Microsoft.Build.BackEnd
 {
+    internal enum FastTaskEnvironmentMode : byte
+    {
+        None,
+        ProjectRooted,
+        AmbientProcess,
+    }
+
     internal readonly struct FastTaskInvocation
     {
         private readonly FastTaskAction _action;
@@ -65,7 +72,8 @@ namespace Microsoft.Build.BackEnd
         private readonly FastTaskOutputOperation[] _outputs;
         private readonly string[] _requiredParameterNames;
         private readonly ulong _allRequiredParameters;
-        private readonly bool _isMultiThreadableTask;
+        private readonly FastTaskEnvironmentMode _environmentMode;
+        private readonly bool _requiresTaskEnvironment;
 
         private FastTaskAction(
             CompiledTaskSourceProgram program,
@@ -76,7 +84,9 @@ namespace Microsoft.Build.BackEnd
             FastTaskInputOperation[] inputs,
             FastTaskOutputOperation[] outputs,
             string[] requiredParameterNames,
-            ulong allRequiredParameters)
+            ulong allRequiredParameters,
+            FastTaskEnvironmentMode environmentMode,
+            bool requiresTaskEnvironment)
         {
             _template = program;
             _loadedType = loadedType;
@@ -87,10 +97,13 @@ namespace Microsoft.Build.BackEnd
             _outputs = outputs;
             _requiredParameterNames = requiredParameterNames;
             _allRequiredParameters = allRequiredParameters;
-            _isMultiThreadableTask = TaskRouter.IsMultiThreadableTask(loadedType.Type);
+            _environmentMode = environmentMode;
+            _requiresTaskEnvironment = requiresTaskEnvironment;
         }
 
         internal Type TaskType => _loadedType.Type;
+
+        internal FastTaskEnvironmentMode EnvironmentMode => _environmentMode;
 
         internal static FastTaskAction TryGetOrCreate(
             CompiledTaskSourceProgram program,
@@ -156,6 +169,7 @@ namespace Microsoft.Build.BackEnd
                 requiredParameters.Keys.ToArray();
             var inputs =
                 new FastTaskInputOperation[program.Parameters.Length];
+            bool requiresProjectRootedPathConversion = false;
             for (int i = 0; i < inputs.Length; i++)
             {
                 CompiledTaskParameterProgram parameter =
@@ -202,6 +216,9 @@ namespace Microsoft.Build.BackEnd
                 {
                     return null;
                 }
+
+                requiresProjectRootedPathConversion |=
+                    inputs[i].RequiresTaskEnvironment;
             }
 
             var outputs =
@@ -224,6 +241,17 @@ namespace Microsoft.Build.BackEnd
                     ? ulong.MaxValue
                     : (1UL << requiredParameterNames.Length) - 1;
 
+            bool requiresTaskEnvironment =
+                typeof(IMultiThreadableTask).IsAssignableFrom(loadedType.Type) ||
+                loadedType.RequiresTaskEnvironmentForConstruction;
+            FastTaskEnvironmentMode environmentMode =
+                !TaskRouter.IsMultiThreadableTask(loadedType.Type)
+                    ? FastTaskEnvironmentMode.AmbientProcess
+                    : requiresTaskEnvironment ||
+                        requiresProjectRootedPathConversion
+                        ? FastTaskEnvironmentMode.ProjectRooted
+                        : FastTaskEnvironmentMode.None;
+
             return new FastTaskAction(
                 program,
                 loadedType,
@@ -233,7 +261,9 @@ namespace Microsoft.Build.BackEnd
                 inputs,
                 outputs,
                 requiredParameterNames,
-                allRequiredParameters);
+                allRequiredParameters,
+                environmentMode,
+                requiresTaskEnvironment);
         }
 
         internal bool CanExecute(FastTaskExecutionFrame frame)
@@ -387,21 +417,51 @@ namespace Microsoft.Build.BackEnd
             }
 
             bool taskEnvironmentInitialized = false;
-            using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
-                       BuildExecutionMetric.FastTaskEnvironment,
-                       _template.Name,
-                       frame.TargetLoggingContext.Target.Name))
+            TaskEnvironment taskEnvironment = null;
+            AbsolutePath projectRootDirectory = default;
+            IDisposable taskEnvironmentScope = null;
+            FastTaskEnvironmentMode executionEnvironmentMode =
+                !frame.Host.BuildParameters.SaveOperatingEnvironment &&
+                _environmentMode != FastTaskEnvironmentMode.AmbientProcess
+                    ? FastTaskEnvironmentMode.AmbientProcess
+                    : _environmentMode;
+            if (executionEnvironmentMode != FastTaskEnvironmentMode.None)
             {
-                if (frame.Host.BuildParameters.SaveOperatingEnvironment &&
-                    TaskRouter.NeedsProjectDirectoryReset(
-                        frame.RequestEntry.TaskEnvironment,
-                        _isMultiThreadableTask))
+                using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                           BuildExecutionMetric.FastTaskEnvironment,
+                           _template.Name,
+                           frame.TargetLoggingContext.Target.Name))
                 {
-                    frame.RequestEntry.TaskEnvironment.ProjectDirectory =
-                        new AbsolutePath(frame.RequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
-                    taskEnvironmentInitialized = true;
+                    if (executionEnvironmentMode == FastTaskEnvironmentMode.AmbientProcess)
+                    {
+                        taskEnvironment = frame.RequestEntry.TaskEnvironment;
+                        if (frame.Host.BuildParameters.SaveOperatingEnvironment)
+                        {
+                            taskEnvironment.ProjectDirectory =
+                                new AbsolutePath(frame.RequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
+                            taskEnvironmentInitialized = true;
+                        }
+                    }
+                    else
+                    {
+                        taskEnvironment = frame.RequestEntry.TaskEnvironment;
+                        projectRootDirectory =
+                            new AbsolutePath(frame.RequestEntry.ProjectRootDirectory, ignoreRootedCheck: true);
+                        if (_requiresTaskEnvironment)
+                        {
+                            if (!taskEnvironment.IsMultiThreaded)
+                            {
+                                taskEnvironmentScope =
+                                    taskEnvironment.EnterProjectDirectoryScope(
+                                            projectRootDirectory);
+                            }
+                        }
+                    }
                 }
             }
+
+            using IDisposable taskEnvironmentScopeLifetime =
+                taskEnvironmentScope;
 
             ResidualTaskExecutionContext executionContext;
             using (BuildExecutionInstrumentation.MeasureFastTaskDetail(
@@ -437,7 +497,8 @@ namespace Microsoft.Build.BackEnd
                     task = CreateTask(
                         frame,
                         taskLoggingContext,
-                        taskFactoryWrapper);
+                        taskFactoryWrapper,
+                        taskEnvironment);
                 }
 
                 if (task == null)
@@ -460,7 +521,7 @@ namespace Microsoft.Build.BackEnd
                     task.HostObject = null;
                     if (task is IMultiThreadableTask multiThreadableTask)
                     {
-                        multiThreadableTask.TaskEnvironment = frame.RequestEntry.TaskEnvironment;
+                        multiThreadableTask.TaskEnvironment = taskEnvironment;
                     }
 
                     if (task is IIncrementalTask incrementalTask)
@@ -480,7 +541,13 @@ namespace Microsoft.Build.BackEnd
                            _template.Name,
                            frame.TargetLoggingContext.Target.Name))
                 {
-                    SetInputs(frame, task, taskLoggingContext);
+                    SetInputs(
+                        frame,
+                        task,
+                        taskLoggingContext,
+                        executionEnvironmentMode,
+                        taskEnvironment,
+                        projectRootDirectory);
                 }
 
                 bool taskResult = ExecuteBody(
@@ -589,7 +656,8 @@ namespace Microsoft.Build.BackEnd
         private ITask CreateTask(
             FastTaskExecutionFrame frame,
             TaskLoggingContext taskLoggingContext,
-            TaskFactoryWrapper taskFactoryWrapper)
+            TaskFactoryWrapper taskFactoryWrapper,
+            TaskEnvironment taskEnvironment)
         {
             var assemblyTaskFactory =
                 (AssemblyTaskFactory)taskFactoryWrapper.TaskFactory;
@@ -597,7 +665,7 @@ namespace Microsoft.Build.BackEnd
 
             try
             {
-                ITask task = _loadedType.CreateInstance(frame.RequestEntry.TaskEnvironment);
+                ITask task = _loadedType.CreateInstance(taskEnvironment);
 #if NET
                 if (task != null && RuntimeFeature.IsDynamicCodeSupported)
 #else
@@ -654,12 +722,22 @@ namespace Microsoft.Build.BackEnd
         private void SetInputs(
             FastTaskExecutionFrame frame,
             ITask task,
-            TaskLoggingContext taskLoggingContext)
+            TaskLoggingContext taskLoggingContext,
+            FastTaskEnvironmentMode executionEnvironmentMode,
+            TaskEnvironment taskEnvironment,
+            AbsolutePath projectRootDirectory)
         {
             ulong requiredSet = 0;
             for (int i = 0; i < _inputs.Length; i++)
             {
-                if (!_inputs[i].Apply(frame, task, taskLoggingContext, ref requiredSet))
+                if (!_inputs[i].Apply(
+                        frame,
+                        task,
+                        taskLoggingContext,
+                        executionEnvironmentMode,
+                        taskEnvironment,
+                        projectRootDirectory,
+                        ref requiredSet))
                 {
                     ProjectErrorUtilities.ThrowInvalidProject(
                         _template.Location,
@@ -1049,6 +1127,9 @@ namespace Microsoft.Build.BackEnd
             FastTaskExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
+            FastTaskEnvironmentMode environmentMode,
+            TaskEnvironment taskEnvironment,
+            AbsolutePath projectRootDirectory,
             ref ulong requiredSet)
         {
             bool parameterSet;
@@ -1056,8 +1137,22 @@ namespace Microsoft.Build.BackEnd
             try
             {
                 success = _kind >= FastTaskInputKind.VectorTaskItem
-                    ? ApplyVector(frame, task, taskLoggingContext, out parameterSet)
-                    : ApplyScalar(frame, task, taskLoggingContext, out parameterSet);
+                    ? ApplyVector(
+                        frame,
+                        task,
+                        taskLoggingContext,
+                        environmentMode,
+                        taskEnvironment,
+                        projectRootDirectory,
+                        out parameterSet)
+                    : ApplyScalar(
+                        frame,
+                        task,
+                        taskLoggingContext,
+                        environmentMode,
+                        taskEnvironment,
+                        projectRootDirectory,
+                        out parameterSet);
             }
             catch (Exception ex)
                 when (ex is InvalidCastException ||
@@ -1068,7 +1163,7 @@ namespace Microsoft.Build.BackEnd
                 ProjectErrorUtilities.ThrowInvalidProject(
                     _source.Location,
                     "InvalidTaskParameterValueError",
-                    GetDisplayValue(frame),
+                    GetDisplayValue(frame, environmentMode, taskEnvironment),
                     _source.Name,
                     _property.ParameterType.FullName,
                     frame.TaskInstance.Name);
@@ -1098,6 +1193,9 @@ namespace Microsoft.Build.BackEnd
             FastTaskExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
+            FastTaskEnvironmentMode environmentMode,
+            TaskEnvironment taskEnvironment,
+            AbsolutePath projectRootDirectory,
             out bool parameterSet)
         {
             parameterSet = false;
@@ -1143,7 +1241,11 @@ namespace Microsoft.Build.BackEnd
                 _constantScalarValue ??
                 _source.ScalarProgram.Evaluate(
                     frame,
-                    _source.Location);
+                    _source.Location,
+                    GetScalarBaseDirectory(
+                        frame,
+                        environmentMode,
+                        taskEnvironment));
             if (expandedValue.Length == 0)
             {
                 return true;
@@ -1155,7 +1257,9 @@ namespace Microsoft.Build.BackEnd
                 ConvertStringToValue(
                     expandedValue,
                     parameterType,
-                    frame.RequestEntry.TaskEnvironment),
+                    environmentMode,
+                    taskEnvironment,
+                    projectRootDirectory),
                 taskLoggingContext,
                 frame);
         }
@@ -1164,6 +1268,9 @@ namespace Microsoft.Build.BackEnd
             FastTaskExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
+            FastTaskEnvironmentMode environmentMode,
+            TaskEnvironment taskEnvironment,
+            AbsolutePath projectRootDirectory,
             out bool parameterSet)
         {
             ICollection<ProjectItemInstance> items =
@@ -1243,7 +1350,9 @@ namespace Microsoft.Build.BackEnd
                         ConvertStringToValue(
                             item.EvaluatedInclude,
                             elementType,
-                            frame.RequestEntry.TaskEnvironment),
+                            environmentMode,
+                            taskEnvironment,
+                            projectRootDirectory),
                         index++);
                 }
 
@@ -1283,17 +1392,33 @@ namespace Microsoft.Build.BackEnd
         }
 
         private string GetDisplayValue(
-            FastTaskExecutionFrame frame) =>
+            FastTaskExecutionFrame frame,
+            FastTaskEnvironmentMode environmentMode,
+            TaskEnvironment taskEnvironment) =>
             _source.Kind == CompiledTaskValueKind.Scalar
                 ? _source.ScalarProgram.Evaluate(
                     frame,
-                    _source.Location)
+                    _source.Location,
+                    GetScalarBaseDirectory(
+                        frame,
+                        environmentMode,
+                        taskEnvironment))
                 : _source.Value;
+
+        private static string GetScalarBaseDirectory(
+            FastTaskExecutionFrame frame,
+            FastTaskEnvironmentMode environmentMode,
+            TaskEnvironment taskEnvironment) =>
+            environmentMode == FastTaskEnvironmentMode.AmbientProcess
+                ? taskEnvironment.ProjectDirectory.Value
+                : frame.RequestEntry.ProjectRootDirectory;
 
         private object ConvertStringToValue(
             string value,
             Type targetType,
-            TaskEnvironment taskEnvironment)
+            FastTaskEnvironmentMode environmentMode,
+            TaskEnvironment taskEnvironment,
+            AbsolutePath projectRootDirectory)
         {
             if (_conversionKind == FastTaskValueConversionKind.String)
             {
@@ -1307,21 +1432,44 @@ namespace Microsoft.Build.BackEnd
 
             if (_conversionKind == FastTaskValueConversionKind.AbsolutePath)
             {
-                return taskEnvironment.GetAbsolutePath(value);
+                return GetAbsolutePath(
+                    value,
+                    environmentMode,
+                    taskEnvironment,
+                    projectRootDirectory);
             }
 
             if (_conversionKind == FastTaskValueConversionKind.FileInfo)
             {
-                return new FileInfo(taskEnvironment.GetAbsolutePath(value).Value);
+                return new FileInfo(
+                    GetAbsolutePath(
+                        value,
+                        environmentMode,
+                        taskEnvironment,
+                        projectRootDirectory).Value);
             }
 
             if (_conversionKind == FastTaskValueConversionKind.DirectoryInfo)
             {
-                return new DirectoryInfo(taskEnvironment.GetAbsolutePath(value).Value);
+                return new DirectoryInfo(
+                    GetAbsolutePath(
+                        value,
+                        environmentMode,
+                        taskEnvironment,
+                        projectRootDirectory).Value);
             }
 
             return ValueTypeParser.Parse(value, targetType);
         }
+
+        private static AbsolutePath GetAbsolutePath(
+            string value,
+            FastTaskEnvironmentMode environmentMode,
+            TaskEnvironment taskEnvironment,
+            AbsolutePath projectRootDirectory) =>
+            environmentMode == FastTaskEnvironmentMode.ProjectRooted
+                ? new AbsolutePath(value, projectRootDirectory)
+                : taskEnvironment.GetAbsolutePath(value);
 
         private static FastTaskValueConversionKind GetConversionKind(
             Type valueType)
