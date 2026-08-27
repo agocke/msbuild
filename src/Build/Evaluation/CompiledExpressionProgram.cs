@@ -580,8 +580,35 @@ namespace Microsoft.Build.Evaluation
                 escapedValue = builder.ToString();
             }
 
-            return EscapingUtilities.UnescapeAll(
-                FileUtilities.MaybeAdjustFilePath(escapedValue));
+            string adjustedValue =
+                escapedValue.IndexOf('\\') == -1
+                    ? escapedValue
+                    : FileUtilities.MaybeAdjustFilePath(escapedValue);
+            return EscapingUtilities.UnescapeAll(adjustedValue);
+        }
+
+        internal bool TryEvaluateConstant(
+            IElementLocation location,
+            out string value)
+        {
+            if (_propertyNames.Length != 0)
+            {
+                value = null;
+                return false;
+            }
+
+            for (int i = 0; i < _parts.Length; i++)
+            {
+                if (_strings[_parts[i].Value].IndexOf('\\') != -1)
+                {
+                    // Unix path adjustment depends on the current project directory.
+                    value = null;
+                    return false;
+                }
+            }
+
+            value = Evaluate(environment: null, location);
+            return true;
         }
 
         private string EvaluatePart(

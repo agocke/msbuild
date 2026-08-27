@@ -161,6 +161,117 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
+        public void FastActionItemMutationDoesNotAffectProjectItems()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Input Include="original">
+                    <Source>project</Source>
+                  </Input>
+                </ItemGroup>
+                <CompiledActionGraphTestTask Text="warmup" />
+                <CompiledActionGraphTestTask Text="mutate" Behavior="MutateItems" Items="@(Input)" />
+                <CompiledActionGraphTestTask Text="read" Items="@(Input)" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(2);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("compiled-item:original:project");
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionSetsRequiredEmptyItemArray()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(
+                CreateProjectForTask(
+                    typeof(CompiledActionGraphRequiredItemsTask),
+                    """
+                    <ItemGroup>
+                      <Input Include="warmup" />
+                    </ItemGroup>
+                    <CompiledActionGraphRequiredItemsTask Items="@(Input)" />
+                    <CompiledActionGraphRequiredItemsTask Items="@(Missing)" />
+                    """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(2);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("required-items:0");
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void FastActionIgnoresIndexerProperties()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            Type taskType = typeof(CompiledActionGraphIndexerTask);
+            using ProjectFromString projectFromString = new(
+                CreateProjectForTask(
+                    taskType,
+                    $"""
+                    <{taskType.FullName} Text="warmup" />
+                    <{taskType.FullName} Text="direct" />
+                    """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTaskAction action =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"])
+                    .GetAction(1);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("indexer:direct");
+            Assert.NotNull(action.GetFastAction());
+        }
+
+        [Fact]
+        public void ScalarProgramDoesNotCachePotentialUnixPath()
+        {
+            CompiledScalarProgram program =
+                CompiledScalarProgram.TryCreate(@"directory\file");
+
+            Assert.NotNull(program);
+            Assert.False(
+                program.TryEvaluateConstant(
+                    ElementLocation.EmptyLocation,
+                    out _));
+        }
+
+        [Fact]
         public void SemicolonVectorInputFallsBackToGenericExpansion()
         {
             using TestEnvironment environment = TestEnvironment.Create();
@@ -1046,6 +1157,12 @@ namespace Microsoft.Build.UnitTests.BackEnd
             {
                 return true;
             }
+            else if (string.Equals(Behavior, "MutateItems", StringComparison.Ordinal))
+            {
+                Items[0].ItemSpec = "mutated";
+                Items[0].SetMetadata("Source", "task");
+                return true;
+            }
 
             Log.LogMessage(MessageImportance.High, "compiled-action:{0}:{1}:{2}", Text, Number, string.Join(",", Values ?? Array.Empty<string>()));
             if (Items != null)
@@ -1081,6 +1198,43 @@ namespace Microsoft.Build.UnitTests.BackEnd
         public TaskEnvironment TaskEnvironment { get; set; }
 
         public override bool Execute() => TaskEnvironment != null;
+    }
+
+    [MSBuildMultiThreadableTask]
+    public sealed class CompiledActionGraphRequiredItemsTask : Microsoft.Build.Utilities.Task
+    {
+        [Required]
+        public ITaskItem[] Items { get; set; }
+
+        public override bool Execute()
+        {
+            Log.LogMessage(
+                MessageImportance.High,
+                "required-items:{0}",
+                Items.Length);
+            return true;
+        }
+    }
+
+    [MSBuildMultiThreadableTask]
+    public sealed class CompiledActionGraphIndexerTask : Microsoft.Build.Utilities.Task
+    {
+        public string Text { get; set; }
+
+        public string this[int index]
+        {
+            get => null;
+            set { }
+        }
+
+        public override bool Execute()
+        {
+            Log.LogMessage(
+                MessageImportance.High,
+                "indexer:{0}",
+                Text);
+            return true;
+        }
     }
 
     [MSBuildMultiThreadableTask]

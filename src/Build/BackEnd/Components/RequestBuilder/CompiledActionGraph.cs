@@ -5,6 +5,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -453,12 +454,30 @@ namespace Microsoft.Build.BackEnd
         private static Action<ITask, object> CompileSetter(Type taskType, ReflectableTaskPropertyInfo property)
         {
             MethodInfo setter = property.Reflection?.SetMethod;
-            if (setter?.IsPublic != true || !taskType.IsVisible)
+            if (setter?.IsPublic != true ||
+                setter.GetParameters().Length != 1 ||
+                !taskType.IsVisible)
             {
                 return null;
             }
 
 #if NET
+            if (RuntimeFeature.IsDynamicCodeSupported)
+            {
+                ParameterExpression task =
+                    Expression.Parameter(typeof(ITask), "task");
+                ParameterExpression value =
+                    Expression.Parameter(typeof(object), "value");
+                MethodCallExpression call = Expression.Call(
+                    Expression.Convert(task, taskType),
+                    setter,
+                    Expression.Convert(value, property.PropertyType));
+                return Expression.Lambda<Action<ITask, object>>(
+                    call,
+                    task,
+                    value).Compile();
+            }
+
             MethodInvoker invoker = MethodInvoker.Create(setter);
             return (task, value) => invoker.Invoke(task, value);
 #else
@@ -469,7 +488,9 @@ namespace Microsoft.Build.BackEnd
         private static Func<ITask, object> CompileGetter(Type taskType, ReflectableTaskPropertyInfo property)
         {
             MethodInfo getter = property.Reflection?.GetMethod;
-            if (getter?.IsPublic != true || !taskType.IsVisible)
+            if (getter?.IsPublic != true ||
+                getter.GetParameters().Length != 0 ||
+                !taskType.IsVisible)
             {
                 return null;
             }

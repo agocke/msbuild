@@ -914,39 +914,60 @@ namespace Microsoft.Build.BackEnd
     /// <summary>
     /// One prebound input expression, conversion, and setter call.
     /// </summary>
+    internal enum FastTaskInputKind : byte
+    {
+        ScalarValue,
+        ScalarTaskItem,
+        VectorTaskItem,
+        VectorString,
+        VectorBoolean,
+        VectorValue,
+    }
+
+    internal enum FastTaskValueConversionKind : byte
+    {
+        General,
+        String,
+        Boolean,
+        AbsolutePath,
+        FileInfo,
+        DirectoryInfo,
+    }
+
     internal readonly struct FastTaskInputOperation
     {
         private readonly CompiledTaskParameterProgram _source;
         private readonly TaskActionPropertyMetadata _property;
         private readonly ulong _requiredBit;
+        private readonly FastTaskInputKind _kind;
+        private readonly FastTaskValueConversionKind _conversionKind;
+        private readonly string _constantScalarValue;
+        private readonly object _emptyVector;
 
         private FastTaskInputOperation(
             CompiledTaskParameterProgram source,
             TaskActionPropertyMetadata property,
-            ulong requiredBit)
+            ulong requiredBit,
+            FastTaskInputKind kind,
+            FastTaskValueConversionKind conversionKind,
+            string constantScalarValue,
+            object emptyVector)
         {
             _source = source;
             _property = property;
             _requiredBit = requiredBit;
+            _kind = kind;
+            _conversionKind = conversionKind;
+            _constantScalarValue = constantScalarValue;
+            _emptyVector = emptyVector;
         }
 
         internal bool IsValid => _property != null;
 
-        internal bool RequiresTaskEnvironment
-        {
-            get
-            {
-                Type parameterType = _property.ParameterType;
-                if (parameterType.IsArray)
-                {
-                    parameterType = parameterType.GetElementType();
-                }
-
-                return parameterType == typeof(AbsolutePath) ||
-                    parameterType == typeof(FileInfo) ||
-                    parameterType == typeof(DirectoryInfo);
-            }
-        }
+        internal bool RequiresTaskEnvironment =>
+            _conversionKind == FastTaskValueConversionKind.AbsolutePath ||
+            _conversionKind == FastTaskValueConversionKind.FileInfo ||
+            _conversionKind == FastTaskValueConversionKind.DirectoryInfo;
 
         internal static FastTaskInputOperation TryCreate(
             CompiledTaskParameterProgram source,
@@ -981,10 +1002,47 @@ namespace Microsoft.Build.BackEnd
                 return default;
             }
 
+            FastTaskInputKind kind;
+            Type valueType;
+            object emptyVector = null;
+            if (parameterType.IsArray)
+            {
+                valueType = parameterType.GetElementType();
+                kind = parameterType == typeof(ITaskItem[])
+                    ? FastTaskInputKind.VectorTaskItem
+                    : parameterType == typeof(string[])
+                        ? FastTaskInputKind.VectorString
+                        : parameterType == typeof(bool[])
+                            ? FastTaskInputKind.VectorBoolean
+                            : FastTaskInputKind.VectorValue;
+#if NET
+                emptyVector =
+                    Array.CreateInstanceFromArrayType(parameterType, 0);
+#else
+                emptyVector = Array.CreateInstance(valueType, 0);
+#endif
+            }
+            else
+            {
+                valueType = parameterType;
+                kind = parameterType == typeof(ITaskItem)
+                    ? FastTaskInputKind.ScalarTaskItem
+                    : FastTaskInputKind.ScalarValue;
+            }
+
+            string constantScalarValue = null;
+            source.ScalarProgram?.TryEvaluateConstant(
+                source.Location,
+                out constantScalarValue);
+
             return new FastTaskInputOperation(
                 source,
                 property,
-                requiredBit);
+                requiredBit,
+                kind,
+                GetConversionKind(valueType),
+                constantScalarValue,
+                emptyVector);
         }
 
         internal bool Apply(
@@ -997,7 +1055,7 @@ namespace Microsoft.Build.BackEnd
             bool success;
             try
             {
-                success = _property.ParameterType.IsArray
+                success = _kind >= FastTaskInputKind.VectorTaskItem
                     ? ApplyVector(frame, task, taskLoggingContext, out parameterSet)
                     : ApplyScalar(frame, task, taskLoggingContext, out parameterSet);
             }
@@ -1045,7 +1103,7 @@ namespace Microsoft.Build.BackEnd
             parameterSet = false;
             Type parameterType = _property.ParameterType;
 
-            if (parameterType == typeof(ITaskItem))
+            if (_kind == FastTaskInputKind.ScalarTaskItem)
             {
                 ICollection<ProjectItemInstance> items =
                     frame.Lookup.GetItems(_source.ItemType);
@@ -1081,9 +1139,11 @@ namespace Microsoft.Build.BackEnd
                     frame);
             }
 
-            string expandedValue = _source.ScalarProgram.Evaluate(
-                frame,
-                _source.Location);
+            string expandedValue =
+                _constantScalarValue ??
+                _source.ScalarProgram.Evaluate(
+                    frame,
+                    _source.Location);
             if (expandedValue.Length == 0)
             {
                 return true;
@@ -1092,7 +1152,10 @@ namespace Microsoft.Build.BackEnd
             parameterSet = true;
             return SetValue(
                 task,
-                ConvertStringToValue(expandedValue, parameterType, frame.RequestEntry.TaskEnvironment),
+                ConvertStringToValue(
+                    expandedValue,
+                    parameterType,
+                    frame.RequestEntry.TaskEnvironment),
                 taskLoggingContext,
                 frame);
         }
@@ -1106,8 +1169,6 @@ namespace Microsoft.Build.BackEnd
             ICollection<ProjectItemInstance> items =
                 frame.Lookup.GetItems(_source.ItemType);
             int itemCount = items?.Count ?? 0;
-            IEnumerable<ProjectItemInstance> visibleItems =
-                items ?? Array.Empty<ProjectItemInstance>();
 
             parameterSet = itemCount > 0 || _requiredBit != 0;
             if (!parameterSet)
@@ -1115,35 +1176,44 @@ namespace Microsoft.Build.BackEnd
                 return true;
             }
 
+            if (itemCount == 0)
+            {
+                return SetValue(
+                    task,
+                    _emptyVector,
+                    taskLoggingContext,
+                    frame);
+            }
+
             Type parameterType = _property.ParameterType;
             object value;
-            if (parameterType == typeof(ITaskItem[]))
+            if (_kind == FastTaskInputKind.VectorTaskItem)
             {
                 var values = new ITaskItem[itemCount];
                 int index = 0;
-                foreach (ProjectItemInstance item in visibleItems)
+                foreach (ProjectItemInstance item in items)
                 {
                     values[index++] = new TaskItem(item);
                 }
 
                 value = values;
             }
-            else if (parameterType == typeof(string[]))
+            else if (_kind == FastTaskInputKind.VectorString)
             {
                 var values = new string[itemCount];
                 int index = 0;
-                foreach (ProjectItemInstance item in visibleItems)
+                foreach (ProjectItemInstance item in items)
                 {
                     values[index++] = item.EvaluatedInclude;
                 }
 
                 value = values;
             }
-            else if (parameterType == typeof(bool[]))
+            else if (_kind == FastTaskInputKind.VectorBoolean)
             {
                 var values = new bool[itemCount];
                 int index = 0;
-                foreach (ProjectItemInstance item in visibleItems)
+                foreach (ProjectItemInstance item in items)
                 {
                     values[index++] =
                         ConversionUtilities.ConvertStringToBool(
@@ -1167,7 +1237,7 @@ namespace Microsoft.Build.BackEnd
 #endif
                 Type elementType = parameterType.GetElementType();
                 int index = 0;
-                foreach (ProjectItemInstance item in visibleItems)
+                foreach (ProjectItemInstance item in items)
                 {
                     values.SetValue(
                         ConvertStringToValue(
@@ -1220,27 +1290,68 @@ namespace Microsoft.Build.BackEnd
                     _source.Location)
                 : _source.Value;
 
-        private static object ConvertStringToValue(
+        private object ConvertStringToValue(
             string value,
             Type targetType,
             TaskEnvironment taskEnvironment)
         {
-            if (targetType == typeof(AbsolutePath))
+            if (_conversionKind == FastTaskValueConversionKind.String)
+            {
+                return value;
+            }
+
+            if (_conversionKind == FastTaskValueConversionKind.Boolean)
+            {
+                return ConversionUtilities.ConvertStringToBool(value);
+            }
+
+            if (_conversionKind == FastTaskValueConversionKind.AbsolutePath)
             {
                 return taskEnvironment.GetAbsolutePath(value);
             }
 
-            if (targetType == typeof(FileInfo))
+            if (_conversionKind == FastTaskValueConversionKind.FileInfo)
             {
                 return new FileInfo(taskEnvironment.GetAbsolutePath(value).Value);
             }
 
-            if (targetType == typeof(DirectoryInfo))
+            if (_conversionKind == FastTaskValueConversionKind.DirectoryInfo)
             {
                 return new DirectoryInfo(taskEnvironment.GetAbsolutePath(value).Value);
             }
 
             return ValueTypeParser.Parse(value, targetType);
+        }
+
+        private static FastTaskValueConversionKind GetConversionKind(
+            Type valueType)
+        {
+            if (valueType == typeof(string))
+            {
+                return FastTaskValueConversionKind.String;
+            }
+
+            if (valueType == typeof(bool))
+            {
+                return FastTaskValueConversionKind.Boolean;
+            }
+
+            if (valueType == typeof(AbsolutePath))
+            {
+                return FastTaskValueConversionKind.AbsolutePath;
+            }
+
+            if (valueType == typeof(FileInfo))
+            {
+                return FastTaskValueConversionKind.FileInfo;
+            }
+
+            if (valueType == typeof(DirectoryInfo))
+            {
+                return FastTaskValueConversionKind.DirectoryInfo;
+            }
+
+            return FastTaskValueConversionKind.General;
         }
     }
 

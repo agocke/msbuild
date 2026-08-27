@@ -830,6 +830,8 @@ namespace Microsoft.Build.Execution
             /// </summary>
             private IList<ProjectItemDefinitionInstance> _itemDefinitions;
 
+            private bool _itemDefinitionsShared;
+
             /// <summary>
             /// Directory of the associated project. If this is available,
             /// it is used to calculate built-in metadata. Otherwise,
@@ -880,7 +882,10 @@ namespace Microsoft.Build.Execution
             /// Parameters are cloned.
             /// </summary>
             internal TaskItem(ProjectItemInstance item)
-                : this(item._taskItem, false /* no original itemspec */)
+                : this(
+                    item._taskItem,
+                    false /* no original itemspec */,
+                    shareItemDefinitions: true)
             {
             }
 
@@ -888,11 +893,24 @@ namespace Microsoft.Build.Execution
             /// Creates an instance of this class given the backing item.
             /// Does not copy immutability, since there is no connection with the original.
             /// </summary>
-            private TaskItem(TaskItem source, bool addOriginalItemSpec)
+            private TaskItem(
+                TaskItem source,
+                bool addOriginalItemSpec,
+                bool shareItemDefinitions = false)
             {
                 _includeEscaped = source._includeEscaped;
                 _includeBeforeWildcardExpansionEscaped = source._includeBeforeWildcardExpansionEscaped;
-                source.CopyMetadataTo(this, addOriginalItemSpec);
+                if (shareItemDefinitions)
+                {
+                    _directMetadata = source._directMetadata;
+                    _itemDefinitions = source._itemDefinitions;
+                    _itemDefinitionsShared = _itemDefinitions != null;
+                }
+                else
+                {
+                    source.CopyMetadataTo(this, addOriginalItemSpec);
+                }
+
                 _cachedModifiers = source._cachedModifiers;
                 _definingFileEscaped = source._definingFileEscaped;
             }
@@ -1540,6 +1558,14 @@ namespace Microsoft.Build.Execution
                     }
                     else if (_itemDefinitions != null)
                     {
+                        if (destinationAsTaskItem._itemDefinitionsShared)
+                        {
+                            destinationAsTaskItem._itemDefinitions =
+                                new List<ProjectItemDefinitionInstance>(
+                                    destinationAsTaskItem._itemDefinitions);
+                            destinationAsTaskItem._itemDefinitionsShared = false;
+                        }
+
                         for (int i = 0; i < _itemDefinitions.Count; i++)
                         {
                             destinationAsTaskItem._itemDefinitions.Add(_itemDefinitions[i]);
