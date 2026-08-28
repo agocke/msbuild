@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 #if FEATURE_ASSEMBLYLOADCONTEXT
@@ -113,6 +114,8 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(
                 CompiledTargetActionKind.ItemGroup,
                 plan.GetActionRecord(1).Kind);
+            Assert.NotNull(
+                plan.GetActionRecord(1).ItemGroupAction);
             Assert.Equal(
                 CompiledTargetActionKind.Task,
                 plan.GetActionRecord(2).Kind);
@@ -160,6 +163,8 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.NotNull(
                 plan.GetActionRecord(0).PropertyGroupAction);
+            Assert.NotNull(
+                plan.GetActionRecord(1).ItemGroupAction);
 
             MockLogger logger = Build(instance, out BuildResult result);
 
@@ -209,6 +214,459 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(
                 "inferred",
                 instance.GetPropertyValue("InferredValue"));
+        }
+
+        [Fact]
+        public void CompiledItemGroupRunsDuringOutputInference()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            string upToDateFile =
+                environment.CreateFile(
+                    "item-group-up-to-date.marker",
+                    string.Empty).Path;
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <Target
+                      Name="Build"
+                      Inputs="{upToDateFile}"
+                      Outputs="{upToDateFile}">
+                    <ItemGroup>
+                      <InferredItem Include="inferred" />
+                    </ItemGroup>
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "inferred",
+                Assert.Single(instance.GetItems("InferredItem"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupPreservesOrderedOperationsAndEscaping()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup Condition="'$(RunGroup)' == 'true'">
+                  <Generated
+                      Include="a%3Bb;@(Source);remove-me;skip"
+                      Exclude="skip"
+                      KeepDuplicates="'$(KeepDuplicates)' == 'true'">
+                    <Kind Condition="'$(SetMetadata)' == 'true'">$(Suffix)%3Btail</Kind>
+                  </Generated>
+                  <Generated Remove="remove-me" />
+                  <Generated>
+                    <Updated>$(Suffix)%3Bupdated</Updated>
+                  </Generated>
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <RunGroup>true</RunGroup>
+                  <KeepDuplicates>true</KeepDuplicates>
+                  <SetMetadata>true</SetMetadata>
+                  <Suffix>b</Suffix>
+                </PropertyGroup>
+                <ItemDefinitionGroup>
+                  <Generated>
+                    <FromDefinition>definition</FromDefinition>
+                  </Generated>
+                </ItemDefinitionGroup>
+                <ItemGroup>
+                  <Source Include="copied">
+                    <Origin>source</Origin>
+                  </Source>
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+            CompiledItemGroupAction action =
+                plan.GetActionRecord(0).ItemGroupAction;
+
+            Assert.NotNull(action);
+            Assert.Equal(3, action.OperationCount);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            var outputs =
+                new List<ProjectItemInstance>(
+                    instance.GetItems("Generated"));
+            Assert.Equal(2, outputs.Count);
+            ProjectItemInstance literal =
+                Assert.Single(
+                    outputs,
+                    output => output.EvaluatedInclude == "a;b");
+            ProjectItemInstance copied =
+                Assert.Single(
+                    outputs,
+                    output => output.EvaluatedInclude == "copied");
+            Assert.Equal("source", copied.GetMetadataValue("Origin"));
+            foreach (ProjectItemInstance output in new[] { literal, copied })
+            {
+                Assert.Equal(
+                    "b;tail",
+                    output.GetMetadataValue("Kind"));
+                Assert.Equal(
+                    "b;updated",
+                    output.GetMetadataValue("Updated"));
+                Assert.Equal(
+                    "definition",
+                    output.GetMetadataValue("FromDefinition"));
+            }
+        }
+
+        [Fact]
+        public void CompiledItemGroupPreservesDuplicateElimination()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Generated Include="same;same" KeepDuplicates="false" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Single(instance.GetItems("Generated"));
+        }
+
+        [Fact]
+        public void CompiledItemGroupExpandsItemVectorsIntroducedByProperties()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup Condition="'$(Prefix)(Source)' == 'one;two'">
+                  <Generated Include="value">
+                    <Captured>$(Vector)</Captured>
+                  </Generated>
+                </ItemGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Source Include="one;two" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            instance.SetProperty("Prefix", "@");
+            instance.SetProperty("Vector", "@(Source)");
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "one;two",
+                Assert.Single(instance.GetItems("Generated"))
+                    .GetMetadataValue("Captured"));
+        }
+
+        [Fact]
+        public void CompiledItemGroupPreservesInputLogging()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Generated Include="logged" />
+                  <Generated Remove="logged" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            MockLogger logger = Build(
+                instance,
+                out BuildResult result,
+                logTaskInputs: true);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("Added Item(s):");
+            logger.AssertLogContains("Removed Item(s):");
+        }
+
+        [Fact]
+        public void CompiledItemGroupSupportsTransformsFunctionsAndMetadataFilters()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Generated Include="@(Source->'%(Filename).obj')">
+                    <Names>@(Source->Metadata('Keep')->Distinct())</Names>
+                  </Generated>
+                  <Generated Remove="@(RemoveSource->'%(Filename).obj')" />
+                  <Filtered Include="@(Source)" KeepMetadata="$(MetadataToKeep)" />
+                  <Removed Include="@(Source)" RemoveMetadata="@(MetadataToRemove)" />
+                  <Count Include="@(Source->Count())" />
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <MetadataToKeep>Keep</MetadataToKeep>
+                </PropertyGroup>
+                <ItemGroup>
+                  <Source Include="a.cpp">
+                    <Keep>one</Keep>
+                    <Drop>x</Drop>
+                  </Source>
+                  <Source Include="b.cpp">
+                    <Keep>two</Keep>
+                    <Drop>y</Drop>
+                  </Source>
+                  <RemoveSource Include="a.cpp" />
+                  <MetadataToRemove Include="Drop" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            ProjectItemInstance generated =
+                Assert.Single(instance.GetItems("Generated"));
+            Assert.Equal("b.obj", generated.EvaluatedInclude);
+            Assert.Equal(
+                "one;two",
+                generated.GetMetadataValue("Names"));
+
+            foreach (ProjectItemInstance filtered
+                in instance.GetItems("Filtered"))
+            {
+                Assert.NotEmpty(filtered.GetMetadataValue("Keep"));
+                Assert.Empty(filtered.GetMetadataValue("Drop"));
+            }
+
+            foreach (ProjectItemInstance removed
+                in instance.GetItems("Removed"))
+            {
+                Assert.NotEmpty(removed.GetMetadataValue("Keep"));
+                Assert.Empty(removed.GetMetadataValue("Drop"));
+            }
+
+            Assert.Equal(
+                "2",
+                Assert.Single(instance.GetItems("Count"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupAppliesMetadataFiltersBeforeExplicitMetadata()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Mutable KeepMetadata="Keep">
+                    <Drop>restored</Drop>
+                  </Mutable>
+                </ItemGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Mutable Include="value">
+                    <Keep>preserved</Keep>
+                    <Drop>removed</Drop>
+                  </Mutable>
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            ProjectItemInstance item =
+                Assert.Single(instance.GetItems("Mutable"));
+            Assert.Equal(
+                "preserved",
+                item.GetMetadataValue("Keep"));
+            Assert.Equal(
+                "restored",
+                item.GetMetadataValue("Drop"));
+        }
+
+        [Fact]
+        public void CompiledItemGroupRemovesItemsMatchingMetadata()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Candidate
+                      Remove="@(Reference)"
+                      MatchOnMetadata="$(MatchNames)"
+                      MatchOnMetadataOptions="CaseInsensitive" />
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <MatchNames>Key;Flavor</MatchNames>
+                </PropertyGroup>
+                <ItemGroup>
+                  <Reference Include="r1" Key="A" Flavor="x" />
+                  <Reference Include="r2" Key="B" Flavor="y" />
+                  <Candidate Include="c1" Key="a" Flavor="X" />
+                  <Candidate Include="c2" Key="B" Flavor="z" />
+                  <Candidate Include="c3" Key="C" Flavor="q" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                new[] { "c2", "c3" },
+                instance.GetItems("Candidate")
+                    .Select(item => item.EvaluatedInclude));
+        }
+
+        [Theory]
+        [InlineData(
+            """
+            <Input Include="value">
+              <Copied>%(Source.Identity)</Copied>
+            </Input>
+            """)]
+        [InlineData(
+            """
+            <Input
+                Include="@(Source, '%(Source.Identity)')" />
+            """)]
+        [InlineData(
+            """
+            <Input
+                Include="value"
+                Condition="'%(Source.Identity)' == 'source'" />
+            """)]
+        public void ItemGroupFallsBackAsAWholeForUnsupportedOperations(
+            string unsupportedOperation)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                $"""
+                <ItemGroup>
+                  <Simple Include="simple" />
+                  {unsupportedOperation}
+                </ItemGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Source Include="source" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Null(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "simple",
+                Assert.Single(instance.GetItems("Simple"))
+                    .EvaluatedInclude);
         }
 
         [Fact]
@@ -1609,6 +2067,11 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 PropertyReadCount++;
                 return string.Empty;
             }
+
+            public string ExpandItems(
+                string escapedValue,
+                IElementLocation location) =>
+                escapedValue;
 
             public void EnterConditionEvaluation(bool oneSideIsEmpty)
             {

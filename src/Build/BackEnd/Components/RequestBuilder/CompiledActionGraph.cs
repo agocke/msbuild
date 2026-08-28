@@ -106,7 +106,8 @@ namespace Microsoft.Build.BackEnd
                 sourceAction.Kind,
                 sourceAction.Child,
                 GetAction(childIndex),
-                sourceAction.PropertyGroupAction);
+                sourceAction.PropertyGroupAction,
+                sourceAction.ItemGroupAction);
         }
 
         internal bool TryEvaluateCondition(
@@ -288,13 +289,15 @@ namespace Microsoft.Build.BackEnd
             ProjectTargetInstanceChild child,
             CompiledTaskSourceProgram taskProgram,
             int taskIndex,
-            CompiledPropertyGroupAction propertyGroupAction)
+            CompiledPropertyGroupAction propertyGroupAction,
+            CompiledItemGroupAction itemGroupAction)
         {
             Kind = kind;
             Child = child;
             TaskProgram = taskProgram;
             TaskIndex = taskIndex;
             PropertyGroupAction = propertyGroupAction;
+            ItemGroupAction = itemGroupAction;
         }
 
         internal CompiledTargetActionKind Kind { get; }
@@ -307,6 +310,8 @@ namespace Microsoft.Build.BackEnd
 
         internal CompiledPropertyGroupAction PropertyGroupAction { get; }
 
+        internal CompiledItemGroupAction ItemGroupAction { get; }
+
         internal static CompiledTargetSourceActionRecord CreateTask(
             ProjectTaskInstance task,
             int taskIndex) =>
@@ -315,7 +320,8 @@ namespace Microsoft.Build.BackEnd
                 task,
                 CompiledTaskSourceProgram.GetOrCreate(task),
                 taskIndex,
-                propertyGroupAction: null);
+                propertyGroupAction: null,
+                itemGroupAction: null);
 
         internal static CompiledTargetSourceActionRecord CreatePropertyGroup(
             ProjectPropertyGroupTaskInstance propertyGroup) =>
@@ -325,7 +331,8 @@ namespace Microsoft.Build.BackEnd
                 taskProgram: null,
                 taskIndex: -1,
                 propertyGroupAction:
-                    CompiledPropertyGroupAction.TryCreate(propertyGroup));
+                    CompiledPropertyGroupAction.TryCreate(propertyGroup),
+                itemGroupAction: null);
 
         internal static CompiledTargetSourceActionRecord CreateItemGroup(
             ProjectItemGroupTaskInstance itemGroup) =>
@@ -334,7 +341,9 @@ namespace Microsoft.Build.BackEnd
                 itemGroup,
                 taskProgram: null,
                 taskIndex: -1,
-                propertyGroupAction: null);
+                propertyGroupAction: null,
+                itemGroupAction:
+                    CompiledItemGroupAction.TryCreate(itemGroup));
 
         internal static CompiledTargetSourceActionRecord CreateFallback(
             ProjectTargetInstanceChild child) =>
@@ -343,7 +352,8 @@ namespace Microsoft.Build.BackEnd
                 child,
                 taskProgram: null,
                 taskIndex: -1,
-                propertyGroupAction: null);
+                propertyGroupAction: null,
+                itemGroupAction: null);
     }
 
     /// <summary>
@@ -355,12 +365,14 @@ namespace Microsoft.Build.BackEnd
             CompiledTargetActionKind kind,
             ProjectTargetInstanceChild child,
             CompiledTaskAction taskAction,
-            CompiledPropertyGroupAction propertyGroupAction)
+            CompiledPropertyGroupAction propertyGroupAction,
+            CompiledItemGroupAction itemGroupAction)
         {
             Kind = kind;
             Child = child;
             TaskAction = taskAction;
             PropertyGroupAction = propertyGroupAction;
+            ItemGroupAction = itemGroupAction;
         }
 
         internal CompiledTargetActionKind Kind { get; }
@@ -370,6 +382,8 @@ namespace Microsoft.Build.BackEnd
         internal CompiledTaskAction TaskAction { get; }
 
         internal CompiledPropertyGroupAction PropertyGroupAction { get; }
+
+        internal CompiledItemGroupAction ItemGroupAction { get; }
     }
 
     internal sealed class CompiledPropertyGroupAction
@@ -476,6 +490,353 @@ namespace Microsoft.Build.BackEnd
         internal CompiledScalarProgram Value { get; }
     }
 
+    internal enum CompiledItemOperationKind : byte
+    {
+        Include,
+        Remove,
+        Modify,
+    }
+
+    internal sealed class CompiledItemGroupAction
+    {
+        private readonly CompiledConditionProgram _condition;
+        private readonly IElementLocation _conditionLocation;
+        private readonly CompiledItemOperation[] _operations;
+
+        private CompiledItemGroupAction(
+            CompiledConditionProgram condition,
+            IElementLocation conditionLocation,
+            CompiledItemOperation[] operations)
+        {
+            _condition = condition;
+            _conditionLocation = conditionLocation;
+            _operations = operations;
+        }
+
+        internal int OperationCount => _operations.Length;
+
+        internal static CompiledItemGroupAction TryCreate(
+            ProjectItemGroupTaskInstance itemGroup)
+        {
+            CompiledConditionProgram condition = null;
+            if (!string.IsNullOrEmpty(itemGroup.Condition))
+            {
+                condition = CompiledConditionProgram.TryCreate(
+                    itemGroup.Condition,
+                    itemGroup.ConditionLocation);
+                if (condition == null)
+                {
+                    return null;
+                }
+            }
+
+            var operations =
+                new CompiledItemOperation[itemGroup.Items.Count];
+            int operationIndex = 0;
+            foreach (ProjectItemGroupTaskItemInstance item
+                in itemGroup.Items)
+            {
+                CompiledItemOperation operation =
+                    CompiledItemOperation.TryCreate(item);
+                if (operation == null)
+                {
+                    return null;
+                }
+
+                operations[operationIndex++] = operation;
+            }
+
+            return new CompiledItemGroupAction(
+                condition,
+                itemGroup.ConditionLocation,
+                operations);
+        }
+
+        internal bool EvaluateCondition(
+            ICompiledExpressionEnvironment environment) =>
+            _condition?.EvaluateForItemGroup(
+                environment,
+                _conditionLocation) ?? true;
+
+        internal CompiledItemOperation GetOperation(int index) =>
+            _operations[index];
+    }
+
+    internal sealed class CompiledItemOperation
+    {
+        private CompiledItemOperation(
+            ProjectItemGroupTaskItemInstance item,
+            CompiledItemOperationKind kind,
+            CompiledConditionProgram condition,
+            CompiledScalarProgram include,
+            CompiledScalarProgram exclude,
+            CompiledScalarProgram remove,
+            CompiledConditionProgram keepDuplicates,
+            CompiledScalarProgram keepMetadata,
+            CompiledScalarProgram removeMetadata,
+            CompiledScalarProgram matchOnMetadata,
+            MatchOnMetadataOptions matchOnMetadataOptions,
+            CompiledItemMetadataAssignment[] metadata)
+        {
+            Item = item;
+            Kind = kind;
+            Condition = condition;
+            Include = include;
+            Exclude = exclude;
+            Remove = remove;
+            KeepDuplicates = keepDuplicates;
+            KeepMetadata = keepMetadata;
+            RemoveMetadata = removeMetadata;
+            MatchOnMetadata = matchOnMetadata;
+            MatchOnMetadataOptions = matchOnMetadataOptions;
+            Metadata = metadata;
+        }
+
+        internal ProjectItemGroupTaskItemInstance Item { get; }
+
+        internal CompiledItemOperationKind Kind { get; }
+
+        internal CompiledConditionProgram Condition { get; }
+
+        internal CompiledScalarProgram Include { get; }
+
+        internal CompiledScalarProgram Exclude { get; }
+
+        internal CompiledScalarProgram Remove { get; }
+
+        internal CompiledConditionProgram KeepDuplicates { get; }
+
+        internal CompiledScalarProgram KeepMetadata { get; }
+
+        internal CompiledScalarProgram RemoveMetadata { get; }
+
+        internal CompiledScalarProgram MatchOnMetadata { get; }
+
+        internal MatchOnMetadataOptions MatchOnMetadataOptions { get; }
+
+        internal CompiledItemMetadataAssignment[] Metadata { get; }
+
+        internal static CompiledItemOperation TryCreate(
+            ProjectItemGroupTaskItemInstance item)
+        {
+            CompiledConditionProgram condition = null;
+            if (!string.IsNullOrEmpty(item.Condition))
+            {
+                condition = CompiledConditionProgram.TryCreate(
+                    item.Condition,
+                    item.ConditionLocation);
+                if (condition == null)
+                {
+                    return null;
+                }
+            }
+
+            CompiledItemOperationKind kind =
+                item.Include.Length != 0 || item.Exclude.Length != 0
+                    ? CompiledItemOperationKind.Include
+                    : item.Remove.Length != 0
+                        ? CompiledItemOperationKind.Remove
+                        : CompiledItemOperationKind.Modify;
+
+            CompiledScalarProgram include = null;
+            CompiledScalarProgram exclude = null;
+            CompiledScalarProgram remove = null;
+            CompiledConditionProgram keepDuplicates = null;
+            CompiledScalarProgram keepMetadata = null;
+            CompiledScalarProgram removeMetadata = null;
+            CompiledScalarProgram matchOnMetadata = null;
+            MatchOnMetadataOptions matchOnMetadataOptions =
+                MatchOnMetadataConstants.MatchOnMetadataOptionsDefaultValue;
+
+            if (kind == CompiledItemOperationKind.Include)
+            {
+                if (!string.IsNullOrEmpty(item.MatchOnMetadata) ||
+                    !string.IsNullOrEmpty(item.MatchOnMetadataOptions))
+                {
+                    return null;
+                }
+
+                if (!TryCompileItemSpecification(
+                        item.Include,
+                        allowItemVectors: true,
+                        out include) ||
+                    !TryCompileItemSpecification(
+                        item.Exclude,
+                        allowItemVectors: true,
+                        out exclude) ||
+                    !TryCompileItemSpecification(
+                        item.KeepMetadata,
+                        allowItemVectors: true,
+                        out keepMetadata) ||
+                    !TryCompileItemSpecification(
+                        item.RemoveMetadata,
+                        allowItemVectors: true,
+                        out removeMetadata))
+                {
+                    return null;
+                }
+
+                if (!string.IsNullOrEmpty(item.KeepDuplicates))
+                {
+                    keepDuplicates = CompiledConditionProgram.TryCreate(
+                        item.KeepDuplicates,
+                        item.KeepDuplicatesLocation);
+                    if (keepDuplicates == null)
+                    {
+                        return null;
+                    }
+                }
+            }
+            else if (kind == CompiledItemOperationKind.Remove)
+            {
+                if (!string.IsNullOrEmpty(item.KeepMetadata) ||
+                    !string.IsNullOrEmpty(item.RemoveMetadata) ||
+                    !string.IsNullOrEmpty(item.KeepDuplicates) ||
+                    (string.IsNullOrEmpty(item.MatchOnMetadata) &&
+                     !string.IsNullOrEmpty(item.MatchOnMetadataOptions)))
+                {
+                    return null;
+                }
+
+                if (!TryCompileItemSpecification(
+                        item.Remove,
+                        allowItemVectors: true,
+                        out remove) ||
+                    !TryCompileItemSpecification(
+                        item.MatchOnMetadata,
+                        allowItemVectors: true,
+                        out matchOnMetadata))
+                {
+                    return null;
+                }
+
+                if (matchOnMetadata != null)
+                {
+                    Enum.TryParse(
+                        item.MatchOnMetadataOptions,
+                        out matchOnMetadataOptions);
+                }
+            }
+            else if (!string.IsNullOrEmpty(item.KeepDuplicates) ||
+                     !string.IsNullOrEmpty(item.MatchOnMetadata) ||
+                     !string.IsNullOrEmpty(item.MatchOnMetadataOptions) ||
+                     !TryCompileItemSpecification(
+                         item.KeepMetadata,
+                         allowItemVectors: true,
+                         out keepMetadata) ||
+                     !TryCompileItemSpecification(
+                         item.RemoveMetadata,
+                         allowItemVectors: true,
+                         out removeMetadata))
+            {
+                return null;
+            }
+
+            var metadata =
+                new CompiledItemMetadataAssignment[item.Metadata.Count];
+            int metadataIndex = 0;
+            foreach (ProjectItemGroupTaskMetadataInstance metadataInstance
+                in item.Metadata)
+            {
+                CompiledConditionProgram metadataCondition = null;
+                if (!string.IsNullOrEmpty(metadataInstance.Condition))
+                {
+                    metadataCondition =
+                        CompiledConditionProgram.TryCreate(
+                            metadataInstance.Condition,
+                            metadataInstance.ConditionLocation);
+                    if (metadataCondition == null)
+                    {
+                        return null;
+                    }
+                }
+
+                if (ExpressionShredder
+                        .ContainsMetadataExpressionOutsideTransform(
+                            metadataInstance.Value))
+                {
+                    return null;
+                }
+
+                CompiledScalarProgram value =
+                    CompiledScalarProgram.TryCreateItemSpecification(
+                        metadataInstance.Value);
+                if (value == null)
+                {
+                    return null;
+                }
+
+                metadata[metadataIndex++] =
+                    new CompiledItemMetadataAssignment(
+                        metadataInstance,
+                        metadataCondition,
+                        value);
+            }
+
+            return new CompiledItemOperation(
+                item,
+                kind,
+                condition,
+                include,
+                exclude,
+                remove,
+                keepDuplicates,
+                keepMetadata,
+                removeMetadata,
+                matchOnMetadata,
+                matchOnMetadataOptions,
+                metadata);
+        }
+
+        private static bool TryCompileItemSpecification(
+            string specification,
+            bool allowItemVectors,
+            out CompiledScalarProgram program)
+        {
+            program = null;
+            if (string.IsNullOrEmpty(specification))
+            {
+                return true;
+            }
+
+            if (ExpressionShredder
+                    .ContainsMetadataExpressionOutsideTransform(
+                        specification) ||
+                (!allowItemVectors &&
+                 ExpressionShredder.ContainsItemVectorMarker(
+                     specification)))
+            {
+                return false;
+            }
+
+            program =
+                allowItemVectors
+                    ? CompiledScalarProgram.TryCreateItemSpecification(
+                        specification)
+                    : CompiledScalarProgram.TryCreate(specification);
+            return program != null;
+        }
+    }
+
+    internal readonly struct CompiledItemMetadataAssignment
+    {
+        internal CompiledItemMetadataAssignment(
+            ProjectItemGroupTaskMetadataInstance metadata,
+            CompiledConditionProgram condition,
+            CompiledScalarProgram value)
+        {
+            Metadata = metadata;
+            Condition = condition;
+            Value = value;
+        }
+
+        internal ProjectItemGroupTaskMetadataInstance Metadata { get; }
+
+        internal CompiledConditionProgram Condition { get; }
+
+        internal CompiledScalarProgram Value { get; }
+    }
+
     internal sealed class CompiledLookupExpressionEnvironment :
         ICompiledExpressionEnvironment
     {
@@ -496,6 +857,14 @@ namespace Microsoft.Build.BackEnd
             string propertyName,
             IElementLocation location) =>
             _expander.GetEscapedPropertyValue(propertyName, location);
+
+        string ICompiledExpressionEnvironment.ExpandItems(
+            string escapedValue,
+            IElementLocation location) =>
+            _expander.ExpandIntoStringLeaveEscaped(
+                escapedValue,
+                ExpanderOptions.ExpandItems,
+                location);
 
         void ICompiledExpressionEnvironment.EnterConditionEvaluation(
             bool oneSideIsEmpty)

@@ -45,6 +45,8 @@ namespace Microsoft.Build.BackEnd
         IntrinsicTask,
         CompiledPropertyGroup,
         FallbackPropertyGroup,
+        CompiledItemGroup,
+        FallbackItemGroup,
         TaskYield,
         TaskReacquire,
     }

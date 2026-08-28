@@ -388,6 +388,8 @@ namespace Microsoft.Build.Evaluation
     {
         string GetEscapedPropertyValue(string propertyName, IElementLocation location);
 
+        string ExpandItems(string escapedValue, IElementLocation location);
+
         void EnterConditionEvaluation(bool oneSideIsEmpty);
 
         void LeaveConditionEvaluation();
@@ -419,6 +421,27 @@ namespace Microsoft.Build.Evaluation
             ICompiledExpressionEnvironment environment,
             IElementLocation location)
         {
+            return Evaluate(
+                environment,
+                location,
+                expandItems: false);
+        }
+
+        internal bool EvaluateForItemGroup(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location)
+        {
+            return Evaluate(
+                environment,
+                location,
+                expandItems: true);
+        }
+
+        private bool Evaluate(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            bool expandItems)
+        {
             int instructionIndex = 0;
             while (true)
             {
@@ -428,18 +451,30 @@ namespace Microsoft.Build.Evaluation
                 {
                     case CompiledConditionInstructionKind.BranchIfComparisonFalse:
                         instructionIndex +=
-                            EvaluateComparison(environment, location, instruction.Argument0)
+                            EvaluateComparison(
+                                environment,
+                                location,
+                                instruction.Argument0,
+                                expandItems)
                                 ? 1
                                 : instruction.Argument1;
                         break;
                     case CompiledConditionInstructionKind.BranchIfComparisonTrue:
                         instructionIndex +=
-                            EvaluateComparison(environment, location, instruction.Argument0)
+                            EvaluateComparison(
+                                environment,
+                                location,
+                                instruction.Argument0,
+                                expandItems)
                                 ? instruction.Argument1
                                 : 1;
                         break;
                     case CompiledConditionInstructionKind.ReturnComparison:
-                        return EvaluateComparison(environment, location, instruction.Argument0);
+                        return EvaluateComparison(
+                            environment,
+                            location,
+                            instruction.Argument0,
+                            expandItems);
                     case CompiledConditionInstructionKind.ReturnFalse:
                         return false;
                     case CompiledConditionInstructionKind.ReturnTrue:
@@ -454,7 +489,8 @@ namespace Microsoft.Build.Evaluation
         private bool EvaluateComparison(
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
-            int comparisonId)
+            int comparisonId,
+            bool expandItems)
         {
             CompiledConditionComparison comparison =
                 _program.Comparisons[comparisonId];
@@ -466,10 +502,12 @@ namespace Microsoft.Build.Evaluation
                 bool leftIsStatic =
                     TryGetStaticEmptiness(
                         comparison.Left,
+                        expandItems,
                         out bool leftIsEmpty);
                 bool rightIsStatic =
                     TryGetStaticEmptiness(
                         comparison.Right,
+                        expandItems,
                         out bool rightIsEmpty);
                 if ((leftIsStatic && leftIsEmpty) ||
                     (rightIsStatic && rightIsEmpty))
@@ -480,7 +518,8 @@ namespace Microsoft.Build.Evaluation
                             EvaluateOperand(
                                 environment,
                                 location,
-                                comparison.Left).Length == 0;
+                                comparison.Left,
+                                expandItems).Length == 0;
                     }
 
                     if (!rightIsStatic)
@@ -489,7 +528,8 @@ namespace Microsoft.Build.Evaluation
                             EvaluateOperand(
                                 environment,
                                 location,
-                                comparison.Right).Length == 0;
+                                comparison.Right,
+                                expandItems).Length == 0;
                     }
 
                     bool shortCircuitEqual =
@@ -500,8 +540,16 @@ namespace Microsoft.Build.Evaluation
                 }
 
                 bool equal = CompiledConditionUtilities.CompareValues(
-                    EvaluateOperand(environment, location, comparison.Left),
-                    EvaluateOperand(environment, location, comparison.Right),
+                    EvaluateOperand(
+                        environment,
+                        location,
+                        comparison.Left,
+                        expandItems),
+                    EvaluateOperand(
+                        environment,
+                        location,
+                        comparison.Right,
+                        expandItems),
                     out _);
                 return comparison.Kind == CompiledConditionKind.Equal
                     ? equal
@@ -520,6 +568,7 @@ namespace Microsoft.Build.Evaluation
 
         private bool TryGetStaticEmptiness(
             CompiledConditionOperand operand,
+            bool expandItems,
             out bool isEmpty)
         {
             if (operand.Kind == CompiledConditionOperandKind.Literal)
@@ -528,7 +577,8 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
 
-            if (operand.Kind ==
+            if (!expandItems &&
+                operand.Kind ==
                 CompiledConditionOperandKind.ExpandedValue)
             {
                 for (int partIndex = operand.Value;
@@ -554,7 +604,8 @@ namespace Microsoft.Build.Evaluation
         private string EvaluateOperand(
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
-            CompiledConditionOperand operand)
+            CompiledConditionOperand operand,
+            bool expandItems)
         {
             switch (operand.Kind)
             {
@@ -565,13 +616,15 @@ namespace Microsoft.Build.Evaluation
                         environment,
                         location,
                         operand.Value,
-                        unescape: true);
+                        unescape: true,
+                        expandItems: expandItems);
                 case CompiledConditionOperandKind.ExpandedValue:
                     return EvaluateExpandedValue(
                         environment,
                         location,
                         operand.Value,
-                        operand.Count);
+                        operand.Count,
+                        expandItems);
                 default:
                     throw new InternalErrorException(
                         "Unknown compiled task condition operand.");
@@ -582,7 +635,8 @@ namespace Microsoft.Build.Evaluation
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
             int firstPart,
-            int partCount)
+            int partCount,
+            bool expandItems)
         {
             var builder = new StringBuilder();
             for (int partIndex = firstPart;
@@ -598,22 +652,39 @@ namespace Microsoft.Build.Evaluation
                             environment,
                             location,
                             part.Value,
-                            unescape: false));
+                            unescape: false,
+                            expandItems: false));
+            }
+
+            string escapedValue = builder.ToString();
+            if (expandItems)
+            {
+                escapedValue = environment.ExpandItems(
+                    escapedValue,
+                    location);
             }
 
             return EscapingUtilities.UnescapeAll(
-                FileUtilities.MaybeAdjustFilePath(builder.ToString()));
+                FileUtilities.MaybeAdjustFilePath(escapedValue));
         }
 
         private string ReadProperty(
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
             int propertyIndex,
-            bool unescape)
+            bool unescape,
+            bool expandItems)
         {
             string escapedValue = environment.GetEscapedPropertyValue(
                 _program.PropertyNames[propertyIndex],
                 location);
+            if (expandItems)
+            {
+                escapedValue = environment.ExpandItems(
+                    escapedValue,
+                    location);
+            }
+
             return unescape
                 ? EscapingUtilities.UnescapeAll(
                     FileUtilities.MaybeAdjustFilePath(escapedValue))
@@ -641,6 +712,22 @@ namespace Microsoft.Build.Evaluation
         {
             return CompiledConditionCompiler.TryCompileScalar(
                 expression,
+                allowItemVectors: false,
+                allowMetadata: false,
+                out string[] strings,
+                out string[] propertyNames,
+                out CompiledConditionValuePart[] parts)
+                ? new CompiledScalarProgram(strings, propertyNames, parts)
+                : null;
+        }
+
+        internal static CompiledScalarProgram TryCreateItemSpecification(
+            string expression)
+        {
+            return CompiledConditionCompiler.TryCompileScalar(
+                expression,
+                allowItemVectors: true,
+                allowMetadata: true,
                 out string[] strings,
                 out string[] propertyNames,
                 out CompiledConditionValuePart[] parts)
@@ -794,12 +881,18 @@ namespace Microsoft.Build.Evaluation
 
         internal static bool TryCompileScalar(
             string expression,
+            bool allowItemVectors,
+            bool allowMetadata,
             out string[] strings,
             out string[] propertyNames,
             out CompiledConditionValuePart[] parts)
         {
             var builder = new Builder();
-            if (!builder.TryCompileValue(expression, out _))
+            if (!builder.TryCompileValue(
+                    expression,
+                    out _,
+                    allowItemVectors,
+                    allowMetadata))
             {
                 strings = null;
                 propertyNames = null;
@@ -1072,10 +1165,14 @@ namespace Microsoft.Build.Evaluation
 
             internal bool TryCompileValue(
                 string value,
-                out TableRange parts)
+                out TableRange parts,
+                bool allowItemVectors = false,
+                bool allowMetadata = false)
             {
-                if (value.Contains("@(", StringComparison.Ordinal) ||
-                    value.Contains("%(", StringComparison.Ordinal))
+                if ((!allowItemVectors &&
+                     value.Contains("@(", StringComparison.Ordinal)) ||
+                    (!allowMetadata &&
+                     value.Contains("%(", StringComparison.Ordinal)))
                 {
                     parts = default;
                     return false;

@@ -24,6 +24,8 @@ using Microsoft.Build.Framework;
 using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
+using EngineFileUtilities = Microsoft.Build.Internal.EngineFileUtilities;
+using ProjectItemInstanceFactory = Microsoft.Build.Execution.ProjectItemInstance.TaskItem.ProjectItemInstanceFactory;
 using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 
 #nullable disable
@@ -1817,6 +1819,14 @@ namespace Microsoft.Build.BackEnd
             IElementLocation location) =>
             Expander.GetEscapedPropertyValue(propertyName, location);
 
+        string ICompiledExpressionEnvironment.ExpandItems(
+            string escapedValue,
+            IElementLocation location) =>
+            Expander.ExpandIntoStringLeaveEscaped(
+                escapedValue,
+                ExpanderOptions.ExpandItems,
+                location);
+
         void ICompiledExpressionEnvironment.EnterConditionEvaluation(
             bool oneSideIsEmpty)
         {
@@ -1838,6 +1848,13 @@ namespace Microsoft.Build.BackEnd
             {
                 return new ValueTask<WorkUnitResult>(
                     ExecuteCompiledPropertyGroupAction(record));
+            }
+
+            if (record.Kind == CompiledTargetActionKind.ItemGroup &&
+                record.ItemGroupAction != null)
+            {
+                return new ValueTask<WorkUnitResult>(
+                    ExecuteCompiledItemGroupAction(record));
             }
 
             if (record.Kind == CompiledTargetActionKind.PropertyGroup ||
@@ -2091,6 +2108,594 @@ namespace Microsoft.Build.BackEnd
             return result;
         }
 
+        private WorkUnitResult ExecuteCompiledItemGroupAction(
+            CompiledTargetActionRecord record)
+        {
+            WorkUnitResult result = new(
+                WorkUnitResultCode.Failed,
+                WorkUnitActionCode.Stop,
+                null);
+
+            if ((Mode & TaskExecutionMode.InferOutputsOnly) ==
+                TaskExecutionMode.InferOutputsOnly)
+            {
+                result = ExecuteCompiledItemGroup(
+                    record,
+                    LookupForInference);
+            }
+
+            if ((Mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) ==
+                TaskExecutionMode.ExecuteTaskAndGatherOutputs)
+            {
+                result = ExecuteCompiledItemGroup(
+                    record,
+                    LookupForExecution);
+            }
+
+            return result;
+        }
+
+        private WorkUnitResult ExecuteCompiledItemGroup(
+            CompiledTargetActionRecord record,
+            Lookup lookup)
+        {
+            CompiledItemGroupAction action = record.ItemGroupAction;
+            CompiledLookupExpressionEnvironment environment =
+                GetExpressionEnvironment(lookup);
+            if (!action.EvaluateCondition(environment))
+            {
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Skipped,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+
+            using var intrinsicTaskMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.IntrinsicTask,
+                    BuildExecutionInstrumentation.DetailsEnabled
+                        ? record.Child.GetType().Name
+                        : null,
+                    TargetLoggingContext.Target.Name);
+            using var compiledItemGroupMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.CompiledItemGroup,
+                    parentName: TargetLoggingContext.Target.Name);
+            try
+            {
+                bool logTaskInputs =
+                    Host.BuildParameters.LogTaskInputs ||
+                    Traits.Instance.EscapeHatches.LogTaskInputs;
+                ProjectInstance project =
+                    RequestEntry.RequestConfiguration.Project;
+
+                for (int operationIndex = 0;
+                     operationIndex < action.OperationCount;
+                     operationIndex++)
+                {
+                    CompiledItemOperation operation =
+                        action.GetOperation(operationIndex);
+                    ProjectItemGroupTaskItemInstance item =
+                        operation.Item;
+                    if (operation.Condition != null &&
+                        !operation.Condition.EvaluateForItemGroup(
+                            environment,
+                            item.ConditionLocation))
+                    {
+                        continue;
+                    }
+
+                    switch (operation.Kind)
+                    {
+                        case CompiledItemOperationKind.Include:
+                            ExecuteCompiledItemInclude(
+                                operation,
+                                environment,
+                                lookup,
+                                project,
+                                logTaskInputs);
+                            break;
+                        case CompiledItemOperationKind.Remove:
+                            ExecuteCompiledItemRemove(
+                                operation,
+                                environment,
+                                lookup,
+                                project,
+                                logTaskInputs);
+                            break;
+                        case CompiledItemOperationKind.Modify:
+                            ExecuteCompiledItemModify(
+                                operation,
+                                environment,
+                                lookup);
+                            break;
+                        default:
+                            throw new InternalErrorException(
+                                "Unexpected compiled item operation.");
+                    }
+                }
+
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Success,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+            catch (InvalidProjectFileException exception)
+            {
+                TargetLoggingContext.LogInvalidProjectFileError(exception);
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Failed,
+                    WorkUnitActionCode.Stop,
+                    exception);
+            }
+        }
+
+        private void ExecuteCompiledItemInclude(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            bool logTaskInputs)
+        {
+            ProjectItemGroupTaskItemInstance item = operation.Item;
+            HashSet<string> keepMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.KeepMetadata,
+                    environment,
+                    item.KeepMetadataLocation);
+            HashSet<string> removeMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.RemoveMetadata,
+                    environment,
+                    item.RemoveMetadataLocation);
+            ProjectErrorUtilities.VerifyThrowInvalidProject(
+                !(keepMetadata != null && removeMetadata != null),
+                item.KeepMetadataLocation,
+                "KeepAndRemoveMetadataMutuallyExclusive");
+
+            string evaluatedInclude =
+                operation.Include?.EvaluateLeaveEscaped(
+                    environment,
+                    item.IncludeLocation) ?? string.Empty;
+
+            List<string> excludes = null;
+            if (evaluatedInclude.Length != 0 &&
+                operation.Exclude != null)
+            {
+                string evaluatedExclude =
+                    operation.Exclude.EvaluateLeaveEscaped(
+                        environment,
+                        item.ExcludeLocation);
+                if (evaluatedExclude.Length != 0)
+                {
+                    excludes = environment.Expander
+                        .ExpandIntoStringListLeaveEscaped(
+                            evaluatedExclude,
+                            ExpanderOptions.ExpandItems,
+                            item.ExcludeLocation)
+                        .ToList();
+                }
+            }
+
+            var itemsToAdd = new List<ProjectItemInstance>();
+            var itemFactory =
+                new ProjectItemInstanceFactory(project, item.ItemType);
+            bool expandedItemVector = false;
+
+            if (evaluatedInclude.Length != 0)
+            {
+                foreach (string includeSplit
+                    in ExpressionShredder.SplitSemiColonSeparatedList(
+                        evaluatedInclude))
+                {
+                    IList<ProjectItemInstance> itemsFromSplit =
+                        environment.Expander
+                            .ExpandSingleItemVectorExpressionIntoItems(
+                                includeSplit,
+                                itemFactory,
+                                ExpanderOptions.ExpandItems,
+                                includeNullItems: false,
+                                out _,
+                                item.IncludeLocation);
+
+                    if (itemsFromSplit != null)
+                    {
+                        itemsToAdd.AddRange(itemsFromSplit);
+                        expandedItemVector = true;
+                        continue;
+                    }
+
+                    string[] includeSplitFiles =
+                        EngineFileUtilities.GetFileListEscaped(
+                            project.Directory,
+                            includeSplit,
+                            excludes,
+                            loggingMechanism: TargetLoggingContext,
+                            includeLocation: item.IncludeLocation,
+                            excludeLocation: item.ExcludeLocation,
+                            disableExcludeDriveEnumerationWarning: true);
+                    foreach (string includeSplitFile in includeSplitFiles)
+                    {
+                        itemsToAdd.Add(
+                            new ProjectItemInstance(
+                                project,
+                                item.ItemType,
+                                includeSplitFile,
+                                includeSplit,
+                                directMetadata: null,
+                                itemDefinitions: null,
+                                definingFileEscaped: item.Location.File,
+                                useItemDefinitionsWithoutModification: false));
+                    }
+                }
+            }
+
+            if (expandedItemVector && excludes?.Count > 0)
+            {
+                HashSet<string> excludedPaths =
+                    EvaluateCompiledExcludePaths(
+                        excludes,
+                        item.ExcludeLocation,
+                        project);
+                itemsToAdd.RemoveAll(
+                    candidate =>
+                        excludedPaths.Contains(
+                            ((IItem)candidate).EvaluatedInclude
+                                .NormalizeForPathComparison()));
+            }
+
+            FilterCompiledItemMetadata(
+                itemsToAdd,
+                keepMetadata,
+                removeMetadata);
+
+            Dictionary<string, string> metadata =
+                EvaluateCompiledItemMetadata(operation, environment);
+            ProjectItemInstance.SetMetadata(metadata, itemsToAdd);
+
+            bool keepDuplicates =
+                operation.KeepDuplicates?.EvaluateForItemGroup(
+                    environment,
+                    item.KeepDuplicatesLocation) ?? true;
+            Action<IList> logFunction = null;
+            if (logTaskInputs &&
+                !TargetLoggingContext.LoggingService.OnlyLogCriticalEvents &&
+                itemsToAdd.Count > 0)
+            {
+                logFunction = itemList =>
+                    ItemGroupLoggingHelper.LogTaskParameter(
+                        TargetLoggingContext,
+                        TaskParameterMessageKind.AddItem,
+                        parameterName: null,
+                        propertyName: null,
+                        item.ItemType,
+                        itemList,
+                        logItemMetadata: true,
+                        item.Location);
+            }
+
+            lookup.AddNewItemsOfItemType(
+                item.ItemType,
+                itemsToAdd,
+                doNotAddDuplicates: !keepDuplicates,
+                logFunction);
+        }
+
+        private void ExecuteCompiledItemRemove(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            bool logTaskInputs)
+        {
+            ProjectItemGroupTaskItemInstance item = operation.Item;
+            HashSet<string> matchOnMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.MatchOnMetadata,
+                    environment,
+                    item.MatchOnMetadataLocation);
+            ICollection<ProjectItemInstance> group =
+                lookup.GetItems(item.ItemType);
+            if (group == null || group.Count == 0)
+            {
+                return;
+            }
+
+            string evaluatedRemove =
+                operation.Remove.EvaluateLeaveEscaped(
+                    environment,
+                    item.RemoveLocation);
+            if (evaluatedRemove.Length == 0)
+            {
+                return;
+            }
+
+            List<ProjectItemInstance> itemsToRemove;
+            if (matchOnMetadata != null)
+            {
+                var itemSpec =
+                    new ItemSpec<
+                        ProjectPropertyInstance,
+                        ProjectItemInstance>(
+                        evaluatedRemove,
+                        environment.Expander,
+                        item.RemoveLocation,
+                        project.Directory,
+                        expandProperties: false);
+                ProjectFileErrorUtilities.VerifyThrowInvalidProjectFile(
+                    itemSpec.Fragments.All(
+                        fragment =>
+                            fragment is ItemSpec<
+                                ProjectPropertyInstance,
+                                ProjectItemInstance>.ItemExpressionFragment),
+                    BuildEventFileInfo.Empty,
+                    "OM_MatchOnMetadataIsRestrictedToReferencedItems",
+                    item.RemoveLocation,
+                    item.Remove);
+                var metadataSet =
+                    new MetadataTrie<
+                        ProjectPropertyInstance,
+                        ProjectItemInstance>(
+                        operation.MatchOnMetadataOptions,
+                        matchOnMetadata,
+                        itemSpec);
+                itemsToRemove = group.Where(
+                    candidate => metadataSet.Contains(
+                        matchOnMetadata.Select(
+                            metadataName =>
+                                candidate.GetMetadataValue(
+                                    metadataName)))).ToList();
+            }
+            else
+            {
+                var specificationsToFind =
+                    new HashSet<string>(
+                        StringComparer.OrdinalIgnoreCase);
+                foreach (string piece
+                    in environment.Expander
+                        .ExpandIntoStringListLeaveEscaped(
+                            evaluatedRemove,
+                            ExpanderOptions.ExpandItems,
+                            item.RemoveLocation))
+                {
+                    string[] fileList =
+                        EngineFileUtilities.GetFileListEscaped(
+                            project.Directory,
+                            piece,
+                            loggingMechanism: TargetLoggingContext,
+                            includeLocation: item.RemoveLocation,
+                            excludeLocation: item.RemoveLocation);
+                    foreach (string file in fileList)
+                    {
+                        specificationsToFind.Add(
+                            EscapingUtilities.UnescapeAll(file));
+                    }
+                }
+
+                if (specificationsToFind.Count == 0)
+                {
+                    return;
+                }
+
+                itemsToRemove = new List<ProjectItemInstance>();
+                foreach (ProjectItemInstance candidate in group)
+                {
+                    if (specificationsToFind.Contains(
+                            candidate.EvaluatedInclude))
+                    {
+                        itemsToRemove.Add(candidate);
+                    }
+                }
+            }
+
+            if (itemsToRemove.Count == 0)
+            {
+                return;
+            }
+
+            if (logTaskInputs &&
+                !TargetLoggingContext.LoggingService.OnlyLogCriticalEvents)
+            {
+                ItemGroupLoggingHelper.LogTaskParameter(
+                    TargetLoggingContext,
+                    TaskParameterMessageKind.RemoveItem,
+                    parameterName: null,
+                    propertyName: null,
+                    item.ItemType,
+                    itemsToRemove,
+                    logItemMetadata: true,
+                    item.Location);
+            }
+
+            lookup.RemoveItems(item.ItemType, itemsToRemove);
+        }
+
+        private void ExecuteCompiledItemModify(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup)
+        {
+            ProjectItemGroupTaskItemInstance item = operation.Item;
+            HashSet<string> keepMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.KeepMetadata,
+                    environment,
+                    item.KeepMetadataLocation);
+            HashSet<string> removeMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.RemoveMetadata,
+                    environment,
+                    item.RemoveMetadataLocation);
+            ICollection<ProjectItemInstance> group =
+                lookup.GetItems(item.ItemType);
+            if (group == null || group.Count == 0)
+            {
+                return;
+            }
+
+            var metadataToSet = new Lookup.MetadataModifications(
+                keepOnlySpecified: keepMetadata != null);
+            if (keepMetadata != null)
+            {
+                foreach (string metadataName in keepMetadata)
+                {
+                    metadataToSet[metadataName] =
+                        Lookup.MetadataModification.CreateFromNoChange();
+                }
+            }
+            else if (removeMetadata != null)
+            {
+                foreach (string metadataName in removeMetadata)
+                {
+                    metadataToSet[metadataName] =
+                        Lookup.MetadataModification.CreateFromRemove();
+                }
+            }
+
+            foreach (CompiledItemMetadataAssignment assignment
+                in operation.Metadata)
+            {
+                if (assignment.Condition != null &&
+                    !assignment.Condition.EvaluateForItemGroup(
+                        environment,
+                        assignment.Metadata.ConditionLocation))
+                {
+                    continue;
+                }
+
+                string evaluatedValue =
+                    EvaluateCompiledItemMetadataValue(
+                        assignment,
+                        environment);
+                metadataToSet[assignment.Metadata.Name] =
+                    Lookup.MetadataModification.CreateFromNewValue(
+                        evaluatedValue);
+            }
+
+            lookup.ModifyItems(item.ItemType, group, metadataToSet);
+        }
+
+        private Dictionary<string, string> EvaluateCompiledItemMetadata(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment)
+        {
+            var metadata = new Dictionary<string, string>(
+                MSBuildNameIgnoreCaseComparer.Default);
+            foreach (CompiledItemMetadataAssignment assignment
+                in operation.Metadata)
+            {
+                if (assignment.Condition != null &&
+                    !assignment.Condition.EvaluateForItemGroup(
+                        environment,
+                        assignment.Metadata.ConditionLocation))
+                {
+                    continue;
+                }
+
+                metadata[assignment.Metadata.Name] =
+                    EvaluateCompiledItemMetadataValue(
+                        assignment,
+                        environment);
+            }
+
+            return metadata;
+        }
+
+        private string EvaluateCompiledItemMetadataValue(
+            CompiledItemMetadataAssignment assignment,
+            CompiledLookupExpressionEnvironment environment)
+        {
+            string escapedValue =
+                assignment.Value.EvaluateLeaveEscaped(
+                    environment,
+                    assignment.Metadata.Location);
+            return environment.Expander.ExpandIntoStringLeaveEscaped(
+                escapedValue,
+                ExpanderOptions.ExpandItems,
+                assignment.Metadata.Location);
+        }
+
+        private static HashSet<string> EvaluateCompiledItemMetadataList(
+            CompiledScalarProgram program,
+            CompiledLookupExpressionEnvironment environment,
+            IElementLocation location)
+        {
+            if (program == null)
+            {
+                return null;
+            }
+
+            string evaluatedValue =
+                program.EvaluateLeaveEscaped(environment, location);
+            List<string> values = environment.Expander
+                .ExpandIntoStringListLeaveEscaped(
+                    evaluatedValue,
+                    ExpanderOptions.ExpandItems,
+                    location)
+                .ToList();
+            return values.Count == 0
+                ? null
+                : new HashSet<string>(values);
+        }
+
+        private static void FilterCompiledItemMetadata(
+            List<ProjectItemInstance> items,
+            HashSet<string> keepMetadata,
+            HashSet<string> removeMetadata)
+        {
+            if (keepMetadata == null && removeMetadata == null)
+            {
+                return;
+            }
+
+            var metadataToRemove = new List<string>();
+            foreach (ProjectItemInstance item in items)
+            {
+                metadataToRemove.Clear();
+                foreach (string metadataName in item.EnumerableMetadataNames)
+                {
+                    if ((keepMetadata != null &&
+                         !keepMetadata.Contains(metadataName)) ||
+                        (removeMetadata != null &&
+                         removeMetadata.Contains(metadataName)))
+                    {
+                        metadataToRemove.Add(metadataName);
+                    }
+                }
+
+                foreach (string metadataName in metadataToRemove)
+                {
+                    item.RemoveMetadata(metadataName);
+                }
+            }
+        }
+
+        private HashSet<string> EvaluateCompiledExcludePaths(
+            IReadOnlyList<string> excludes,
+            IElementLocation excludeLocation,
+            ProjectInstance project)
+        {
+            var excludedPaths = new HashSet<string>(
+                excludes.Count,
+                StringComparer.OrdinalIgnoreCase);
+            foreach (string excludeSplit in excludes)
+            {
+                string[] excludeSplitFiles =
+                    EngineFileUtilities.GetFileListUnescaped(
+                        project.Directory,
+                        excludeSplit,
+                        loggingMechanism: TargetLoggingContext,
+                        excludeLocation: excludeLocation);
+                foreach (string excludeSplitFile in excludeSplitFiles)
+                {
+                    excludedPaths.Add(
+                        excludeSplitFile.NormalizeForPathComparison());
+                }
+            }
+
+            return excludedPaths;
+        }
+
         private WorkUnitResult ExecuteIntrinsic(
             CompiledTargetActionRecord record,
             Lookup lookup)
@@ -2126,6 +2731,12 @@ namespace Microsoft.Build.BackEnd
                 record.Kind == CompiledTargetActionKind.PropertyGroup
                     ? BuildExecutionInstrumentation.Measure(
                         BuildExecutionMetric.FallbackPropertyGroup,
+                        parentName: TargetLoggingContext.Target.Name)
+                    : default;
+            using var fallbackItemGroupMeasurement =
+                record.Kind == CompiledTargetActionKind.ItemGroup
+                    ? BuildExecutionInstrumentation.Measure(
+                        BuildExecutionMetric.FallbackItemGroup,
                         parentName: TargetLoggingContext.Target.Name)
                     : default;
             try
