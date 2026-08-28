@@ -1819,6 +1819,14 @@ namespace Microsoft.Build.BackEnd
             IElementLocation location) =>
             Expander.GetEscapedPropertyValue(propertyName, location);
 
+        string ICompiledExpressionEnvironment.GetEscapedMetadataValue(
+            string itemType,
+            string metadataName,
+            IElementLocation location) =>
+            Expander.Metadata.GetEscapedValue(
+                string.IsNullOrEmpty(itemType) ? null : itemType,
+                metadataName);
+
         string ICompiledExpressionEnvironment.ExpandItems(
             string escapedValue,
             IElementLocation location) =>
@@ -2175,43 +2183,46 @@ namespace Microsoft.Build.BackEnd
                 {
                     CompiledItemOperation operation =
                         action.GetOperation(operationIndex);
-                    ProjectItemGroupTaskItemInstance item =
-                        operation.Item;
-                    if (operation.Condition != null &&
-                        !operation.Condition.EvaluateForItemGroup(
-                            environment,
-                            item.ConditionLocation))
+                    if (!operation.Batching.RequiresBatching)
                     {
+                        ExecuteCompiledItemOperation(
+                            operation,
+                            environment,
+                            lookup,
+                            project,
+                            logTaskInputs);
                         continue;
                     }
 
-                    switch (operation.Kind)
+                    List<ItemBucket> buckets = null;
+                    try
                     {
-                        case CompiledItemOperationKind.Include:
-                            ExecuteCompiledItemInclude(
+                        buckets = BatchingEngine.PrepareBatchingBuckets(
+                            operation.Batching,
+                            lookup,
+                            operation.Item.ItemType,
+                            record.Child.Location,
+                            TargetLoggingContext);
+                        foreach (ItemBucket bucket in buckets)
+                        {
+                            ExecuteCompiledItemOperation(
                                 operation,
-                                environment,
-                                lookup,
+                                new CompiledLookupExpressionEnvironment(
+                                    bucket.Expander),
+                                bucket.Lookup,
                                 project,
                                 logTaskInputs);
-                            break;
-                        case CompiledItemOperationKind.Remove:
-                            ExecuteCompiledItemRemove(
-                                operation,
-                                environment,
-                                lookup,
-                                project,
-                                logTaskInputs);
-                            break;
-                        case CompiledItemOperationKind.Modify:
-                            ExecuteCompiledItemModify(
-                                operation,
-                                environment,
-                                lookup);
-                            break;
-                        default:
-                            throw new InternalErrorException(
-                                "Unexpected compiled item operation.");
+                        }
+                    }
+                    finally
+                    {
+                        if (buckets != null)
+                        {
+                            foreach (ItemBucket bucket in buckets)
+                            {
+                                bucket.LeaveScope();
+                            }
+                        }
                     }
                 }
 
@@ -2227,6 +2238,52 @@ namespace Microsoft.Build.BackEnd
                     WorkUnitResultCode.Failed,
                     WorkUnitActionCode.Stop,
                     exception);
+            }
+        }
+
+        private void ExecuteCompiledItemOperation(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            bool logTaskInputs)
+        {
+            ProjectItemGroupTaskItemInstance item = operation.Item;
+            if (operation.Condition != null &&
+                !operation.Condition.EvaluateForItemGroup(
+                    environment,
+                    item.ConditionLocation))
+            {
+                return;
+            }
+
+            switch (operation.Kind)
+            {
+                case CompiledItemOperationKind.Include:
+                    ExecuteCompiledItemInclude(
+                        operation,
+                        environment,
+                        lookup,
+                        project,
+                        logTaskInputs);
+                    break;
+                case CompiledItemOperationKind.Remove:
+                    ExecuteCompiledItemRemove(
+                        operation,
+                        environment,
+                        lookup,
+                        project,
+                        logTaskInputs);
+                    break;
+                case CompiledItemOperationKind.Modify:
+                    ExecuteCompiledItemModify(
+                        operation,
+                        environment,
+                        lookup);
+                    break;
+                default:
+                    throw new InternalErrorException(
+                        "Unexpected compiled item operation.");
             }
         }
 
@@ -2253,105 +2310,128 @@ namespace Microsoft.Build.BackEnd
                 item.KeepMetadataLocation,
                 "KeepAndRemoveMetadataMutuallyExclusive");
 
-            string evaluatedInclude =
-                operation.Include?.EvaluateLeaveEscaped(
-                    environment,
-                    item.IncludeLocation) ?? string.Empty;
-
-            List<string> excludes = null;
-            if (evaluatedInclude.Length != 0 &&
-                operation.Exclude != null)
-            {
-                string evaluatedExclude =
-                    operation.Exclude.EvaluateLeaveEscaped(
-                        environment,
-                        item.ExcludeLocation);
-                if (evaluatedExclude.Length != 0)
-                {
-                    excludes = environment.Expander
-                        .ExpandIntoStringListLeaveEscaped(
-                            evaluatedExclude,
-                            ExpanderOptions.ExpandItems,
-                            item.ExcludeLocation)
-                        .ToList();
-                }
-            }
-
             var itemsToAdd = new List<ProjectItemInstance>();
-            var itemFactory =
-                new ProjectItemInstanceFactory(project, item.ItemType);
-            bool expandedItemVector = false;
-
-            if (evaluatedInclude.Length != 0)
+            ProjectItemDefinitionInstance itemDefinition;
+            project.ItemDefinitions.TryGetValue(
+                item.ItemType,
+                out itemDefinition);
+            IMetadataTable originalMetadataTable =
+                environment.Expander.Metadata;
+            var metadataTable =
+                new ItemGroupIntrinsicTask.NestedMetadataTable(
+                    item.ItemType,
+                    originalMetadataTable,
+                    itemDefinition);
+            environment.Expander.Metadata = metadataTable;
+            try
             {
-                foreach (string includeSplit
-                    in ExpressionShredder.SplitSemiColonSeparatedList(
-                        evaluatedInclude))
+                string evaluatedInclude =
+                    operation.Include?.EvaluateLeaveEscaped(
+                        environment,
+                        item.IncludeLocation) ?? string.Empty;
+
+                List<string> excludes = null;
+                if (evaluatedInclude.Length != 0 &&
+                    operation.Exclude != null)
                 {
-                    IList<ProjectItemInstance> itemsFromSplit =
-                        environment.Expander
-                            .ExpandSingleItemVectorExpressionIntoItems(
-                                includeSplit,
-                                itemFactory,
+                    string evaluatedExclude =
+                        operation.Exclude.EvaluateLeaveEscaped(
+                            environment,
+                            item.ExcludeLocation);
+                    if (evaluatedExclude.Length != 0)
+                    {
+                        excludes = environment.Expander
+                            .ExpandIntoStringListLeaveEscaped(
+                                evaluatedExclude,
                                 ExpanderOptions.ExpandItems,
-                                includeNullItems: false,
-                                out _,
-                                item.IncludeLocation);
-
-                    if (itemsFromSplit != null)
-                    {
-                        itemsToAdd.AddRange(itemsFromSplit);
-                        expandedItemVector = true;
-                        continue;
-                    }
-
-                    string[] includeSplitFiles =
-                        EngineFileUtilities.GetFileListEscaped(
-                            project.Directory,
-                            includeSplit,
-                            excludes,
-                            loggingMechanism: TargetLoggingContext,
-                            includeLocation: item.IncludeLocation,
-                            excludeLocation: item.ExcludeLocation,
-                            disableExcludeDriveEnumerationWarning: true);
-                    foreach (string includeSplitFile in includeSplitFiles)
-                    {
-                        itemsToAdd.Add(
-                            new ProjectItemInstance(
-                                project,
-                                item.ItemType,
-                                includeSplitFile,
-                                includeSplit,
-                                directMetadata: null,
-                                itemDefinitions: null,
-                                definingFileEscaped: item.Location.File,
-                                useItemDefinitionsWithoutModification: false));
+                                item.ExcludeLocation)
+                            .ToList();
                     }
                 }
-            }
 
-            if (expandedItemVector && excludes?.Count > 0)
+                var itemFactory =
+                    new ProjectItemInstanceFactory(project, item.ItemType);
+                bool expandedItemVector = false;
+
+                if (evaluatedInclude.Length != 0)
+                {
+                    foreach (string includeSplit
+                        in ExpressionShredder.SplitSemiColonSeparatedList(
+                            evaluatedInclude))
+                    {
+                        IList<ProjectItemInstance> itemsFromSplit =
+                            environment.Expander
+                                .ExpandSingleItemVectorExpressionIntoItems(
+                                    includeSplit,
+                                    itemFactory,
+                                    ExpanderOptions.ExpandItems,
+                                    includeNullItems: false,
+                                    out _,
+                                    item.IncludeLocation);
+
+                        if (itemsFromSplit != null)
+                        {
+                            itemsToAdd.AddRange(itemsFromSplit);
+                            expandedItemVector = true;
+                            continue;
+                        }
+
+                        string[] includeSplitFiles =
+                            EngineFileUtilities.GetFileListEscaped(
+                                project.Directory,
+                                includeSplit,
+                                excludes,
+                                loggingMechanism: TargetLoggingContext,
+                                includeLocation: item.IncludeLocation,
+                                excludeLocation: item.ExcludeLocation,
+                                disableExcludeDriveEnumerationWarning: true);
+                        foreach (string includeSplitFile in includeSplitFiles)
+                        {
+                            itemsToAdd.Add(
+                                new ProjectItemInstance(
+                                    project,
+                                    item.ItemType,
+                                    includeSplitFile,
+                                    includeSplit,
+                                    directMetadata: null,
+                                    itemDefinitions: null,
+                                    definingFileEscaped: item.Location.File,
+                                    useItemDefinitionsWithoutModification: false));
+                        }
+                    }
+                }
+
+                if (expandedItemVector && excludes?.Count > 0)
+                {
+                    HashSet<string> excludedPaths =
+                        EvaluateCompiledExcludePaths(
+                            excludes,
+                            item.ExcludeLocation,
+                            project);
+                    itemsToAdd.RemoveAll(
+                        candidate =>
+                            excludedPaths.Contains(
+                                ((IItem)candidate).EvaluatedInclude
+                                    .NormalizeForPathComparison()));
+                }
+
+                FilterCompiledItemMetadata(
+                    itemsToAdd,
+                    keepMetadata,
+                    removeMetadata);
+
+                EvaluateCompiledItemMetadata(
+                    operation,
+                    environment,
+                    metadataTable);
+                ProjectItemInstance.SetMetadata(
+                    metadataTable.AddedMetadata,
+                    itemsToAdd);
+            }
+            finally
             {
-                HashSet<string> excludedPaths =
-                    EvaluateCompiledExcludePaths(
-                        excludes,
-                        item.ExcludeLocation,
-                        project);
-                itemsToAdd.RemoveAll(
-                    candidate =>
-                        excludedPaths.Contains(
-                            ((IItem)candidate).EvaluatedInclude
-                                .NormalizeForPathComparison()));
+                environment.Expander.Metadata = originalMetadataTable;
             }
-
-            FilterCompiledItemMetadata(
-                itemsToAdd,
-                keepMetadata,
-                removeMetadata);
-
-            Dictionary<string, string> metadata =
-                EvaluateCompiledItemMetadata(operation, environment);
-            ProjectItemInstance.SetMetadata(metadata, itemsToAdd);
 
             bool keepDuplicates =
                 operation.KeepDuplicates?.EvaluateForItemGroup(
@@ -2575,12 +2655,11 @@ namespace Microsoft.Build.BackEnd
             lookup.ModifyItems(item.ItemType, group, metadataToSet);
         }
 
-        private Dictionary<string, string> EvaluateCompiledItemMetadata(
+        private void EvaluateCompiledItemMetadata(
             CompiledItemOperation operation,
-            CompiledLookupExpressionEnvironment environment)
+            CompiledLookupExpressionEnvironment environment,
+            ItemGroupIntrinsicTask.NestedMetadataTable metadataTable)
         {
-            var metadata = new Dictionary<string, string>(
-                MSBuildNameIgnoreCaseComparer.Default);
             foreach (CompiledItemMetadataAssignment assignment
                 in operation.Metadata)
             {
@@ -2592,13 +2671,12 @@ namespace Microsoft.Build.BackEnd
                     continue;
                 }
 
-                metadata[assignment.Metadata.Name] =
+                metadataTable.SetValue(
+                    assignment.Metadata.Name,
                     EvaluateCompiledItemMetadataValue(
                         assignment,
-                        environment);
+                        environment));
             }
-
-            return metadata;
         }
 
         private string EvaluateCompiledItemMetadataValue(

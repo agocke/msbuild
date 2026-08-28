@@ -497,6 +497,82 @@ namespace Microsoft.Build.BackEnd
         Modify,
     }
 
+    internal readonly struct CompiledBatchingMetadataReference
+    {
+        internal CompiledBatchingMetadataReference(
+            string qualifiedName,
+            MetadataReference reference)
+        {
+            QualifiedName = qualifiedName;
+            ItemName = reference.ItemName;
+            MetadataName = reference.MetadataName;
+        }
+
+        internal string QualifiedName { get; }
+
+        internal string ItemName { get; }
+
+        internal string MetadataName { get; }
+    }
+
+    internal sealed class CompiledBatchingDescriptor
+    {
+        private CompiledBatchingDescriptor(
+            string[] itemReferences,
+            CompiledBatchingMetadataReference[] metadataReferences)
+        {
+            ItemReferences = itemReferences;
+            MetadataReferences = metadataReferences;
+        }
+
+        internal string[] ItemReferences { get; }
+
+        internal CompiledBatchingMetadataReference[] MetadataReferences { get; }
+
+        internal bool RequiresBatching => MetadataReferences.Length != 0;
+
+        internal static CompiledBatchingDescriptor Create(
+            ProjectItemGroupTaskItemInstance item)
+        {
+            var values = new List<string>(item.Metadata.Count + 4);
+            AddIfNotEmpty(values, item.Include);
+            AddIfNotEmpty(values, item.Exclude);
+            AddIfNotEmpty(values, item.Remove);
+            AddIfNotEmpty(values, item.Condition);
+            foreach (ProjectItemGroupTaskMetadataInstance metadata
+                in item.Metadata)
+            {
+                AddIfNotEmpty(values, metadata.Value);
+                AddIfNotEmpty(values, metadata.Condition);
+            }
+
+            ItemsAndMetadataPair pair =
+                ExpressionShredder.GetReferencedItemNamesAndMetadata(values);
+            string[] itemReferences = pair.Items?.ToArray() ??
+                Array.Empty<string>();
+            CompiledBatchingMetadataReference[] metadataReferences =
+                pair.Metadata == null
+                    ? Array.Empty<CompiledBatchingMetadataReference>()
+                    : pair.Metadata.Select(
+                        entry => new CompiledBatchingMetadataReference(
+                            entry.Key,
+                            entry.Value)).ToArray();
+            return new CompiledBatchingDescriptor(
+                itemReferences,
+                metadataReferences);
+        }
+
+        private static void AddIfNotEmpty(
+            List<string> values,
+            string value)
+        {
+            if (!string.IsNullOrEmpty(value))
+            {
+                values.Add(value);
+            }
+        }
+    }
+
     internal sealed class CompiledItemGroupAction
     {
         private readonly CompiledConditionProgram _condition;
@@ -576,6 +652,7 @@ namespace Microsoft.Build.BackEnd
             CompiledScalarProgram removeMetadata,
             CompiledScalarProgram matchOnMetadata,
             MatchOnMetadataOptions matchOnMetadataOptions,
+            CompiledBatchingDescriptor batching,
             CompiledItemMetadataAssignment[] metadata)
         {
             Item = item;
@@ -589,6 +666,7 @@ namespace Microsoft.Build.BackEnd
             RemoveMetadata = removeMetadata;
             MatchOnMetadata = matchOnMetadata;
             MatchOnMetadataOptions = matchOnMetadataOptions;
+            Batching = batching;
             Metadata = metadata;
         }
 
@@ -614,6 +692,8 @@ namespace Microsoft.Build.BackEnd
 
         internal MatchOnMetadataOptions MatchOnMetadataOptions { get; }
 
+        internal CompiledBatchingDescriptor Batching { get; }
+
         internal CompiledItemMetadataAssignment[] Metadata { get; }
 
         internal static CompiledItemOperation TryCreate(
@@ -622,7 +702,8 @@ namespace Microsoft.Build.BackEnd
             CompiledConditionProgram condition = null;
             if (!string.IsNullOrEmpty(item.Condition))
             {
-                condition = CompiledConditionProgram.TryCreate(
+                condition =
+                    CompiledConditionProgram.TryCreateForItemGroup(
                     item.Condition,
                     item.ConditionLocation);
                 if (condition == null)
@@ -678,7 +759,8 @@ namespace Microsoft.Build.BackEnd
 
                 if (!string.IsNullOrEmpty(item.KeepDuplicates))
                 {
-                    keepDuplicates = CompiledConditionProgram.TryCreate(
+                    keepDuplicates =
+                        CompiledConditionProgram.TryCreateForItemGroup(
                         item.KeepDuplicates,
                         item.KeepDuplicatesLocation);
                     if (keepDuplicates == null)
@@ -742,20 +824,13 @@ namespace Microsoft.Build.BackEnd
                 if (!string.IsNullOrEmpty(metadataInstance.Condition))
                 {
                     metadataCondition =
-                        CompiledConditionProgram.TryCreate(
+                        CompiledConditionProgram.TryCreateForItemGroup(
                             metadataInstance.Condition,
                             metadataInstance.ConditionLocation);
                     if (metadataCondition == null)
                     {
                         return null;
                     }
-                }
-
-                if (ExpressionShredder
-                        .ContainsMetadataExpressionOutsideTransform(
-                            metadataInstance.Value))
-                {
-                    return null;
                 }
 
                 CompiledScalarProgram value =
@@ -785,6 +860,7 @@ namespace Microsoft.Build.BackEnd
                 removeMetadata,
                 matchOnMetadata,
                 matchOnMetadataOptions,
+                CompiledBatchingDescriptor.Create(item),
                 metadata);
         }
 
@@ -799,10 +875,7 @@ namespace Microsoft.Build.BackEnd
                 return true;
             }
 
-            if (ExpressionShredder
-                    .ContainsMetadataExpressionOutsideTransform(
-                        specification) ||
-                (!allowItemVectors &&
+            if ((!allowItemVectors &&
                  ExpressionShredder.ContainsItemVectorMarker(
                      specification)))
             {
@@ -857,6 +930,14 @@ namespace Microsoft.Build.BackEnd
             string propertyName,
             IElementLocation location) =>
             _expander.GetEscapedPropertyValue(propertyName, location);
+
+        string ICompiledExpressionEnvironment.GetEscapedMetadataValue(
+            string itemType,
+            string metadataName,
+            IElementLocation location) =>
+            _expander.Metadata.GetEscapedValue(
+                string.IsNullOrEmpty(itemType) ? null : itemType,
+                metadataName);
 
         string ICompiledExpressionEnvironment.ExpandItems(
             string escapedValue,

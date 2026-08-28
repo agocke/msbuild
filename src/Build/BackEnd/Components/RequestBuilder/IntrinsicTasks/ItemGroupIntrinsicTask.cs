@@ -675,7 +675,7 @@ namespace Microsoft.Build.BackEnd
         /// 1. The metadata table created for the bucket, may be null.
         /// 2. The metadata table derived from the item definition group, may be null.
         /// </summary>
-        private class NestedMetadataTable : IMetadataTable, IItemTypeDefinition
+        internal sealed class NestedMetadataTable : IMetadataTable, IItemTypeDefinition
         {
             /// <summary>
             /// The table for all metadata added during expansion

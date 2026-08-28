@@ -576,6 +576,7 @@ namespace Microsoft.Build.Evaluation
         GetTargetPlatformIdentifier,
         GetTargetPlatformVersion,
         GetToolsDirectory32,
+        IsTargetFrameworkCompatible,
         IsRunningFromVisualStudio,
         NormalizeDirectory,
         NormalizePath,
@@ -602,6 +603,8 @@ namespace Microsoft.Build.Evaluation
         Subtract,
         ValueOrDefault,
         VersionBuild,
+        VersionEquals,
+        VersionGreaterThanOrEquals,
         VersionLessThan,
         VersionParseToStringTwo,
     }
@@ -698,21 +701,27 @@ namespace Microsoft.Build.Evaluation
     {
         Literal,
         Property,
+        Metadata,
+        Function,
     }
 
     internal readonly struct CompiledConditionValuePart
     {
         internal CompiledConditionValuePart(
             CompiledConditionValuePartKind kind,
-            int value)
+            int value,
+            int count = 0)
         {
             Kind = kind;
             Value = value;
+            Count = count;
         }
 
         internal CompiledConditionValuePartKind Kind { get; }
 
         internal int Value { get; }
+
+        internal int Count { get; }
     }
 
     internal enum CompiledMetadataValuePartKind : byte
@@ -3005,6 +3014,15 @@ namespace Microsoft.Build.Evaluation
                     {
                         kind = default;
                         return false;
+                    }
+
+                    if (CompiledExpressionFunctionUtilities
+                            .TryGetIntrinsicKind(methodName, out kind))
+                    {
+                        minimumArgumentCount = 2;
+                        maximumArgumentCount = 2;
+                        returnsString = false;
+                        return true;
                     }
 
                     if (methodName.Equals(

@@ -616,20 +616,19 @@ namespace Microsoft.Build.UnitTests.BackEnd
         [Theory]
         [InlineData(
             """
-            <Input Include="value">
-              <Copied>%(Source.Identity)</Copied>
-            </Input>
-            """)]
-        [InlineData(
-            """
             <Input
                 Include="@(Source, '%(Source.Identity)')" />
             """)]
         [InlineData(
             """
-            <Input
-                Include="value"
-                Condition="'%(Source.Identity)' == 'source'" />
+            <Input Include="value">
+              <Generated>$([System.Guid]::NewGuid())</Generated>
+            </Input>
+            """)]
+        [InlineData(
+            """
+            <Input Include="value"
+                   Condition="$([MSBuild]::VersionGreaterThan('2.0', '1.0'))" />
             """)]
         public void ItemGroupFallsBackAsAWholeForUnsupportedOperations(
             string unsupportedOperation)
@@ -666,6 +665,197 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(
                 "simple",
                 Assert.Single(instance.GetItems("Simple"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupBatchesMetadataValuesAndConditions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Decomposed Include="@(TargetFramework)">
+                    <Supports>$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', 'net7.0'))</Supports>
+                    <Original>%(Identity)</Original>
+                  </Decomposed>
+                  <Selected
+                      Include="@(Decomposed)"
+                      Condition="'%(Supports)' == 'true' And $(_Marker.Contains('enabled'))" />
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <_Marker>feature-enabled</_Marker>
+                </PropertyGroup>
+                <ItemGroup>
+                  <TargetFramework Include="net6.0;net8.0" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                new[] { "net6.0:false", "net8.0:true" },
+                instance.GetItems("Decomposed").Select(
+                    item =>
+                        $"{item.EvaluatedInclude}:{item.GetMetadataValue("Supports").ToLowerInvariant()}"));
+            ProjectItemInstance selected =
+                Assert.Single(instance.GetItems("Selected"));
+            Assert.Equal("net8.0", selected.EvaluatedInclude);
+            Assert.Equal("net8.0", selected.GetMetadataValue("Original"));
+            Assert.Equal("True", selected.GetMetadataValue("Supports"));
+        }
+
+        [Fact]
+        public void CompiledItemIncludeUsesDestinationItemDefinitionMetadata()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Out Include="%(Out.Name)">
+                    <Derived>%(Name)-derived</Derived>
+                  </Out>
+                  <Excluded
+                      Include="kept;skip"
+                      Exclude="%(Excluded.Skip)" />
+                </ItemGroup>
+                """,
+                """
+                <ItemDefinitionGroup>
+                  <Out>
+                    <Name>generated</Name>
+                  </Out>
+                  <Excluded>
+                    <Skip>skip</Skip>
+                  </Excluded>
+                </ItemDefinitionGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            ProjectItemInstance output =
+                Assert.Single(instance.GetItems("Out"));
+            Assert.Equal("generated", output.EvaluatedInclude);
+            Assert.Equal(
+                "generated-derived",
+                output.GetMetadataValue("Derived"));
+            Assert.Equal(
+                "kept",
+                Assert.Single(instance.GetItems("Excluded"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupSupportsVersionFunctionInBatchedCondition()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <ValidVersion
+                      Include="%(Version.Identity)"
+                      Condition="$([MSBuild]::VersionEquals(%(Identity), 11.0))" />
+                </ItemGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Version Include="10.0;11.0" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "11.0",
+                Assert.Single(instance.GetItems("ValidVersion"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupSupportsNestedAndPathFunctionArguments()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <NestedMatched
+                      Include="nested"
+                      Condition="$(_NestedResult.Contains($([MSBuild]::VersionEquals('1.0', '1.0'))))" />
+                  <PathMatched
+                      Include="path"
+                      Condition="$(_PathValue.Contains('$(MSBuildToolsPath)\nested'))" />
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <_NestedResult>True</_NestedResult>
+                  <_PathValue>$(MSBuildToolsPath)/nested</_PathValue>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "nested",
+                Assert.Single(instance.GetItems("NestedMatched"))
+                    .EvaluatedInclude);
+            Assert.Equal(
+                "path",
+                Assert.Single(instance.GetItems("PathMatched"))
                     .EvaluatedInclude);
         }
 
@@ -1780,6 +1970,15 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
+        public void CompiledConditionRejectsMixedBooleanFunctionValue()
+        {
+            Assert.Null(
+                CompiledConditionProgram.TryCreate(
+                    "prefix$([MSBuild]::VersionEquals('1.0', '1.0'))",
+                    ElementLocation.EmptyLocation));
+        }
+
+        [Fact]
         public void CompiledActionPreservesCaseInsensitiveParameterBinding()
         {
             using TestEnvironment environment = TestEnvironment.Create();
@@ -2067,6 +2266,12 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 PropertyReadCount++;
                 return string.Empty;
             }
+
+            public string GetEscapedMetadataValue(
+                string itemType,
+                string metadataName,
+                IElementLocation location) =>
+                string.Empty;
 
             public string ExpandItems(
                 string escapedValue,
