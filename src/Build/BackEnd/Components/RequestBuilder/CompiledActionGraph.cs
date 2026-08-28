@@ -18,6 +18,7 @@ using System.Runtime.Loader;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
 
 #nullable disable
@@ -104,7 +105,8 @@ namespace Microsoft.Build.BackEnd
             return new CompiledTargetActionRecord(
                 sourceAction.Kind,
                 sourceAction.Child,
-                GetAction(childIndex));
+                GetAction(childIndex),
+                sourceAction.PropertyGroupAction);
         }
 
         internal bool TryEvaluateCondition(
@@ -285,12 +287,14 @@ namespace Microsoft.Build.BackEnd
             CompiledTargetActionKind kind,
             ProjectTargetInstanceChild child,
             CompiledTaskSourceProgram taskProgram,
-            int taskIndex)
+            int taskIndex,
+            CompiledPropertyGroupAction propertyGroupAction)
         {
             Kind = kind;
             Child = child;
             TaskProgram = taskProgram;
             TaskIndex = taskIndex;
+            PropertyGroupAction = propertyGroupAction;
         }
 
         internal CompiledTargetActionKind Kind { get; }
@@ -301,6 +305,8 @@ namespace Microsoft.Build.BackEnd
 
         internal int TaskIndex { get; }
 
+        internal CompiledPropertyGroupAction PropertyGroupAction { get; }
+
         internal static CompiledTargetSourceActionRecord CreateTask(
             ProjectTaskInstance task,
             int taskIndex) =>
@@ -308,7 +314,8 @@ namespace Microsoft.Build.BackEnd
                 CompiledTargetActionKind.Task,
                 task,
                 CompiledTaskSourceProgram.GetOrCreate(task),
-                taskIndex);
+                taskIndex,
+                propertyGroupAction: null);
 
         internal static CompiledTargetSourceActionRecord CreatePropertyGroup(
             ProjectPropertyGroupTaskInstance propertyGroup) =>
@@ -316,7 +323,9 @@ namespace Microsoft.Build.BackEnd
                 CompiledTargetActionKind.PropertyGroup,
                 propertyGroup,
                 taskProgram: null,
-                taskIndex: -1);
+                taskIndex: -1,
+                propertyGroupAction:
+                    CompiledPropertyGroupAction.TryCreate(propertyGroup));
 
         internal static CompiledTargetSourceActionRecord CreateItemGroup(
             ProjectItemGroupTaskInstance itemGroup) =>
@@ -324,7 +333,8 @@ namespace Microsoft.Build.BackEnd
                 CompiledTargetActionKind.ItemGroup,
                 itemGroup,
                 taskProgram: null,
-                taskIndex: -1);
+                taskIndex: -1,
+                propertyGroupAction: null);
 
         internal static CompiledTargetSourceActionRecord CreateFallback(
             ProjectTargetInstanceChild child) =>
@@ -332,7 +342,8 @@ namespace Microsoft.Build.BackEnd
                 CompiledTargetActionKind.Fallback,
                 child,
                 taskProgram: null,
-                taskIndex: -1);
+                taskIndex: -1,
+                propertyGroupAction: null);
     }
 
     /// <summary>
@@ -343,11 +354,13 @@ namespace Microsoft.Build.BackEnd
         internal CompiledTargetActionRecord(
             CompiledTargetActionKind kind,
             ProjectTargetInstanceChild child,
-            CompiledTaskAction taskAction)
+            CompiledTaskAction taskAction,
+            CompiledPropertyGroupAction propertyGroupAction)
         {
             Kind = kind;
             Child = child;
             TaskAction = taskAction;
+            PropertyGroupAction = propertyGroupAction;
         }
 
         internal CompiledTargetActionKind Kind { get; }
@@ -355,6 +368,112 @@ namespace Microsoft.Build.BackEnd
         internal ProjectTargetInstanceChild Child { get; }
 
         internal CompiledTaskAction TaskAction { get; }
+
+        internal CompiledPropertyGroupAction PropertyGroupAction { get; }
+    }
+
+    internal sealed class CompiledPropertyGroupAction
+    {
+        private readonly CompiledConditionProgram _condition;
+        private readonly IElementLocation _conditionLocation;
+        private readonly CompiledPropertyAssignment[] _assignments;
+
+        private CompiledPropertyGroupAction(
+            CompiledConditionProgram condition,
+            IElementLocation conditionLocation,
+            CompiledPropertyAssignment[] assignments)
+        {
+            _condition = condition;
+            _conditionLocation = conditionLocation;
+            _assignments = assignments;
+        }
+
+        internal int AssignmentCount => _assignments.Length;
+
+        internal static CompiledPropertyGroupAction TryCreate(
+            ProjectPropertyGroupTaskInstance propertyGroup)
+        {
+            CompiledConditionProgram condition = null;
+            if (!string.IsNullOrEmpty(propertyGroup.Condition))
+            {
+                condition = CompiledConditionProgram.TryCreate(
+                    propertyGroup.Condition,
+                    propertyGroup.ConditionLocation);
+                if (condition == null)
+                {
+                    return null;
+                }
+            }
+
+            var assignments =
+                new CompiledPropertyAssignment[
+                    propertyGroup.Properties.Count];
+            int assignmentIndex = 0;
+            foreach (ProjectPropertyGroupTaskPropertyInstance property
+                in propertyGroup.Properties)
+            {
+                if (ReservedPropertyNames.IsReservedProperty(property.Name))
+                {
+                    return null;
+                }
+
+                CompiledConditionProgram propertyCondition = null;
+                if (!string.IsNullOrEmpty(property.Condition))
+                {
+                    propertyCondition = CompiledConditionProgram.TryCreate(
+                        property.Condition,
+                        property.ConditionLocation);
+                    if (propertyCondition == null)
+                    {
+                        return null;
+                    }
+                }
+
+                CompiledScalarProgram value =
+                    CompiledScalarProgram.TryCreate(property.Value);
+                if (value == null)
+                {
+                    return null;
+                }
+
+                assignments[assignmentIndex++] =
+                    new CompiledPropertyAssignment(
+                        property,
+                        propertyCondition,
+                        value);
+            }
+
+            return new CompiledPropertyGroupAction(
+                condition,
+                propertyGroup.ConditionLocation,
+                assignments);
+        }
+
+        internal bool EvaluateCondition(
+            ICompiledExpressionEnvironment environment) =>
+            _condition?.Evaluate(environment, _conditionLocation) ?? true;
+
+        internal CompiledPropertyAssignment GetAssignment(int index) =>
+            _assignments[index];
+    }
+
+    internal readonly struct CompiledPropertyAssignment
+    {
+        internal CompiledPropertyAssignment(
+            ProjectPropertyGroupTaskPropertyInstance property,
+            CompiledConditionProgram condition,
+            CompiledScalarProgram value)
+        {
+            Property = property;
+            Condition = condition;
+            Value = value;
+        }
+
+        internal ProjectPropertyGroupTaskPropertyInstance Property { get; }
+
+        internal CompiledConditionProgram Condition { get; }
+
+        internal CompiledScalarProgram Value { get; }
     }
 
     internal sealed class CompiledLookupExpressionEnvironment :
@@ -369,6 +488,9 @@ namespace Microsoft.Build.BackEnd
         {
             _expander = expander;
         }
+
+        internal Expander<ProjectPropertyInstance, ProjectItemInstance>
+            Expander => _expander;
 
         string ICompiledExpressionEnvironment.GetEscapedPropertyValue(
             string propertyName,

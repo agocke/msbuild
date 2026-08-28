@@ -653,6 +653,18 @@ namespace Microsoft.Build.Evaluation
             IElementLocation location,
             string baseDirectory = "")
         {
+            string escapedValue = EvaluateLeaveEscaped(
+                environment,
+                location,
+                baseDirectory);
+            return EscapingUtilities.UnescapeAll(escapedValue);
+        }
+
+        internal string EvaluateLeaveEscaped(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            string baseDirectory = "")
+        {
             string escapedValue;
             if (_parts.Length == 1)
             {
@@ -669,11 +681,9 @@ namespace Microsoft.Build.Evaluation
                 escapedValue = builder.ToString();
             }
 
-            string adjustedValue =
-                escapedValue.IndexOf('\\') == -1
-                    ? escapedValue
-                    : FileUtilities.MaybeAdjustFilePath(escapedValue, baseDirectory);
-            return EscapingUtilities.UnescapeAll(adjustedValue);
+            return escapedValue.IndexOf('\\') == -1
+                ? escapedValue
+                : FileUtilities.MaybeAdjustFilePath(escapedValue, baseDirectory);
         }
 
         internal bool TryEvaluateConstant(

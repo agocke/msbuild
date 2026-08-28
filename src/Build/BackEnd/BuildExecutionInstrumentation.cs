@@ -43,6 +43,8 @@ namespace Microsoft.Build.BackEnd
         FastTaskCleanup,
         FastTaskLoggingFinish,
         IntrinsicTask,
+        CompiledPropertyGroup,
+        FallbackPropertyGroup,
         TaskYield,
         TaskReacquire,
     }

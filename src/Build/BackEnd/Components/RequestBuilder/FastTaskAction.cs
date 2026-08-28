@@ -18,6 +18,7 @@ using Microsoft.Build.Collections;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Exceptions;
+using Microsoft.Build.Experimental.BuildCheck.Infrastructure;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Internal;
@@ -1754,6 +1755,10 @@ namespace Microsoft.Build.BackEnd
         private Expander<
             ProjectPropertyInstance,
             ProjectItemInstance> _inferenceConditionExpander;
+        private CompiledLookupExpressionEnvironment
+            _executionExpressionEnvironment;
+        private CompiledLookupExpressionEnvironment
+            _inferenceExpressionEnvironment;
 
         internal CompiledTargetExecutionFrame(
             IBuildComponentHost host,
@@ -1828,6 +1833,13 @@ namespace Microsoft.Build.BackEnd
         internal ValueTask<WorkUnitResult> ExecuteAsync(
             CompiledTargetActionRecord record)
         {
+            if (record.Kind == CompiledTargetActionKind.PropertyGroup &&
+                record.PropertyGroupAction != null)
+            {
+                return new ValueTask<WorkUnitResult>(
+                    ExecuteCompiledPropertyGroupAction(record));
+            }
+
             if (record.Kind == CompiledTargetActionKind.PropertyGroup ||
                 record.Kind == CompiledTargetActionKind.ItemGroup)
             {
@@ -1892,6 +1904,166 @@ namespace Microsoft.Build.BackEnd
                     CancellationToken));
         }
 
+        private WorkUnitResult ExecuteCompiledPropertyGroupAction(
+            CompiledTargetActionRecord record)
+        {
+            WorkUnitResult result = new(
+                WorkUnitResultCode.Failed,
+                WorkUnitActionCode.Stop,
+                null);
+
+            if ((Mode & TaskExecutionMode.InferOutputsOnly) ==
+                TaskExecutionMode.InferOutputsOnly)
+            {
+                result = ExecuteCompiledPropertyGroup(
+                    record,
+                    LookupForInference);
+            }
+
+            if ((Mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) ==
+                TaskExecutionMode.ExecuteTaskAndGatherOutputs)
+            {
+                result = ExecuteCompiledPropertyGroup(
+                    record,
+                    LookupForExecution);
+            }
+
+            return result;
+        }
+
+        private WorkUnitResult ExecuteCompiledPropertyGroup(
+            CompiledTargetActionRecord record,
+            Lookup lookup)
+        {
+            CompiledPropertyGroupAction action =
+                record.PropertyGroupAction;
+            CompiledLookupExpressionEnvironment environment =
+                GetExpressionEnvironment(lookup);
+            if (!action.EvaluateCondition(environment))
+            {
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Skipped,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+
+            using var intrinsicTaskMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.IntrinsicTask,
+                    BuildExecutionInstrumentation.DetailsEnabled
+                        ? record.Child.GetType().Name
+                        : null,
+                    TargetLoggingContext.Target.Name);
+            using var compiledPropertyGroupMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.CompiledPropertyGroup,
+                    parentName: TargetLoggingContext.Target.Name);
+            try
+            {
+                bool logTaskInputs =
+                    Host.BuildParameters.LogTaskInputs ||
+                    Traits.Instance.EscapeHatches.LogTaskInputs;
+                ProjectInstance project =
+                    RequestEntry.RequestConfiguration.Project;
+                PropertyTrackingSetting propertyTrackingSettings =
+                    (PropertyTrackingSetting)
+                    Traits.Instance.LogPropertyTracking;
+                PropertiesUseTracker propertiesUseTracker =
+                    environment.Expander.PropertiesUseTracker;
+
+                for (int assignmentIndex = 0;
+                     assignmentIndex < action.AssignmentCount;
+                     assignmentIndex++)
+                {
+                    CompiledPropertyAssignment assignment =
+                        action.GetAssignment(assignmentIndex);
+                    ProjectPropertyGroupTaskPropertyInstance property =
+                        assignment.Property;
+                    if (assignment.Condition != null &&
+                        !assignment.Condition.Evaluate(
+                            environment,
+                            property.ConditionLocation))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        ProjectErrorUtilities.VerifyThrowInvalidProject(
+                            !ReservedPropertyNames.IsReservedProperty(
+                                property.Name),
+                            property.Location,
+                            "CannotModifyReservedProperty",
+                            property.Name);
+
+                        propertiesUseTracker
+                                .CurrentlyEvaluatingPropertyElementName =
+                            property.Name;
+                        propertiesUseTracker.PropertyReadContext =
+                            PropertyReadContext.PropertyEvaluation;
+
+                        string evaluatedValue =
+                            assignment.Value.EvaluateLeaveEscaped(
+                                environment,
+                                property.Location);
+                        propertiesUseTracker.CheckPreexistingUndefinedUsage(
+                            property,
+                            evaluatedValue,
+                            TargetLoggingContext);
+
+                        PropertyTrackingUtils.LogPropertyAssignment(
+                            propertyTrackingSettings,
+                            property.Name,
+                            evaluatedValue,
+                            property.Location,
+                            project.GetProperty(property.Name)
+                                ?.EvaluatedValue,
+                            TargetLoggingContext);
+
+                        if (logTaskInputs &&
+                            !TargetLoggingContext.LoggingService
+                                .OnlyLogCriticalEvents)
+                        {
+                            TargetLoggingContext.LogComment(
+                                MessageImportance.Low,
+                                "PropertyGroupLogMessage",
+                                property.Name,
+                                evaluatedValue);
+                        }
+
+                        lookup.SetProperty(
+                            ProjectPropertyInstance.Create(
+                                property.Name,
+                                evaluatedValue,
+                                property.Location,
+                                project.IsImmutable));
+                        TargetLoggingContext.ProcessPropertyWrite(
+                            new PropertyWriteInfo(
+                                property.Name,
+                                string.IsNullOrEmpty(evaluatedValue),
+                                property.Location));
+                    }
+                    finally
+                    {
+                        propertiesUseTracker.ResetPropertyGroupAssignment();
+                    }
+                }
+
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Success,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+            catch (InvalidProjectFileException exception)
+            {
+                TargetLoggingContext.LogInvalidProjectFileError(exception);
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Failed,
+                    WorkUnitActionCode.Stop,
+                    exception);
+            }
+        }
+
         private WorkUnitResult ExecuteIntrinsicAction(
             CompiledTargetActionRecord record)
         {
@@ -1950,6 +2122,12 @@ namespace Microsoft.Build.BackEnd
                         ? record.Child.GetType().Name
                         : null,
                     TargetLoggingContext.Target.Name);
+            using var fallbackPropertyGroupMeasurement =
+                record.Kind == CompiledTargetActionKind.PropertyGroup
+                    ? BuildExecutionInstrumentation.Measure(
+                        BuildExecutionMetric.FallbackPropertyGroup,
+                        parentName: TargetLoggingContext.Target.Name)
+                    : default;
             try
             {
                 bool logTaskInputs =
@@ -1999,6 +2177,21 @@ namespace Microsoft.Build.BackEnd
 
             return _inferenceConditionExpander ??=
                 CreateExpander(lookup);
+        }
+
+        private CompiledLookupExpressionEnvironment
+            GetExpressionEnvironment(Lookup lookup)
+        {
+            if (ReferenceEquals(lookup, LookupForExecution))
+            {
+                return _executionExpressionEnvironment ??=
+                    new CompiledLookupExpressionEnvironment(
+                        GetConditionExpander(lookup));
+            }
+
+            return _inferenceExpressionEnvironment ??=
+                new CompiledLookupExpressionEnvironment(
+                    GetConditionExpander(lookup));
         }
 
         private Expander<ProjectPropertyInstance, ProjectItemInstance>

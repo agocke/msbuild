@@ -165,6 +165,14 @@ internal sealed class PropertiesUseTracker
         _propertyReadContext = pop ? _previousPropertyReadContext : PropertyReadContext.Other;
         _previousPropertyReadContext = PropertyReadContext.Other;
     }
+
+    internal void ResetPropertyGroupAssignment()
+    {
+        _properties?.Clear();
+        CurrentlyEvaluatingPropertyElementName = null;
+        _propertyReadContext = PropertyReadContext.Other;
+        _previousPropertyReadContext = PropertyReadContext.Other;
+    }
 }
 
 /// <summary>

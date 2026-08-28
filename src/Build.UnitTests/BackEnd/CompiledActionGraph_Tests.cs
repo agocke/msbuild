@@ -108,6 +108,8 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(
                 CompiledTargetActionKind.PropertyGroup,
                 plan.GetActionRecord(0).Kind);
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
             Assert.Equal(
                 CompiledTargetActionKind.ItemGroup,
                 plan.GetActionRecord(1).Kind);
@@ -152,6 +154,12 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 """));
             ProjectInstance instance =
                 projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
 
             MockLogger logger = Build(instance, out BuildResult result);
 
@@ -188,6 +196,12 @@ namespace Microsoft.Build.UnitTests.BackEnd
                 """);
             ProjectInstance instance =
                 projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
 
             Build(instance, out BuildResult result);
 
@@ -195,6 +209,235 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal(
                 "inferred",
                 instance.GetPropertyValue("InferredValue"));
+        }
+
+        [Fact]
+        public void CompiledPropertyGroupPreservesOrderedConditionsAndEscaping()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup Condition="'$(RunGroup)' == 'true'">
+                  <First>a%3Bb</First>
+                  <Skipped Condition="'$(RunProperty)' == 'true'">skipped</Skipped>
+                  <Second Condition="'$(First)' == 'a;b'">$(First)%3Btail</Second>
+                  <AdjustedPath>directory\file.txt</AdjustedPath>
+                </PropertyGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <RunGroup>true</RunGroup>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+            CompiledPropertyGroupAction action =
+                plan.GetActionRecord(0).PropertyGroupAction;
+
+            Assert.NotNull(action);
+            Assert.Equal(4, action.AssignmentCount);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "a%3Bb",
+                ((IProperty)instance.GetProperty("First"))
+                    .EvaluatedValueEscaped);
+            Assert.Equal(
+                "a;b;tail",
+                instance.GetPropertyValue("Second"));
+            Assert.Equal(
+                string.Empty,
+                instance.GetPropertyValue("Skipped"));
+            Assert.Equal(
+                FileUtilities.MaybeAdjustFilePath(
+                    @"directory\file.txt"),
+                instance.GetPropertyValue("AdjustedPath"));
+        }
+
+        [Theory]
+        [InlineData("@(Input)")]
+        [InlineData("%(Input.Identity)")]
+        [InlineData("$([System.String]::Copy('function'))")]
+        public void PropertyGroupFallsBackAsAWholeForUnsupportedValues(
+            string unsupportedValue)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                $"""
+                <PropertyGroup>
+                  <Simple>simple</Simple>
+                  <FallbackValue>{unsupportedValue}</FallbackValue>
+                </PropertyGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Input Include="a;b" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Null(
+                plan.GetActionRecord(0).PropertyGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "simple",
+                instance.GetPropertyValue("Simple"));
+            Assert.NotEmpty(
+                instance.GetPropertyValue("FallbackValue"));
+        }
+
+        [Theory]
+        [InlineData("'@(Input)' != ''", "")]
+        [InlineData("", "'%(Input.Identity)' != ''")]
+        [InlineData("$([System.String]::Copy('true'))", "")]
+        public void PropertyGroupFallsBackAsAWholeForUnsupportedConditions(
+            string groupCondition,
+            string propertyCondition)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            string groupConditionAttribute =
+                string.IsNullOrEmpty(groupCondition)
+                    ? string.Empty
+                    : $" Condition=\"{groupCondition}\"";
+            string propertyConditionAttribute =
+                string.IsNullOrEmpty(propertyCondition)
+                    ? string.Empty
+                    : $" Condition=\"{propertyCondition}\"";
+            using ProjectFromString projectFromString = new(CreateProject(
+                $"""
+                <PropertyGroup{groupConditionAttribute}>
+                  <FallbackValue{propertyConditionAttribute}>fallback</FallbackValue>
+                </PropertyGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Input Include="a" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Null(
+                plan.GetActionRecord(0).PropertyGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "fallback",
+                instance.GetPropertyValue("FallbackValue"));
+        }
+
+        [Fact]
+        public void CompiledPropertyGroupPreservesTrackingAndInputLogging()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            environment.SetEnvironmentVariable(
+                "MsBuildLogPropertyTracking",
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <TrackedValue>new</TrackedValue>
+                </PropertyGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <TrackedValue>old</TrackedValue>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
+
+            MockLogger logger = Build(
+                instance,
+                out BuildResult result,
+                logTaskInputs: true);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Contains(
+                logger.BuildMessageEvents,
+                message =>
+                    message is PropertyReassignmentEventArgs reassignment &&
+                    reassignment.PropertyName == "TrackedValue" &&
+                    reassignment.PreviousValue == "old" &&
+                    reassignment.NewValue == "new");
+            logger.AssertLogContains(
+                ResourceUtilities.FormatResourceStringIgnoreCodeAndKeyword(
+                    "PropertyGroupLogMessage",
+                    "TrackedValue",
+                    "new"));
+        }
+
+        [Fact]
+        public void CompiledPropertyGroupDoesNotLeakUndefinedReadsAcrossAssignments()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            environment.SetEnvironmentVariable(
+                "MSBUILDWARNONUNINITIALIZEDPROPERTY",
+                "true");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <First>$(Later)</First>
+                  <Later>set</Later>
+                  <Self>$(Self);tail</Self>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogDoesntContain("MSB4211");
         }
 
         [Fact]
@@ -1411,17 +1654,25 @@ namespace Microsoft.Build.UnitTests.BackEnd
             return Build(instance, out _);
         }
 
-        private static MockLogger Build(ProjectInstance instance, out BuildResult result, bool allowTaskCrashes = false)
+        private static MockLogger Build(
+            ProjectInstance instance,
+            out BuildResult result,
+            bool allowTaskCrashes = false,
+            bool logTaskInputs = false)
         {
             var logger = new MockLogger
             {
                 AllowTaskCrashes = allowTaskCrashes,
+                Verbosity = logTaskInputs
+                    ? LoggerVerbosity.Diagnostic
+                    : LoggerVerbosity.Normal,
             };
             using var manager = new BuildManager();
             manager.BeginBuild(new BuildParameters
             {
                 EnableNodeReuse = false,
                 Loggers = new ILogger[] { logger },
+                LogTaskInputs = logTaskInputs,
             });
 
             try
