@@ -11,6 +11,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Threading.Tasks;
 #if NET && FEATURE_ASSEMBLYLOADCONTEXT
 using System.Runtime.Loader;
 #endif
@@ -37,22 +38,17 @@ namespace Microsoft.Build.BackEnd
 
         private static readonly ConditionalWeakTable<ProjectInstance, PartiallyEvaluatedProject> s_projects = new();
 
-        private readonly CompiledTaskAction[] _actions;
+        private readonly PartiallyEvaluatedProject _project;
+        private readonly CompiledTargetSourceProgram _sourceProgram;
+        private readonly CompiledTaskAction[] _taskActions;
 
         private CompiledTargetPlan(ProjectTargetInstance target, PartiallyEvaluatedProject project)
         {
-            _actions = new CompiledTaskAction[target.Children.Count];
-            for (int i = 0; i < target.Children.Count; i++)
-            {
-                if (target.Children[i] is ProjectTaskInstance task)
-                {
-                    CompiledTaskSourceProgram program =
-                        CompiledTaskSourceProgram.GetOrCreate(task);
-                    _actions[i] = new CompiledTaskAction(
-                        program,
-                        project.GetTaskRegistration(program.Name));
-                }
-            }
+            _project = project;
+            _sourceProgram = CompiledTargetSourceProgram.GetOrCreate(target);
+            _taskActions = _sourceProgram.TaskCount == 0
+                ? null
+                : new CompiledTaskAction[_sourceProgram.TaskCount];
         }
 
         internal static CompiledTargetPlan PartiallyEvaluate(ProjectInstance projectInstance, ProjectTargetInstance target)
@@ -65,7 +61,111 @@ namespace Microsoft.Build.BackEnd
             return project.PartiallyEvaluate(target);
         }
 
-        internal CompiledTaskAction GetAction(int childIndex) => _actions[childIndex];
+        internal int ActionCount => _sourceProgram.ActionCount;
+
+        internal bool HasCompiledCondition =>
+            _sourceProgram.HasCompiledCondition;
+
+        internal CompiledTargetSourceProgram SourceProgram =>
+            _sourceProgram;
+
+        internal CompiledTaskAction GetAction(int childIndex)
+        {
+            CompiledTargetSourceActionRecord sourceAction =
+                _sourceProgram.GetAction(childIndex);
+            if (sourceAction.TaskProgram == null)
+            {
+                return null;
+            }
+
+            int taskIndex = sourceAction.TaskIndex;
+            CompiledTaskAction action =
+                Volatile.Read(ref _taskActions[taskIndex]);
+            if (action != null)
+            {
+                return action;
+            }
+
+            var candidate = new CompiledTaskAction(
+                sourceAction.TaskProgram,
+                _project.GetTaskRegistration(
+                    sourceAction.TaskProgram.Name));
+            return Interlocked.CompareExchange(
+                ref _taskActions[taskIndex],
+                candidate,
+                null) ?? candidate;
+        }
+
+        internal CompiledTargetActionRecord GetActionRecord(
+            int childIndex)
+        {
+            CompiledTargetSourceActionRecord sourceAction =
+                _sourceProgram.GetAction(childIndex);
+            return new CompiledTargetActionRecord(
+                sourceAction.Kind,
+                sourceAction.Child,
+                GetAction(childIndex));
+        }
+
+        internal bool TryEvaluateCondition(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
+            out bool result)
+        {
+            return _sourceProgram.TryEvaluateCondition(
+                expander,
+                out result);
+        }
+
+        internal async ValueTask<WorkUnitResult> ExecuteAsync(
+            CompiledTargetExecutionFrame frame)
+        {
+            WorkUnitResultCode aggregatedTaskResult =
+                WorkUnitResultCode.Success;
+            WorkUnitActionCode finalActionCode =
+                WorkUnitActionCode.Continue;
+            WorkUnitResult lastResult = new(
+                WorkUnitResultCode.Success,
+                WorkUnitActionCode.Continue,
+                null);
+
+            for (int actionIndex = 0;
+                 actionIndex < _sourceProgram.ActionCount &&
+                 !frame.IsCancellationRequested;
+                 actionIndex++)
+            {
+                lastResult = await frame.ExecuteAsync(
+                    GetActionRecord(actionIndex));
+
+                if (lastResult.ResultCode == WorkUnitResultCode.Failed)
+                {
+                    aggregatedTaskResult = WorkUnitResultCode.Failed;
+                }
+                else if (lastResult.ResultCode ==
+                             WorkUnitResultCode.Success &&
+                         aggregatedTaskResult !=
+                             WorkUnitResultCode.Failed)
+                {
+                    aggregatedTaskResult = WorkUnitResultCode.Success;
+                }
+
+                if (lastResult.ActionCode == WorkUnitActionCode.Stop)
+                {
+                    finalActionCode = WorkUnitActionCode.Stop;
+                    break;
+                }
+            }
+
+            if (frame.IsCancellationRequested)
+            {
+                aggregatedTaskResult = WorkUnitResultCode.Canceled;
+                finalActionCode = WorkUnitActionCode.Stop;
+            }
+
+            return new WorkUnitResult(
+                aggregatedTaskResult,
+                finalActionCode,
+                lastResult.Exception);
+        }
 
         private sealed class PartiallyEvaluatedProject
         {
@@ -81,6 +181,212 @@ namespace Microsoft.Build.BackEnd
                     taskName,
                     static _ => new PartiallyEvaluatedTaskRegistration());
         }
+    }
+
+    /// <summary>
+    /// Source-only lowering shared by every project instance built from the same target instance.
+    /// </summary>
+    internal sealed class CompiledTargetSourceProgram
+    {
+        private static readonly ConditionalWeakTable<
+            ProjectTargetInstance,
+            CompiledTargetSourceProgram> s_programs = new();
+
+        private readonly CompiledConditionProgram _condition;
+        private readonly IElementLocation _conditionLocation;
+        private readonly CompiledTargetSourceActionRecord[] _actions;
+
+        private CompiledTargetSourceProgram(ProjectTargetInstance target)
+        {
+            if (!string.IsNullOrEmpty(target.Condition))
+            {
+                _condition = CompiledConditionProgram.TryCreate(
+                    target.Condition,
+                    target.ConditionLocation);
+                _conditionLocation = target.ConditionLocation;
+            }
+
+            _actions =
+                new CompiledTargetSourceActionRecord[
+                    target.Children.Count];
+            int taskIndex = 0;
+            for (int childIndex = 0;
+                 childIndex < target.Children.Count;
+                 childIndex++)
+            {
+                ProjectTargetInstanceChild child =
+                    target.Children[childIndex];
+                _actions[childIndex] = child switch
+                {
+                    ProjectTaskInstance task =>
+                        CompiledTargetSourceActionRecord.CreateTask(
+                            task,
+                            taskIndex++),
+                    ProjectPropertyGroupTaskInstance propertyGroup =>
+                        CompiledTargetSourceActionRecord.CreatePropertyGroup(
+                            propertyGroup),
+                    ProjectItemGroupTaskInstance itemGroup =>
+                        CompiledTargetSourceActionRecord.CreateItemGroup(
+                            itemGroup),
+                    _ =>
+                        CompiledTargetSourceActionRecord.CreateFallback(
+                            child),
+                };
+            }
+
+            TaskCount = taskIndex;
+        }
+
+        internal int ActionCount => _actions.Length;
+
+        internal bool HasCompiledCondition => _condition != null;
+
+        internal int TaskCount { get; }
+
+        internal static CompiledTargetSourceProgram GetOrCreate(
+            ProjectTargetInstance target) =>
+            s_programs.GetValue(
+                target,
+                static targetInstance =>
+                    new CompiledTargetSourceProgram(targetInstance));
+
+        internal CompiledTargetSourceActionRecord GetAction(
+            int childIndex) =>
+            _actions[childIndex];
+
+        internal bool TryEvaluateCondition(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
+            out bool result)
+        {
+            if (_condition == null)
+            {
+                result = false;
+                return false;
+            }
+
+            result = _condition.Evaluate(
+                new CompiledLookupExpressionEnvironment(expander),
+                _conditionLocation);
+            return true;
+        }
+    }
+
+    internal enum CompiledTargetActionKind : byte
+    {
+        Task,
+        PropertyGroup,
+        ItemGroup,
+        Fallback,
+    }
+
+    internal readonly struct CompiledTargetSourceActionRecord
+    {
+        private CompiledTargetSourceActionRecord(
+            CompiledTargetActionKind kind,
+            ProjectTargetInstanceChild child,
+            CompiledTaskSourceProgram taskProgram,
+            int taskIndex)
+        {
+            Kind = kind;
+            Child = child;
+            TaskProgram = taskProgram;
+            TaskIndex = taskIndex;
+        }
+
+        internal CompiledTargetActionKind Kind { get; }
+
+        internal ProjectTargetInstanceChild Child { get; }
+
+        internal CompiledTaskSourceProgram TaskProgram { get; }
+
+        internal int TaskIndex { get; }
+
+        internal static CompiledTargetSourceActionRecord CreateTask(
+            ProjectTaskInstance task,
+            int taskIndex) =>
+            new(
+                CompiledTargetActionKind.Task,
+                task,
+                CompiledTaskSourceProgram.GetOrCreate(task),
+                taskIndex);
+
+        internal static CompiledTargetSourceActionRecord CreatePropertyGroup(
+            ProjectPropertyGroupTaskInstance propertyGroup) =>
+            new(
+                CompiledTargetActionKind.PropertyGroup,
+                propertyGroup,
+                taskProgram: null,
+                taskIndex: -1);
+
+        internal static CompiledTargetSourceActionRecord CreateItemGroup(
+            ProjectItemGroupTaskInstance itemGroup) =>
+            new(
+                CompiledTargetActionKind.ItemGroup,
+                itemGroup,
+                taskProgram: null,
+                taskIndex: -1);
+
+        internal static CompiledTargetSourceActionRecord CreateFallback(
+            ProjectTargetInstanceChild child) =>
+            new(
+                CompiledTargetActionKind.Fallback,
+                child,
+                taskProgram: null,
+                taskIndex: -1);
+    }
+
+    /// <summary>
+    /// Ordered residual action for one target child.
+    /// </summary>
+    internal readonly struct CompiledTargetActionRecord
+    {
+        internal CompiledTargetActionRecord(
+            CompiledTargetActionKind kind,
+            ProjectTargetInstanceChild child,
+            CompiledTaskAction taskAction)
+        {
+            Kind = kind;
+            Child = child;
+            TaskAction = taskAction;
+        }
+
+        internal CompiledTargetActionKind Kind { get; }
+
+        internal ProjectTargetInstanceChild Child { get; }
+
+        internal CompiledTaskAction TaskAction { get; }
+    }
+
+    internal sealed class CompiledLookupExpressionEnvironment :
+        ICompiledExpressionEnvironment
+    {
+        private readonly Expander<
+            ProjectPropertyInstance,
+            ProjectItemInstance> _expander;
+
+        internal CompiledLookupExpressionEnvironment(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander)
+        {
+            _expander = expander;
+        }
+
+        string ICompiledExpressionEnvironment.GetEscapedPropertyValue(
+            string propertyName,
+            IElementLocation location) =>
+            _expander.GetEscapedPropertyValue(propertyName, location);
+
+        void ICompiledExpressionEnvironment.EnterConditionEvaluation(
+            bool oneSideIsEmpty)
+        {
+            _expander.PropertiesUseTracker.PropertyReadContext =
+                oneSideIsEmpty
+                    ? PropertyReadContext
+                        .ConditionEvaluationWithOneSideEmpty
+                    : PropertyReadContext.ConditionEvaluation;
+        }
+
+        void ICompiledExpressionEnvironment.LeaveConditionEvaluation() =>
+            _expander.PropertiesUseTracker.ResetPropertyReadContext();
     }
 
     /// <summary>

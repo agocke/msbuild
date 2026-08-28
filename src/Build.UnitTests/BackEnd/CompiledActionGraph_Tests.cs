@@ -57,8 +57,14 @@ namespace Microsoft.Build.UnitTests.BackEnd
                     peer,
                     peer.Targets["Build"]);
             Assert.Same(
+                originalPlan.SourceProgram,
+                peerPlan.SourceProgram);
+            Assert.Same(
                 originalPlan.GetAction(0).Program,
                 peerPlan.GetAction(0).Program);
+            Assert.NotSame(
+                originalPlan.GetAction(0),
+                peerPlan.GetAction(0));
 
             original.TranslateEntireState = true;
             ((ITranslatable)original).Translate(TranslationHelpers.GetWriteTranslator());
@@ -66,7 +72,230 @@ namespace Microsoft.Build.UnitTests.BackEnd
             CompiledTargetPlan translatedPlan = CompiledTargetPlan.PartiallyEvaluate(translated, translated.Targets["Build"]);
 
             Assert.NotSame(originalPlan, translatedPlan);
+            Assert.NotSame(
+                originalPlan.SourceProgram,
+                translatedPlan.SourceProgram);
             Assert.NotSame(originalPlan.GetAction(0).Template, translatedPlan.GetAction(0).Template);
+        }
+
+        [Fact]
+        public void TargetPlanLowersAndExecutesOrderedMixedActions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <LocalValue>property</LocalValue>
+                </PropertyGroup>
+                <ItemGroup>
+                  <Generated Include="$(LocalValue)" />
+                </ItemGroup>
+                <CompiledActionGraphTestTask
+                    Text="$(LocalValue)"
+                    Values="@(Generated)" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Equal(3, plan.ActionCount);
+            Assert.Equal(
+                CompiledTargetActionKind.PropertyGroup,
+                plan.GetActionRecord(0).Kind);
+            Assert.Equal(
+                CompiledTargetActionKind.ItemGroup,
+                plan.GetActionRecord(1).Kind);
+            Assert.Equal(
+                CompiledTargetActionKind.Task,
+                plan.GetActionRecord(2).Kind);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "property",
+                instance.GetPropertyValue("LocalValue"));
+            Assert.Equal(
+                "property",
+                Assert.Single(instance.GetItems("Generated"))
+                    .EvaluatedInclude);
+            logger.AssertLogContains(
+                "compiled-action:property:0:property");
+            Assert.NotNull(plan.GetAction(2).GetFastAction());
+        }
+
+        [Fact]
+        public void DirectIntrinsicActionsPreserveFalseConditions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup Condition="'$(RunIntrinsic)' == 'true'">
+                  <LocalValue>property</LocalValue>
+                </PropertyGroup>
+                <ItemGroup Condition="'$(RunIntrinsic)' == 'true'">
+                  <Generated Include="item" />
+                </ItemGroup>
+                <CompiledActionGraphTestTask
+                    Text="$(Text)"
+                    Values="@(Generated)" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                string.Empty,
+                instance.GetPropertyValue("LocalValue"));
+            Assert.Empty(instance.GetItems("Generated"));
+            logger.AssertLogContains("compiled-action:first:0:");
+        }
+
+        [Fact]
+        public void DirectIntrinsicActionsRunDuringOutputInference()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            string upToDateFile =
+                environment.CreateFile("up-to-date.marker", string.Empty)
+                    .Path;
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <Target
+                      Name="Build"
+                      Inputs="{upToDateFile}"
+                      Outputs="{upToDateFile}">
+                    <PropertyGroup>
+                      <InferredValue>inferred</InferredValue>
+                    </PropertyGroup>
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "inferred",
+                instance.GetPropertyValue("InferredValue"));
+        }
+
+        [Fact]
+        public void CompiledTargetConditionPreservesSkipBehavior()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <UsingTask
+                      TaskName="{typeof(CompiledActionGraphTestTask).FullName}"
+                      AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
+                  <PropertyGroup>
+                    <RunTarget>false</RunTarget>
+                  </PropertyGroup>
+                  <Target
+                      Name="Build"
+                      Condition="'$(RunTarget)' == 'true'">
+                    <CompiledActionGraphTestTask Text="should-not-run" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.True(plan.HasCompiledCondition);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogDoesntContain("should-not-run");
+        }
+
+        [Fact]
+        public void ItemListTargetConditionFallsBackToLegacyEvaluation()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <UsingTask
+                      TaskName="{typeof(CompiledActionGraphTestTask).FullName}"
+                      AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
+                  <ItemGroup>
+                    <Gate Include="run" />
+                  </ItemGroup>
+                  <Target
+                      Name="Build"
+                      Condition="'@(Gate)' != ''">
+                    <CompiledActionGraphTestTask Text="legacy-condition" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.False(plan.HasCompiledCondition);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains(
+                "compiled-action:legacy-condition:0:");
+        }
+
+        [Fact]
+        public void DirectIntrinsicFailureStopsFollowingActions()
+        {
+            using TestEnvironment environment =
+                TestEnvironment.Create(ignoreBuildErrorFiles: true);
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <LocalValue Condition="'left' ==">invalid</LocalValue>
+                </PropertyGroup>
+                <CompiledActionGraphTestTask Text="should-not-run" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+            logger.AssertLogContains("error MSB");
+            logger.AssertLogDoesntContain("should-not-run");
         }
 
         [Fact]
@@ -813,6 +1042,43 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
+        public void CompiledConditionMarksEmptyOperandPropertyReads()
+        {
+            CompiledConditionProgram program =
+                CompiledConditionProgram.TryCreate(
+                    "'$(OptionalProperty)' == ''",
+                    ElementLocation.EmptyLocation);
+            var environment =
+                new RecordingCompiledExpressionEnvironment();
+
+            Assert.True(
+                program.Evaluate(
+                    environment,
+                    ElementLocation.EmptyLocation));
+            Assert.True(environment.EnteredWithEmptyOperand);
+            Assert.Equal(1, environment.LeaveCount);
+        }
+
+        [Fact]
+        public void CompiledConditionPreservesStaticNonemptyShortCircuit()
+        {
+            CompiledConditionProgram program =
+                CompiledConditionProgram.TryCreate(
+                    "'prefix$(UnusedProperty)' == ''",
+                    ElementLocation.EmptyLocation);
+            var environment =
+                new RecordingCompiledExpressionEnvironment();
+
+            Assert.False(
+                program.Evaluate(
+                    environment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(0, environment.PropertyReadCount);
+            Assert.True(environment.EnteredWithEmptyOperand);
+            Assert.Equal(1, environment.LeaveCount);
+        }
+
+        [Fact]
         public void CompiledActionPreservesCaseInsensitiveParameterBinding()
         {
             using TestEnvironment environment = TestEnvironment.Create();
@@ -1083,6 +1349,34 @@ namespace Microsoft.Build.UnitTests.BackEnd
             }
         }
 #endif
+
+        private sealed class RecordingCompiledExpressionEnvironment :
+            ICompiledExpressionEnvironment
+        {
+            internal bool EnteredWithEmptyOperand { get; private set; }
+
+            internal int LeaveCount { get; private set; }
+
+            internal int PropertyReadCount { get; private set; }
+
+            public string GetEscapedPropertyValue(
+                string propertyName,
+                IElementLocation location)
+            {
+                PropertyReadCount++;
+                return string.Empty;
+            }
+
+            public void EnterConditionEvaluation(bool oneSideIsEmpty)
+            {
+                EnteredWithEmptyOperand = oneSideIsEmpty;
+            }
+
+            public void LeaveConditionEvaluation()
+            {
+                LeaveCount++;
+            }
+        }
 
         private static string CreateProject(
             string targetContents,

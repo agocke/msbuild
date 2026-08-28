@@ -11,6 +11,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 #endif
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Build.BackEnd.Components.RequestBuilder;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.Collections;
@@ -51,10 +52,10 @@ namespace Microsoft.Build.BackEnd
         internal bool IsValid =>
             _action != null && _taskFactoryWrapper != null;
 
-        internal bool CanExecute(FastTaskExecutionFrame frame) =>
+        internal bool CanExecute(CompiledTargetExecutionFrame frame) =>
             _action.CanExecute(frame);
 
-        internal WorkUnitResult Execute(FastTaskExecutionFrame frame) =>
+        internal WorkUnitResult Execute(CompiledTargetExecutionFrame frame) =>
             _action.Execute(frame, _taskFactoryWrapper);
     }
 
@@ -266,7 +267,7 @@ namespace Microsoft.Build.BackEnd
                 requiresTaskEnvironment);
         }
 
-        internal bool CanExecute(FastTaskExecutionFrame frame)
+        internal bool CanExecute(CompiledTargetExecutionFrame frame)
         {
             return frame.RequestEntry.Request.HostServices == null &&
                 !frame.Host.BuildParameters.LogTaskInputs &&
@@ -276,7 +277,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         internal WorkUnitResult Execute(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             TaskFactoryWrapper taskFactoryWrapper)
         {
             using var actionMeasurement =
@@ -400,7 +401,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private WorkUnitResult ExecuteCore(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             TaskLoggingContext taskLoggingContext,
             TaskFactoryWrapper taskFactoryWrapper,
             out ContinueOnError continueOnError)
@@ -654,7 +655,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private ITask CreateTask(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             TaskLoggingContext taskLoggingContext,
             TaskFactoryWrapper taskFactoryWrapper,
             TaskEnvironment taskEnvironment)
@@ -720,7 +721,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private void SetInputs(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             FastTaskEnvironmentMode executionEnvironmentMode,
@@ -764,7 +765,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private ContinueOnError EvaluateContinueOnError(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             out string expandedValue)
         {
             if (_continueOnError == null)
@@ -818,7 +819,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private bool GatherOutputs(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext)
         {
@@ -837,7 +838,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private bool ExecuteBody(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             ContinueOnError continueOnError,
@@ -1124,7 +1125,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         internal bool Apply(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             FastTaskEnvironmentMode environmentMode,
@@ -1190,7 +1191,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private bool ApplyScalar(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             FastTaskEnvironmentMode environmentMode,
@@ -1265,7 +1266,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private bool ApplyVector(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             FastTaskEnvironmentMode environmentMode,
@@ -1366,7 +1367,7 @@ namespace Microsoft.Build.BackEnd
             ITask task,
             object value,
             TaskLoggingContext taskLoggingContext,
-            FastTaskExecutionFrame frame)
+            CompiledTargetExecutionFrame frame)
         {
             try
             {
@@ -1392,7 +1393,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private string GetDisplayValue(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             FastTaskEnvironmentMode environmentMode,
             TaskEnvironment taskEnvironment) =>
             _source.Kind == CompiledTaskValueKind.Scalar
@@ -1406,7 +1407,7 @@ namespace Microsoft.Build.BackEnd
                 : _source.Value;
 
         private static string GetScalarBaseDirectory(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             FastTaskEnvironmentMode environmentMode,
             TaskEnvironment taskEnvironment) =>
             environmentMode == FastTaskEnvironmentMode.AmbientProcess
@@ -1584,7 +1585,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         internal bool Apply(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext)
         {
@@ -1737,37 +1738,44 @@ namespace Microsoft.Build.BackEnd
     }
 
     /// <summary>
-    /// Reused dynamic state for all fast actions in one target bucket.
+    /// Reused dynamic state for all compiled actions in one target bucket.
     /// </summary>
-    internal sealed class FastTaskExecutionFrame :
+    internal sealed class CompiledTargetExecutionFrame :
         IDisposable,
         ICompiledExpressionEnvironment
     {
-        private readonly FastTaskCancellationState _cancellationState;
+        private FastTaskCancellationState _cancellationState;
+        private Expander<
+            ProjectPropertyInstance,
+            ProjectItemInstance> _fastTaskExpander;
+        private Expander<
+            ProjectPropertyInstance,
+            ProjectItemInstance> _executionConditionExpander;
+        private Expander<
+            ProjectPropertyInstance,
+            ProjectItemInstance> _inferenceConditionExpander;
 
-        internal FastTaskExecutionFrame(
+        internal CompiledTargetExecutionFrame(
             IBuildComponentHost host,
             BuildRequestEntry requestEntry,
             ITargetBuilderCallback targetBuilderCallback,
             TargetLoggingContext targetLoggingContext,
-            ProjectTaskInstance taskInstance,
-            Lookup lookup,
+            ITaskBuilder taskBuilder,
+            TaskExecutionMode mode,
+            Lookup lookupForInference,
+            Lookup lookupForExecution,
             CancellationToken cancellationToken)
         {
             Host = host;
             RequestEntry = requestEntry;
             TargetBuilderCallback = targetBuilderCallback;
             TargetLoggingContext = targetLoggingContext;
-            TaskInstance = taskInstance;
-            Lookup = lookup;
+            TaskBuilder = taskBuilder;
+            Mode = mode;
+            LookupForInference = lookupForInference;
+            LookupForExecution = lookupForExecution;
+            Lookup = lookupForExecution;
             CancellationToken = cancellationToken;
-            Expander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
-                lookup,
-                lookup,
-                new StringMetadataTable(metadata: null),
-                FileSystems.Default,
-                targetLoggingContext);
-            _cancellationState = new FastTaskCancellationState(cancellationToken);
         }
 
         internal IBuildComponentHost Host { get; }
@@ -1778,25 +1786,229 @@ namespace Microsoft.Build.BackEnd
 
         internal TargetLoggingContext TargetLoggingContext { get; }
 
+        internal ITaskBuilder TaskBuilder { get; }
+
+        internal TaskExecutionMode Mode { get; }
+
         internal ProjectTaskInstance TaskInstance { get; private set; }
 
         internal Lookup Lookup { get; }
 
+        internal Lookup LookupForInference { get; }
+
+        internal Lookup LookupForExecution { get; }
+
         internal CancellationToken CancellationToken { get; }
 
-        internal bool IsCancellationRequested => _cancellationState.IsCancellationRequested;
+        internal bool IsCancellationRequested =>
+            CancellationToken.IsCancellationRequested;
 
-        internal Expander<ProjectPropertyInstance, ProjectItemInstance> Expander { get; }
+        internal Expander<ProjectPropertyInstance, ProjectItemInstance>
+            Expander =>
+            _fastTaskExpander ??= CreateExpander(LookupForExecution);
 
         string ICompiledExpressionEnvironment.GetEscapedPropertyValue(
             string propertyName,
-            IElementLocation location)
+            IElementLocation location) =>
+            Expander.GetEscapedPropertyValue(propertyName, location);
+
+        void ICompiledExpressionEnvironment.EnterConditionEvaluation(
+            bool oneSideIsEmpty)
         {
-            ProjectPropertyInstance property = Lookup.GetProperty(propertyName);
-            return property == null
-                ? string.Empty
-                : ((IProperty)property).GetEvaluatedValueEscaped(location);
+            Expander.PropertiesUseTracker.PropertyReadContext =
+                oneSideIsEmpty
+                    ? PropertyReadContext
+                        .ConditionEvaluationWithOneSideEmpty
+                    : PropertyReadContext.ConditionEvaluation;
         }
+
+        void ICompiledExpressionEnvironment.LeaveConditionEvaluation() =>
+            Expander.PropertiesUseTracker.ResetPropertyReadContext();
+
+        internal ValueTask<WorkUnitResult> ExecuteAsync(
+            CompiledTargetActionRecord record)
+        {
+            if (record.Kind == CompiledTargetActionKind.PropertyGroup ||
+                record.Kind == CompiledTargetActionKind.ItemGroup)
+            {
+                return new ValueTask<WorkUnitResult>(
+                    ExecuteIntrinsicAction(record));
+            }
+
+            CompiledTaskAction action = record.TaskAction;
+            ProjectTaskInstance taskInstance =
+                record.Child as ProjectTaskInstance;
+            string fastTaskName = taskInstance?.Name;
+            long fastTaskSiteStart =
+                action == null
+                    ? 0
+                    : BuildExecutionInstrumentation.StartTimestamp();
+            FastTaskInvocation fastInvocation;
+            using (action != null
+                       ? BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                           BuildExecutionMetric.FastTaskLookup,
+                           fastTaskName,
+                           TargetLoggingContext.Target.Name)
+                       : default)
+            {
+                fastInvocation = action == null
+                    ? default
+                    : action.GetFastInvocation();
+            }
+
+            if (fastInvocation.IsValid &&
+                Mode == TaskExecutionMode.ExecuteTaskAndGatherOutputs &&
+                taskInstance != null)
+            {
+                SetTaskInstance(taskInstance);
+                if (fastInvocation.CanExecute(this))
+                {
+                    try
+                    {
+                        return new ValueTask<WorkUnitResult>(
+                            fastInvocation.Execute(this));
+                    }
+                    finally
+                    {
+                        BuildExecutionInstrumentation.RecordSince(
+                            BuildExecutionMetric.FastTaskSite,
+                            fastTaskSiteStart,
+                            taskInstance.Name,
+                            TargetLoggingContext.Target.Name);
+                    }
+                }
+            }
+
+            return new ValueTask<WorkUnitResult>(
+                TaskBuilder.ExecuteTask(
+                    TargetLoggingContext,
+                    RequestEntry,
+                    TargetBuilderCallback,
+                    record.Child,
+                    action,
+                    Mode,
+                    LookupForInference,
+                    LookupForExecution,
+                    CancellationToken));
+        }
+
+        private WorkUnitResult ExecuteIntrinsicAction(
+            CompiledTargetActionRecord record)
+        {
+            WorkUnitResult result = new(
+                WorkUnitResultCode.Failed,
+                WorkUnitActionCode.Stop,
+                null);
+
+            if ((Mode & TaskExecutionMode.InferOutputsOnly) ==
+                TaskExecutionMode.InferOutputsOnly)
+            {
+                result = ExecuteIntrinsic(
+                    record,
+                    LookupForInference);
+            }
+
+            if ((Mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) ==
+                TaskExecutionMode.ExecuteTaskAndGatherOutputs)
+            {
+                result = ExecuteIntrinsic(
+                    record,
+                    LookupForExecution);
+            }
+
+            return result;
+        }
+
+        private WorkUnitResult ExecuteIntrinsic(
+            CompiledTargetActionRecord record,
+            Lookup lookup)
+        {
+            bool condition =
+                string.IsNullOrEmpty(record.Child.Condition) ||
+                ConditionEvaluator.EvaluateCondition(
+                    record.Child.Condition,
+                    ParserOptions.AllowPropertiesAndItemLists,
+                    GetConditionExpander(lookup),
+                    ExpanderOptions.ExpandAll,
+                    RequestEntry.ProjectRootDirectory,
+                    record.Child.ConditionLocation,
+                    FileSystems.Default,
+                    loggingContext: TargetLoggingContext);
+
+            if (!condition)
+            {
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Skipped,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+
+            using var intrinsicTaskMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.IntrinsicTask,
+                    BuildExecutionInstrumentation.DetailsEnabled
+                        ? record.Child.GetType().Name
+                        : null,
+                    TargetLoggingContext.Target.Name);
+            try
+            {
+                bool logTaskInputs =
+                    Host.BuildParameters.LogTaskInputs ||
+                    Traits.Instance.EscapeHatches.LogTaskInputs;
+                IntrinsicTask task = record.Kind switch
+                {
+                    CompiledTargetActionKind.PropertyGroup =>
+                        new PropertyGroupIntrinsicTask(
+                            (ProjectPropertyGroupTaskInstance)record.Child,
+                            TargetLoggingContext,
+                            RequestEntry.RequestConfiguration.Project,
+                            logTaskInputs),
+                    CompiledTargetActionKind.ItemGroup =>
+                        new ItemGroupIntrinsicTask(
+                            (ProjectItemGroupTaskInstance)record.Child,
+                            TargetLoggingContext,
+                            RequestEntry.RequestConfiguration.Project,
+                            logTaskInputs),
+                    _ => throw new InternalErrorException(
+                        "Unexpected intrinsic action kind."),
+                };
+                task.ExecuteTask(lookup);
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Success,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+            catch (InvalidProjectFileException exception)
+            {
+                TargetLoggingContext.LogInvalidProjectFileError(exception);
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Failed,
+                    WorkUnitActionCode.Stop,
+                    exception);
+            }
+        }
+
+        private Expander<ProjectPropertyInstance, ProjectItemInstance>
+            GetConditionExpander(Lookup lookup)
+        {
+            if (ReferenceEquals(lookup, LookupForExecution))
+            {
+                return _executionConditionExpander ??=
+                    CreateExpander(lookup);
+            }
+
+            return _inferenceConditionExpander ??=
+                CreateExpander(lookup);
+        }
+
+        private Expander<ProjectPropertyInstance, ProjectItemInstance>
+            CreateExpander(Lookup lookup) =>
+            new(
+                lookup,
+                lookup,
+                new StringMetadataTable(metadata: null),
+                FileSystems.Default,
+                TargetLoggingContext);
 
         internal void SetTaskInstance(ProjectTaskInstance taskInstance) => TaskInstance = taskInstance;
 
@@ -1804,11 +2016,14 @@ namespace Microsoft.Build.BackEnd
             ITask task,
             TaskLoggingContext taskLoggingContext,
             CompiledTaskSourceProgram template) =>
-            _cancellationState.SetCurrentTask(task, taskLoggingContext, template);
+            (_cancellationState ??=
+                new FastTaskCancellationState(CancellationToken))
+                .SetCurrentTask(task, taskLoggingContext, template);
 
-        internal void ClearCurrentTask(ITask task) => _cancellationState.ClearCurrentTask(task);
+        internal void ClearCurrentTask(ITask task) =>
+            _cancellationState?.ClearCurrentTask(task);
 
-        public void Dispose() => _cancellationState.Dispose();
+        public void Dispose() => _cancellationState?.Dispose();
     }
 
     /// <summary>

@@ -387,6 +387,10 @@ namespace Microsoft.Build.Evaluation
     internal interface ICompiledExpressionEnvironment
     {
         string GetEscapedPropertyValue(string propertyName, IElementLocation location);
+
+        void EnterConditionEvaluation(bool oneSideIsEmpty);
+
+        void LeaveConditionEvaluation();
     }
 
     internal sealed class CompiledConditionProgram
@@ -454,13 +458,97 @@ namespace Microsoft.Build.Evaluation
         {
             CompiledConditionComparison comparison =
                 _program.Comparisons[comparisonId];
-            bool equal = CompiledConditionUtilities.CompareValues(
-                EvaluateOperand(environment, location, comparison.Left),
-                EvaluateOperand(environment, location, comparison.Right),
-                out _);
-            return comparison.Kind == CompiledConditionKind.Equal
-                ? equal
-                : !equal;
+            environment.EnterConditionEvaluation(
+                IsUnexpandedValueEmpty(comparison.Left) ||
+                IsUnexpandedValueEmpty(comparison.Right));
+            try
+            {
+                bool leftIsStatic =
+                    TryGetStaticEmptiness(
+                        comparison.Left,
+                        out bool leftIsEmpty);
+                bool rightIsStatic =
+                    TryGetStaticEmptiness(
+                        comparison.Right,
+                        out bool rightIsEmpty);
+                if ((leftIsStatic && leftIsEmpty) ||
+                    (rightIsStatic && rightIsEmpty))
+                {
+                    if (!leftIsStatic)
+                    {
+                        leftIsEmpty =
+                            EvaluateOperand(
+                                environment,
+                                location,
+                                comparison.Left).Length == 0;
+                    }
+
+                    if (!rightIsStatic)
+                    {
+                        rightIsEmpty =
+                            EvaluateOperand(
+                                environment,
+                                location,
+                                comparison.Right).Length == 0;
+                    }
+
+                    bool shortCircuitEqual =
+                        leftIsEmpty == rightIsEmpty;
+                    return comparison.Kind == CompiledConditionKind.Equal
+                        ? shortCircuitEqual
+                        : !shortCircuitEqual;
+                }
+
+                bool equal = CompiledConditionUtilities.CompareValues(
+                    EvaluateOperand(environment, location, comparison.Left),
+                    EvaluateOperand(environment, location, comparison.Right),
+                    out _);
+                return comparison.Kind == CompiledConditionKind.Equal
+                    ? equal
+                    : !equal;
+            }
+            finally
+            {
+                environment.LeaveConditionEvaluation();
+            }
+        }
+
+        private bool IsUnexpandedValueEmpty(
+            CompiledConditionOperand operand) =>
+            operand.Kind == CompiledConditionOperandKind.Literal &&
+            _program.Strings[operand.Value].Length == 0;
+
+        private bool TryGetStaticEmptiness(
+            CompiledConditionOperand operand,
+            out bool isEmpty)
+        {
+            if (operand.Kind == CompiledConditionOperandKind.Literal)
+            {
+                isEmpty = _program.Strings[operand.Value].Length == 0;
+                return true;
+            }
+
+            if (operand.Kind ==
+                CompiledConditionOperandKind.ExpandedValue)
+            {
+                for (int partIndex = operand.Value;
+                     partIndex < operand.Value + operand.Count;
+                     partIndex++)
+                {
+                    CompiledConditionValuePart part =
+                        _program.ValueParts[partIndex];
+                    if (part.Kind ==
+                            CompiledConditionValuePartKind.Literal &&
+                        _program.Strings[part.Value].Length != 0)
+                    {
+                        isEmpty = false;
+                        return true;
+                    }
+                }
+            }
+
+            isEmpty = false;
+            return false;
         }
 
         private string EvaluateOperand(

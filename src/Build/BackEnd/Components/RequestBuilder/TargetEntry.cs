@@ -94,7 +94,7 @@ namespace Microsoft.Build.BackEnd
         private ProjectTargetInstance _target;
 
         /// <summary>
-        /// The optional compiled task-site plan for <see cref="_target"/>.
+        /// The optional compiled action plan for <see cref="_target"/>.
         /// </summary>
         private CompiledTargetPlan _compiledTargetPlan;
 
@@ -354,15 +354,21 @@ namespace Microsoft.Build.BackEnd
 
             // If condition is false (based on propertyBag), set this target's state to
             // "Skipped" since we won't actually build it.
-            bool condition = ConditionEvaluator.EvaluateCondition(
-                _target.Condition,
-                ParserOptions.AllowPropertiesAndItemLists,
-                _expander,
-                ExpanderOptions.ExpandPropertiesAndItems,
-                _requestEntry.ProjectRootDirectory,
-                _target.ConditionLocation,
-                FileSystems.Default,
-                loggingContext: projectLoggingContext);
+            bool condition;
+            if (_compiledTargetPlan?.TryEvaluateCondition(
+                    _expander,
+                    out condition) != true)
+            {
+                condition = ConditionEvaluator.EvaluateCondition(
+                    _target.Condition,
+                    ParserOptions.AllowPropertiesAndItemLists,
+                    _expander,
+                    ExpanderOptions.ExpandPropertiesAndItems,
+                    _requestEntry.ProjectRootDirectory,
+                    _target.ConditionLocation,
+                    FileSystems.Default,
+                    loggingContext: projectLoggingContext);
+            }
 
             if (!condition)
             {
@@ -817,116 +823,58 @@ namespace Microsoft.Build.BackEnd
         /// </returns>
         private async ValueTask<WorkUnitResult> ProcessBucket(ITaskBuilder taskBuilder, TargetLoggingContext targetLoggingContext, TaskExecutionMode mode, Lookup lookupForInference, Lookup lookupForExecution)
         {
+            if (_compiledTargetPlan != null)
+            {
+                using var frame = new CompiledTargetExecutionFrame(
+                    _host,
+                    _requestEntry,
+                    _targetBuilderCallback,
+                    targetLoggingContext,
+                    taskBuilder,
+                    mode,
+                    lookupForInference,
+                    lookupForExecution,
+                    _cancellationToken);
+                return await _compiledTargetPlan.ExecuteAsync(frame);
+            }
+
             WorkUnitResultCode aggregatedTaskResult = WorkUnitResultCode.Success;
             WorkUnitActionCode finalActionCode = WorkUnitActionCode.Continue;
             WorkUnitResult lastResult = new WorkUnitResult(WorkUnitResultCode.Success, WorkUnitActionCode.Continue, null);
-            FastTaskExecutionFrame fastTaskFrame = null;
 
-            int currentTask = 0;
-
-            try
+            for (int currentTask = 0;
+                 currentTask < _target.Children.Count &&
+                 !_cancellationToken.IsCancellationRequested;
+                 currentTask++)
             {
-                // Walk through all of the tasks and execute them in order.
-                for (; (currentTask < _target.Children.Count) && !_cancellationToken.IsCancellationRequested; ++currentTask)
+                lastResult = await taskBuilder.ExecuteTask(
+                    targetLoggingContext,
+                    _requestEntry,
+                    _targetBuilderCallback,
+                    _target.Children[currentTask],
+                    action: null,
+                    mode,
+                    lookupForInference,
+                    lookupForExecution,
+                    _cancellationToken);
+
+                if (lastResult.ResultCode == WorkUnitResultCode.Failed)
                 {
-                    ProjectTargetInstanceChild targetChildInstance = _target.Children[currentTask];
-                    CompiledTaskAction action = _compiledTargetPlan?.GetAction(currentTask);
-                    string fastTaskName =
-                        (targetChildInstance as ProjectTaskInstance)?.Name;
-                    long fastTaskSiteStart =
-                        action == null
-                            ? 0
-                            : BuildExecutionInstrumentation.StartTimestamp();
-                    FastTaskInvocation fastInvocation;
-                    using (action != null
-                               ? BuildExecutionInstrumentation.MeasureFastTaskDetail(
-                                   BuildExecutionMetric.FastTaskLookup,
-                                   fastTaskName,
-                                   targetLoggingContext.Target.Name)
-                               : default)
-                    {
-                        fastInvocation = action == null
-                            ? default
-                            : action.GetFastInvocation();
-                    }
-
-                    if (fastInvocation.IsValid &&
-                        mode == TaskExecutionMode.ExecuteTaskAndGatherOutputs &&
-                        targetChildInstance is ProjectTaskInstance taskInstance)
-                    {
-                        if (fastTaskFrame == null)
-                        {
-                            using var frameMeasurement =
-                                BuildExecutionInstrumentation.MeasureFastTaskDetail(
-                                    BuildExecutionMetric.FastTaskFrame,
-                                    taskInstance.Name,
-                                    targetLoggingContext.Target.Name);
-                            fastTaskFrame = new FastTaskExecutionFrame(
-                                _host,
-                                _requestEntry,
-                                _targetBuilderCallback,
-                                targetLoggingContext,
-                                taskInstance,
-                                lookupForExecution,
-                                _cancellationToken);
-                        }
-
-                        fastTaskFrame.SetTaskInstance(taskInstance);
-
-                        if (fastInvocation.CanExecute(fastTaskFrame))
-                        {
-                            try
-                            {
-                                lastResult =
-                                    fastInvocation.Execute(fastTaskFrame);
-                            }
-                            finally
-                            {
-                                BuildExecutionInstrumentation.RecordSince(
-                                    BuildExecutionMetric.FastTaskSite,
-                                    fastTaskSiteStart,
-                                    taskInstance.Name,
-                                    targetLoggingContext.Target.Name);
-                            }
-                        }
-                        else
-                        {
-                            lastResult = await taskBuilder.ExecuteTask(
-                                targetLoggingContext,
-                                _requestEntry,
-                                _targetBuilderCallback,
-                                targetChildInstance,
-                                action,
-                                mode,
-                                lookupForInference,
-                                lookupForExecution,
-                                _cancellationToken);
-                        }
-                    }
-                    else
-                    {
-                        lastResult = await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, action, mode, lookupForInference, lookupForExecution, _cancellationToken);
-                    }
-
-                    if (lastResult.ResultCode == WorkUnitResultCode.Failed)
-                    {
-                        aggregatedTaskResult = WorkUnitResultCode.Failed;
-                    }
-                    else if (lastResult.ResultCode == WorkUnitResultCode.Success && aggregatedTaskResult != WorkUnitResultCode.Failed)
-                    {
-                        aggregatedTaskResult = WorkUnitResultCode.Success;
-                    }
-
-                    if (lastResult.ActionCode == WorkUnitActionCode.Stop)
-                    {
-                        finalActionCode = WorkUnitActionCode.Stop;
-                        break;
-                    }
+                    aggregatedTaskResult = WorkUnitResultCode.Failed;
                 }
-            }
-            finally
-            {
-                fastTaskFrame?.Dispose();
+                else if (lastResult.ResultCode ==
+                             WorkUnitResultCode.Success &&
+                         aggregatedTaskResult !=
+                             WorkUnitResultCode.Failed)
+                {
+                    aggregatedTaskResult = WorkUnitResultCode.Success;
+                }
+
+                if (lastResult.ActionCode == WorkUnitActionCode.Stop)
+                {
+                    finalActionCode = WorkUnitActionCode.Stop;
+                    break;
+                }
             }
 
             if (_cancellationToken.IsCancellationRequested)
