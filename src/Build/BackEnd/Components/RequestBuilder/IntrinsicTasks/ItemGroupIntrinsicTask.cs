@@ -49,101 +49,143 @@ namespace Microsoft.Build.BackEnd
         /// Execute an ItemGroup element, including each child item expression
         /// </summary>
         /// <param name="lookup">The lookup used for evaluation and as a destination for these items.</param>
-        internal override void ExecuteTask(Lookup lookup)
+        internal override void ExecuteTask(Lookup lookup) =>
+            Execute(
+                _taskInstance,
+                LoggingContext,
+                Project,
+                LogTaskInputs,
+                lookup);
+
+        internal static void Execute(
+            ProjectItemGroupTaskInstance taskInstance,
+            TargetLoggingContext loggingContext,
+            ProjectInstance project,
+            bool logTaskInputs,
+            Lookup lookup) =>
+            new Executor(
+                taskInstance,
+                loggingContext,
+                project,
+                logTaskInputs).ExecuteTask(lookup);
+
+        private readonly struct Executor
         {
-            List<string> parameterValues = null;
-            foreach (ProjectItemGroupTaskItemInstance child in _taskInstance.Items)
+            private readonly ProjectItemGroupTaskInstance _taskInstance;
+
+            internal Executor(
+                ProjectItemGroupTaskInstance taskInstance,
+                TargetLoggingContext loggingContext,
+                ProjectInstance project,
+                bool logTaskInputs)
             {
-                List<ItemBucket> buckets = null;
+                _taskInstance = taskInstance;
+                LoggingContext = loggingContext;
+                Project = project;
+                LogTaskInputs = logTaskInputs;
+            }
 
-                try
+            private TargetLoggingContext LoggingContext { get; }
+
+            private ProjectInstance Project { get; }
+
+            private bool LogTaskInputs { get; }
+
+            internal void ExecuteTask(Lookup lookup)
+            {
+                List<string> parameterValues = null;
+                foreach (ProjectItemGroupTaskItemInstance child in _taskInstance.Items)
                 {
-                    parameterValues ??= new List<string>();
-                    GetBatchableValuesFromBuildItemGroupChild(parameterValues, child);
-                    buckets = BatchingEngine.PrepareBatchingBuckets(parameterValues, lookup, child.ItemType, _taskInstance.Location, LoggingContext);
+                    List<ItemBucket> buckets = null;
 
-                    // "Execute" each bucket
-                    foreach (ItemBucket bucket in buckets)
+                    try
                     {
-                        bool condition = ConditionEvaluator.EvaluateCondition(
-                            child.Condition,
-                            ParserOptions.AllowAll,
-                            bucket.Expander,
-                            ExpanderOptions.ExpandAll,
-                            Project.Directory,
-                            child.ConditionLocation,
-                            FileSystems.Default,
-                            LoggingContext);
+                        parameterValues ??= new List<string>();
+                        GetBatchableValuesFromBuildItemGroupChild(parameterValues, child);
+                        buckets = BatchingEngine.PrepareBatchingBuckets(parameterValues, lookup, child.ItemType, _taskInstance.Location, LoggingContext);
 
-                        if (condition)
-                        {
-                            HashSet<string> keepMetadata = null;
-                            HashSet<string> removeMetadata = null;
-                            HashSet<string> matchOnMetadata = null;
-                            MatchOnMetadataOptions matchOnMetadataOptions = MatchOnMetadataConstants.MatchOnMetadataOptionsDefaultValue;
-
-                            if (!String.IsNullOrEmpty(child.KeepMetadata))
-                            {
-                                var keepMetadataEvaluated = bucket.Expander.ExpandIntoStringListLeaveEscaped(child.KeepMetadata, ExpanderOptions.ExpandAll, child.KeepMetadataLocation).ToList();
-                                if (keepMetadataEvaluated.Count > 0)
-                                {
-                                    keepMetadata = new HashSet<string>(keepMetadataEvaluated);
-                                }
-                            }
-
-                            if (!String.IsNullOrEmpty(child.RemoveMetadata))
-                            {
-                                var removeMetadataEvaluated = bucket.Expander.ExpandIntoStringListLeaveEscaped(child.RemoveMetadata, ExpanderOptions.ExpandAll, child.RemoveMetadataLocation).ToList();
-                                if (removeMetadataEvaluated.Count > 0)
-                                {
-                                    removeMetadata = new HashSet<string>(removeMetadataEvaluated);
-                                }
-                            }
-
-                            if (!String.IsNullOrEmpty(child.MatchOnMetadata))
-                            {
-                                var matchOnMetadataEvaluated = bucket.Expander.ExpandIntoStringListLeaveEscaped(child.MatchOnMetadata, ExpanderOptions.ExpandAll, child.MatchOnMetadataLocation).ToList();
-                                if (matchOnMetadataEvaluated.Count > 0)
-                                {
-                                    matchOnMetadata = new HashSet<string>(matchOnMetadataEvaluated);
-                                }
-
-                                Enum.TryParse(child.MatchOnMetadataOptions, out matchOnMetadataOptions);
-                            }
-
-                            if ((child.Include.Length != 0) ||
-                                (child.Exclude.Length != 0))
-                            {
-                                // It's an item -- we're "adding" items to the world
-                                ExecuteAdd(child, bucket, keepMetadata, removeMetadata, LoggingContext);
-                            }
-                            else if (child.Remove.Length != 0)
-                            {
-                                // It's a remove -- we're "removing" items from the world
-                                ExecuteRemove(child, bucket, matchOnMetadata, matchOnMetadataOptions);
-                            }
-                            else
-                            {
-                                // It's a modify -- changing existing items
-                                ExecuteModify(child, bucket, keepMetadata, removeMetadata, LoggingContext);
-                            }
-                        }
-                    }
-                }
-                finally
-                {
-                    if (buckets != null)
-                    {
-                        // Propagate the item changes to the bucket above
+                        // "Execute" each bucket
                         foreach (ItemBucket bucket in buckets)
                         {
-                            bucket.LeaveScope();
+                            bool condition = ConditionEvaluator.EvaluateCondition(
+                                child.Condition,
+                                ParserOptions.AllowAll,
+                                bucket.Expander,
+                                ExpanderOptions.ExpandAll,
+                                Project.Directory,
+                                child.ConditionLocation,
+                                FileSystems.Default,
+                                LoggingContext);
+
+                            if (condition)
+                            {
+                                HashSet<string> keepMetadata = null;
+                                HashSet<string> removeMetadata = null;
+                                HashSet<string> matchOnMetadata = null;
+                                MatchOnMetadataOptions matchOnMetadataOptions = MatchOnMetadataConstants.MatchOnMetadataOptionsDefaultValue;
+
+                                if (!String.IsNullOrEmpty(child.KeepMetadata))
+                                {
+                                    var keepMetadataEvaluated = bucket.Expander.ExpandIntoStringListLeaveEscaped(child.KeepMetadata, ExpanderOptions.ExpandAll, child.KeepMetadataLocation).ToList();
+                                    if (keepMetadataEvaluated.Count > 0)
+                                    {
+                                        keepMetadata = new HashSet<string>(keepMetadataEvaluated);
+                                    }
+                                }
+
+                                if (!String.IsNullOrEmpty(child.RemoveMetadata))
+                                {
+                                    var removeMetadataEvaluated = bucket.Expander.ExpandIntoStringListLeaveEscaped(child.RemoveMetadata, ExpanderOptions.ExpandAll, child.RemoveMetadataLocation).ToList();
+                                    if (removeMetadataEvaluated.Count > 0)
+                                    {
+                                        removeMetadata = new HashSet<string>(removeMetadataEvaluated);
+                                    }
+                                }
+
+                                if (!String.IsNullOrEmpty(child.MatchOnMetadata))
+                                {
+                                    var matchOnMetadataEvaluated = bucket.Expander.ExpandIntoStringListLeaveEscaped(child.MatchOnMetadata, ExpanderOptions.ExpandAll, child.MatchOnMetadataLocation).ToList();
+                                    if (matchOnMetadataEvaluated.Count > 0)
+                                    {
+                                        matchOnMetadata = new HashSet<string>(matchOnMetadataEvaluated);
+                                    }
+
+                                    Enum.TryParse(child.MatchOnMetadataOptions, out matchOnMetadataOptions);
+                                }
+
+                                if ((child.Include.Length != 0) ||
+                                    (child.Exclude.Length != 0))
+                                {
+                                    // It's an item -- we're "adding" items to the world
+                                    ExecuteAdd(child, bucket, keepMetadata, removeMetadata, LoggingContext);
+                                }
+                                else if (child.Remove.Length != 0)
+                                {
+                                    // It's a remove -- we're "removing" items from the world
+                                    ExecuteRemove(child, bucket, matchOnMetadata, matchOnMetadataOptions);
+                                }
+                                else
+                                {
+                                    // It's a modify -- changing existing items
+                                    ExecuteModify(child, bucket, keepMetadata, removeMetadata, LoggingContext);
+                                }
+                            }
                         }
                     }
-                    parameterValues.Clear();
+                    finally
+                    {
+                        if (buckets != null)
+                        {
+                            // Propagate the item changes to the bucket above
+                            foreach (ItemBucket bucket in buckets)
+                            {
+                                bucket.LeaveScope();
+                            }
+                        }
+                        parameterValues.Clear();
+                    }
                 }
             }
-        }
 
         /// <summary>
         /// Add items to the world. This is the in-target equivalent of an item include expression outside of a target.
@@ -225,7 +267,7 @@ namespace Microsoft.Build.BackEnd
                 logFunction = (itemList) =>
                 {
                     ItemGroupLoggingHelper.LogTaskParameter(
-                        LoggingContext,
+                        loggingContext,
                         TaskParameterMessageKind.AddItem,
                         parameterName: null,
                         propertyName: null,
@@ -362,15 +404,15 @@ namespace Microsoft.Build.BackEnd
                 parameterValues.Capacity = child.Metadata.Count + AdditionalCapacityBuffer;
             }
 
-            AddIfNotEmptyString(parameterValues, child.Include);
-            AddIfNotEmptyString(parameterValues, child.Exclude);
-            AddIfNotEmptyString(parameterValues, child.Remove);
-            AddIfNotEmptyString(parameterValues, child.Condition);
+            IntrinsicTask.AddIfNotEmptyString(parameterValues, child.Include);
+            IntrinsicTask.AddIfNotEmptyString(parameterValues, child.Exclude);
+            IntrinsicTask.AddIfNotEmptyString(parameterValues, child.Remove);
+            IntrinsicTask.AddIfNotEmptyString(parameterValues, child.Condition);
 
             foreach (ProjectItemGroupTaskMetadataInstance metadataElement in child.Metadata)
             {
-                AddIfNotEmptyString(parameterValues, metadataElement.Value);
-                AddIfNotEmptyString(parameterValues, metadataElement.Condition);
+                IntrinsicTask.AddIfNotEmptyString(parameterValues, metadataElement.Value);
+                IntrinsicTask.AddIfNotEmptyString(parameterValues, metadataElement.Condition);
             }
         }
 
@@ -667,6 +709,7 @@ namespace Microsoft.Build.BackEnd
                 child.Remove);
             MetadataTrie<ProjectPropertyInstance, ProjectItemInstance> metadataSet = new MetadataTrie<ProjectPropertyInstance, ProjectItemInstance>(matchingOptions, matchOnMetadata, itemSpec);
             return group.Where(item => metadataSet.Contains(matchOnMetadata.Select(m => item.GetMetadataValue(m)))).ToList();
+        }
         }
 
         /// <summary>

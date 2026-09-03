@@ -1877,11 +1877,12 @@ namespace Microsoft.Build.BackEnd
                     ExecuteCompiledItemGroupAction(record));
             }
 
-            if (record.Kind == CompiledTargetActionKind.PropertyGroup ||
-                record.Kind == CompiledTargetActionKind.ItemGroup)
+            if (record.Kind == CompiledTargetActionKind.Fallback &&
+                record.FallbackKind !=
+                    CompiledTargetFallbackKind.TaskBuilder)
             {
                 return new ValueTask<WorkUnitResult>(
-                    ExecuteIntrinsicAction(record));
+                    ExecuteIntrinsicFallbackAction(record));
             }
 
             CompiledTaskAction action = record.TaskAction;
@@ -2101,33 +2102,6 @@ namespace Microsoft.Build.BackEnd
             }
         }
 
-        private WorkUnitResult ExecuteIntrinsicAction(
-            CompiledTargetActionRecord record)
-        {
-            WorkUnitResult result = new(
-                WorkUnitResultCode.Failed,
-                WorkUnitActionCode.Stop,
-                null);
-
-            if ((Mode & TaskExecutionMode.InferOutputsOnly) ==
-                TaskExecutionMode.InferOutputsOnly)
-            {
-                result = ExecuteIntrinsic(
-                    record,
-                    LookupForInference);
-            }
-
-            if ((Mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) ==
-                TaskExecutionMode.ExecuteTaskAndGatherOutputs)
-            {
-                result = ExecuteIntrinsic(
-                    record,
-                    LookupForExecution);
-            }
-
-            return result;
-        }
-
         private WorkUnitResult ExecuteCompiledItemGroupAction(
             CompiledTargetActionRecord record)
         {
@@ -2148,6 +2122,33 @@ namespace Microsoft.Build.BackEnd
                 TaskExecutionMode.ExecuteTaskAndGatherOutputs)
             {
                 result = ExecuteCompiledItemGroup(
+                    record,
+                    LookupForExecution);
+            }
+
+            return result;
+        }
+
+        private WorkUnitResult ExecuteIntrinsicFallbackAction(
+            CompiledTargetActionRecord record)
+        {
+            WorkUnitResult result = new(
+                WorkUnitResultCode.Failed,
+                WorkUnitActionCode.Stop,
+                null);
+
+            if ((Mode & TaskExecutionMode.InferOutputsOnly) ==
+                TaskExecutionMode.InferOutputsOnly)
+            {
+                result = ExecuteIntrinsicFallback(
+                    record,
+                    LookupForInference);
+            }
+
+            if ((Mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) ==
+                TaskExecutionMode.ExecuteTaskAndGatherOutputs)
+            {
+                result = ExecuteIntrinsicFallback(
                     record,
                     LookupForExecution);
             }
@@ -3211,7 +3212,7 @@ namespace Microsoft.Build.BackEnd
             return excludedPaths;
         }
 
-        private WorkUnitResult ExecuteIntrinsic(
+        private WorkUnitResult ExecuteIntrinsicFallback(
             CompiledTargetActionRecord record,
             Lookup lookup)
         {
@@ -3243,13 +3244,15 @@ namespace Microsoft.Build.BackEnd
                         : null,
                     TargetLoggingContext.Target.Name);
             using var fallbackPropertyGroupMeasurement =
-                record.Kind == CompiledTargetActionKind.PropertyGroup
+                record.FallbackKind ==
+                    CompiledTargetFallbackKind.PropertyGroupIntrinsic
                     ? BuildExecutionInstrumentation.Measure(
                         BuildExecutionMetric.FallbackPropertyGroup,
                         parentName: TargetLoggingContext.Target.Name)
                     : default;
             using var fallbackItemGroupMeasurement =
-                record.Kind == CompiledTargetActionKind.ItemGroup
+                record.FallbackKind ==
+                    CompiledTargetFallbackKind.ItemGroupIntrinsic
                     ? BuildExecutionInstrumentation.Measure(
                         BuildExecutionMetric.FallbackItemGroup,
                         parentName: TargetLoggingContext.Target.Name)
@@ -3259,24 +3262,29 @@ namespace Microsoft.Build.BackEnd
                 bool logTaskInputs =
                     Host.BuildParameters.LogTaskInputs ||
                     Traits.Instance.EscapeHatches.LogTaskInputs;
-                IntrinsicTask task = record.Kind switch
+                switch (record.FallbackKind)
                 {
-                    CompiledTargetActionKind.PropertyGroup =>
-                        new PropertyGroupIntrinsicTask(
+                    case CompiledTargetFallbackKind.PropertyGroupIntrinsic:
+                        PropertyGroupIntrinsicTask.Execute(
                             (ProjectPropertyGroupTaskInstance)record.Child,
                             TargetLoggingContext,
                             RequestEntry.RequestConfiguration.Project,
-                            logTaskInputs),
-                    CompiledTargetActionKind.ItemGroup =>
-                        new ItemGroupIntrinsicTask(
+                            logTaskInputs,
+                            lookup);
+                        break;
+                    case CompiledTargetFallbackKind.ItemGroupIntrinsic:
+                        ItemGroupIntrinsicTask.Execute(
                             (ProjectItemGroupTaskInstance)record.Child,
                             TargetLoggingContext,
                             RequestEntry.RequestConfiguration.Project,
-                            logTaskInputs),
-                    _ => throw new InternalErrorException(
-                        "Unexpected intrinsic action kind."),
-                };
-                task.ExecuteTask(lookup);
+                            logTaskInputs,
+                            lookup);
+                        break;
+                    default:
+                        throw new InternalErrorException(
+                            "Unexpected intrinsic fallback kind.");
+                }
+
                 return new WorkUnitResult(
                     WorkUnitResultCode.Success,
                     WorkUnitActionCode.Continue,

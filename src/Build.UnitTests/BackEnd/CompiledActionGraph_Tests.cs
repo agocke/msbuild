@@ -664,6 +664,12 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.Null(
                 plan.GetActionRecord(0).ItemGroupAction);
+            Assert.Equal(
+                CompiledTargetActionKind.Fallback,
+                plan.GetActionRecord(0).Kind);
+            Assert.Equal(
+                CompiledTargetFallbackKind.ItemGroupIntrinsic,
+                plan.GetActionRecord(0).FallbackKind);
 
             Build(instance, out BuildResult result);
 
@@ -1524,6 +1530,12 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.Null(
                 plan.GetActionRecord(0).PropertyGroupAction);
+            Assert.Equal(
+                CompiledTargetActionKind.Fallback,
+                plan.GetActionRecord(0).Kind);
+            Assert.Equal(
+                CompiledTargetFallbackKind.PropertyGroupIntrinsic,
+                plan.GetActionRecord(0).FallbackKind);
 
             Build(instance, out BuildResult result);
 
@@ -1575,6 +1587,12 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.Null(
                 plan.GetActionRecord(0).PropertyGroupAction);
+            Assert.Equal(
+                CompiledTargetActionKind.Fallback,
+                plan.GetActionRecord(0).Kind);
+            Assert.Equal(
+                CompiledTargetFallbackKind.PropertyGroupIntrinsic,
+                plan.GetActionRecord(0).FallbackKind);
 
             Build(instance, out BuildResult result);
 

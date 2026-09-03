@@ -42,17 +42,36 @@ namespace Microsoft.Build.BackEnd
 
         private static readonly ConditionalWeakTable<ProjectInstance, PartiallyEvaluatedProject> s_projects = new();
 
-        private readonly PartiallyEvaluatedProject _project;
         private readonly CompiledTargetSourceProgram _sourceProgram;
-        private readonly CompiledTaskAction[] _taskActions;
+        private readonly CompiledTargetActionRecord[] _actions;
 
         private CompiledTargetPlan(ProjectTargetInstance target, PartiallyEvaluatedProject project)
         {
-            _project = project;
             _sourceProgram = CompiledTargetSourceProgram.GetOrCreate(target);
-            _taskActions = _sourceProgram.TaskCount == 0
-                ? null
-                : new CompiledTaskAction[_sourceProgram.TaskCount];
+            _actions = new CompiledTargetActionRecord[
+                _sourceProgram.ActionCount];
+            for (int actionIndex = 0;
+                 actionIndex < _actions.Length;
+                 actionIndex++)
+            {
+                CompiledTargetSourceActionRecord sourceAction =
+                    _sourceProgram.GetAction(actionIndex);
+                CompiledTaskAction taskAction =
+                    sourceAction.TaskProgram == null
+                        ? null
+                        : new CompiledTaskAction(
+                            sourceAction.TaskProgram,
+                            project.GetTaskRegistration(
+                                sourceAction.TaskProgram.Name));
+                _actions[actionIndex] =
+                    new CompiledTargetActionRecord(
+                        sourceAction.Kind,
+                        sourceAction.Child,
+                        taskAction,
+                        sourceAction.PropertyGroupAction,
+                        sourceAction.ItemGroupAction,
+                        sourceAction.FallbackKind);
+            }
         }
 
         internal static CompiledTargetPlan PartiallyEvaluate(ProjectInstance projectInstance, ProjectTargetInstance target)
@@ -65,7 +84,7 @@ namespace Microsoft.Build.BackEnd
             return project.PartiallyEvaluate(target);
         }
 
-        internal int ActionCount => _sourceProgram.ActionCount;
+        internal int ActionCount => _actions.Length;
 
         internal bool HasCompiledCondition =>
             _sourceProgram.HasCompiledCondition;
@@ -74,44 +93,11 @@ namespace Microsoft.Build.BackEnd
             _sourceProgram;
 
         internal CompiledTaskAction GetAction(int childIndex)
-        {
-            CompiledTargetSourceActionRecord sourceAction =
-                _sourceProgram.GetAction(childIndex);
-            if (sourceAction.TaskProgram == null)
-            {
-                return null;
-            }
-
-            int taskIndex = sourceAction.TaskIndex;
-            CompiledTaskAction action =
-                Volatile.Read(ref _taskActions[taskIndex]);
-            if (action != null)
-            {
-                return action;
-            }
-
-            var candidate = new CompiledTaskAction(
-                sourceAction.TaskProgram,
-                _project.GetTaskRegistration(
-                    sourceAction.TaskProgram.Name));
-            return Interlocked.CompareExchange(
-                ref _taskActions[taskIndex],
-                candidate,
-                null) ?? candidate;
-        }
+            => _actions[childIndex].TaskAction;
 
         internal CompiledTargetActionRecord GetActionRecord(
-            int childIndex)
-        {
-            CompiledTargetSourceActionRecord sourceAction =
-                _sourceProgram.GetAction(childIndex);
-            return new CompiledTargetActionRecord(
-                sourceAction.Kind,
-                sourceAction.Child,
-                GetAction(childIndex),
-                sourceAction.PropertyGroupAction,
-                sourceAction.ItemGroupAction);
-        }
+            int childIndex) =>
+            _actions[childIndex];
 
         internal bool TryEvaluateCondition(
             Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
@@ -135,12 +121,12 @@ namespace Microsoft.Build.BackEnd
                 null);
 
             for (int actionIndex = 0;
-                 actionIndex < _sourceProgram.ActionCount &&
+                 actionIndex < _actions.Length &&
                  !frame.IsCancellationRequested;
                  actionIndex++)
             {
                 lastResult = await frame.ExecuteAsync(
-                    GetActionRecord(actionIndex));
+                    _actions[actionIndex]);
 
                 if (lastResult.ResultCode == WorkUnitResultCode.Failed)
                 {
@@ -215,7 +201,6 @@ namespace Microsoft.Build.BackEnd
             _actions =
                 new CompiledTargetSourceActionRecord[
                     target.Children.Count];
-            int taskIndex = 0;
             for (int childIndex = 0;
                  childIndex < target.Children.Count;
                  childIndex++)
@@ -226,8 +211,7 @@ namespace Microsoft.Build.BackEnd
                 {
                     ProjectTaskInstance task =>
                         CompiledTargetSourceActionRecord.CreateTask(
-                            task,
-                            taskIndex++),
+                            task),
                     ProjectPropertyGroupTaskInstance propertyGroup =>
                         CompiledTargetSourceActionRecord.CreatePropertyGroup(
                             propertyGroup),
@@ -239,15 +223,11 @@ namespace Microsoft.Build.BackEnd
                             child),
                 };
             }
-
-            TaskCount = taskIndex;
         }
 
         internal int ActionCount => _actions.Length;
 
         internal bool HasCompiledCondition => _condition != null;
-
-        internal int TaskCount { get; }
 
         internal static CompiledTargetSourceProgram GetOrCreate(
             ProjectTargetInstance target) =>
@@ -285,22 +265,29 @@ namespace Microsoft.Build.BackEnd
         Fallback,
     }
 
+    internal enum CompiledTargetFallbackKind : byte
+    {
+        TaskBuilder,
+        PropertyGroupIntrinsic,
+        ItemGroupIntrinsic,
+    }
+
     internal readonly struct CompiledTargetSourceActionRecord
     {
         private CompiledTargetSourceActionRecord(
             CompiledTargetActionKind kind,
             ProjectTargetInstanceChild child,
             CompiledTaskSourceProgram taskProgram,
-            int taskIndex,
             CompiledPropertyGroupAction propertyGroupAction,
-            CompiledItemGroupAction itemGroupAction)
+            CompiledItemGroupAction itemGroupAction,
+            CompiledTargetFallbackKind fallbackKind)
         {
             Kind = kind;
             Child = child;
             TaskProgram = taskProgram;
-            TaskIndex = taskIndex;
             PropertyGroupAction = propertyGroupAction;
             ItemGroupAction = itemGroupAction;
+            FallbackKind = fallbackKind;
         }
 
         internal CompiledTargetActionKind Kind { get; }
@@ -309,54 +296,72 @@ namespace Microsoft.Build.BackEnd
 
         internal CompiledTaskSourceProgram TaskProgram { get; }
 
-        internal int TaskIndex { get; }
-
         internal CompiledPropertyGroupAction PropertyGroupAction { get; }
 
         internal CompiledItemGroupAction ItemGroupAction { get; }
 
+        internal CompiledTargetFallbackKind FallbackKind { get; }
+
         internal static CompiledTargetSourceActionRecord CreateTask(
-            ProjectTaskInstance task,
-            int taskIndex) =>
+            ProjectTaskInstance task) =>
             new(
                 CompiledTargetActionKind.Task,
                 task,
                 CompiledTaskSourceProgram.GetOrCreate(task),
-                taskIndex,
                 propertyGroupAction: null,
-                itemGroupAction: null);
+                itemGroupAction: null,
+                fallbackKind:
+                    CompiledTargetFallbackKind.TaskBuilder);
 
         internal static CompiledTargetSourceActionRecord CreatePropertyGroup(
-            ProjectPropertyGroupTaskInstance propertyGroup) =>
-            new(
-                CompiledTargetActionKind.PropertyGroup,
-                propertyGroup,
-                taskProgram: null,
-                taskIndex: -1,
-                propertyGroupAction:
-                    CompiledPropertyGroupAction.TryCreate(propertyGroup),
-                itemGroupAction: null);
+            ProjectPropertyGroupTaskInstance propertyGroup)
+        {
+            CompiledPropertyGroupAction action =
+                CompiledPropertyGroupAction.TryCreate(propertyGroup);
+            return action == null
+                ? CreateFallback(
+                    propertyGroup,
+                    CompiledTargetFallbackKind.PropertyGroupIntrinsic)
+                : new CompiledTargetSourceActionRecord(
+                    CompiledTargetActionKind.PropertyGroup,
+                    propertyGroup,
+                    taskProgram: null,
+                    propertyGroupAction: action,
+                    itemGroupAction: null,
+                    fallbackKind:
+                        CompiledTargetFallbackKind.TaskBuilder);
+        }
 
         internal static CompiledTargetSourceActionRecord CreateItemGroup(
-            ProjectItemGroupTaskInstance itemGroup) =>
-            new(
-                CompiledTargetActionKind.ItemGroup,
-                itemGroup,
-                taskProgram: null,
-                taskIndex: -1,
-                propertyGroupAction: null,
-                itemGroupAction:
-                    CompiledItemGroupAction.TryCreate(itemGroup));
+            ProjectItemGroupTaskInstance itemGroup)
+        {
+            CompiledItemGroupAction action =
+                CompiledItemGroupAction.TryCreate(itemGroup);
+            return action == null
+                ? CreateFallback(
+                    itemGroup,
+                    CompiledTargetFallbackKind.ItemGroupIntrinsic)
+                : new CompiledTargetSourceActionRecord(
+                    CompiledTargetActionKind.ItemGroup,
+                    itemGroup,
+                    taskProgram: null,
+                    propertyGroupAction: null,
+                    itemGroupAction: action,
+                    fallbackKind:
+                        CompiledTargetFallbackKind.TaskBuilder);
+        }
 
         internal static CompiledTargetSourceActionRecord CreateFallback(
-            ProjectTargetInstanceChild child) =>
+            ProjectTargetInstanceChild child,
+            CompiledTargetFallbackKind fallbackKind =
+                CompiledTargetFallbackKind.TaskBuilder) =>
             new(
                 CompiledTargetActionKind.Fallback,
                 child,
                 taskProgram: null,
-                taskIndex: -1,
                 propertyGroupAction: null,
-                itemGroupAction: null);
+                itemGroupAction: null,
+                fallbackKind: fallbackKind);
     }
 
     /// <summary>
@@ -369,13 +374,15 @@ namespace Microsoft.Build.BackEnd
             ProjectTargetInstanceChild child,
             CompiledTaskAction taskAction,
             CompiledPropertyGroupAction propertyGroupAction,
-            CompiledItemGroupAction itemGroupAction)
+            CompiledItemGroupAction itemGroupAction,
+            CompiledTargetFallbackKind fallbackKind)
         {
             Kind = kind;
             Child = child;
             TaskAction = taskAction;
             PropertyGroupAction = propertyGroupAction;
             ItemGroupAction = itemGroupAction;
+            FallbackKind = fallbackKind;
         }
 
         internal CompiledTargetActionKind Kind { get; }
@@ -387,6 +394,8 @@ namespace Microsoft.Build.BackEnd
         internal CompiledPropertyGroupAction PropertyGroupAction { get; }
 
         internal CompiledItemGroupAction ItemGroupAction { get; }
+
+        internal CompiledTargetFallbackKind FallbackKind { get; }
     }
 
     internal sealed class CompiledPropertyGroupAction
