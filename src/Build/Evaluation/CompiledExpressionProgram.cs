@@ -6,6 +6,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
+#if NET
+using NuGet.Frameworks;
+#endif
 using Microsoft.Build.Construction;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Exceptions;
@@ -399,7 +402,34 @@ namespace Microsoft.Build.Evaluation
         void EnterConditionEvaluation(bool oneSideIsEmpty);
 
         void LeaveConditionEvaluation();
+
+#if NET
+        NuGetFramework GetOrParseTargetFramework(string framework);
+#endif
     }
+
+#if NET
+    internal sealed class CompiledTargetFrameworkCache
+    {
+        private Dictionary<string, NuGetFramework> _frameworks;
+
+        internal NuGetFramework GetOrParse(string framework)
+        {
+            _frameworks ??=
+                new Dictionary<string, NuGetFramework>(
+                    StringComparer.Ordinal);
+            if (!_frameworks.TryGetValue(
+                    framework,
+                    out NuGetFramework parsed))
+            {
+                parsed = NuGetFramework.Parse(framework);
+                _frameworks.Add(framework, parsed);
+            }
+
+            return parsed;
+        }
+    }
+#endif
 
     internal readonly struct CompiledExpressionFunction
     {
@@ -407,12 +437,15 @@ namespace Microsoft.Build.Evaluation
             CompiledPropertyFunctionKind kind,
             TableRange receiver,
             TableRange arguments,
-            string expression)
+            string expression,
+            bool hasTargetFrameworkCompatibilitySpecialization)
         {
             Kind = kind;
             Receiver = receiver;
             Arguments = arguments;
             Expression = expression;
+            HasTargetFrameworkCompatibilitySpecialization =
+                hasTargetFrameworkCompatibilitySpecialization;
         }
 
         internal CompiledPropertyFunctionKind Kind { get; }
@@ -422,6 +455,8 @@ namespace Microsoft.Build.Evaluation
         internal TableRange Arguments { get; }
 
         internal string Expression { get; }
+
+        internal bool HasTargetFrameworkCompatibilitySpecialization { get; }
     }
 
     internal readonly struct CompiledExpressionFunctionArgument
@@ -785,6 +820,17 @@ namespace Microsoft.Build.Evaluation
                         _program.FunctionArguments[
                             function.Arguments.Start + 1])
                     : null;
+#if NET
+                if (function.HasTargetFrameworkCompatibilitySpecialization)
+                {
+                    return EscapingUtilities.Escape(
+                        CompiledExpressionFunctionUtilities
+                            .EvaluateTargetFrameworkCompatibility(
+                                environment,
+                                argument0,
+                                argument1));
+                }
+#endif
                 return EscapingUtilities.Escape(
                     CompiledExpressionFunctionUtilities.Evaluate(
                         function.Kind,
@@ -873,6 +919,7 @@ namespace Microsoft.Build.Evaluation
         private readonly CompiledExpressionFunction[] _functions;
         private readonly CompiledExpressionFunctionArgument[] _functionArguments;
         private readonly TableRange _root;
+        private readonly bool _hasTargetFrameworkCompatibilitySpecialization;
 
         private CompiledScalarProgram(CompiledScalarProgramData program)
         {
@@ -883,6 +930,15 @@ namespace Microsoft.Build.Evaluation
             _functions = program.Functions;
             _functionArguments = program.FunctionArguments;
             _root = program.Root;
+            for (int i = 0; i < _functions.Length; i++)
+            {
+                if (_functions[i]
+                    .HasTargetFrameworkCompatibilitySpecialization)
+                {
+                    _hasTargetFrameworkCompatibilitySpecialization = true;
+                    break;
+                }
+            }
         }
 
         internal static CompiledScalarProgram TryCreate(string expression)
@@ -909,6 +965,9 @@ namespace Microsoft.Build.Evaluation
                 ? new CompiledScalarProgram(program)
                 : null;
         }
+
+        internal bool HasTargetFrameworkCompatibilitySpecialization =>
+            _hasTargetFrameworkCompatibilitySpecialization;
 
         internal string Evaluate(
             ICompiledExpressionEnvironment environment,
@@ -1037,6 +1096,17 @@ namespace Microsoft.Build.Evaluation
                         location,
                         _functionArguments[function.Arguments.Start + 1])
                     : null;
+#if NET
+                if (function.HasTargetFrameworkCompatibilitySpecialization)
+                {
+                    return EscapingUtilities.Escape(
+                        CompiledExpressionFunctionUtilities
+                            .EvaluateTargetFrameworkCompatibility(
+                                environment,
+                                argument0,
+                                argument1));
+                }
+#endif
                 string result = CompiledExpressionFunctionUtilities.Evaluate(
                     function.Kind,
                     receiver,
@@ -1897,6 +1967,18 @@ namespace Microsoft.Build.Evaluation
                             argumentRange));
                 }
 
+#if NET
+                bool hasTargetFrameworkCompatibilitySpecialization =
+                    kind ==
+                        CompiledPropertyFunctionKind
+                            .IsTargetFrameworkCompatible &&
+                    argumentRanges.Count == 2 &&
+                    IsDirectTargetFrameworkOperand(argumentRanges[0]) &&
+                    IsDirectTargetFrameworkOperand(argumentRanges[1]);
+#else
+                const bool hasTargetFrameworkCompatibilitySpecialization =
+                    false;
+#endif
                 functionIndex = _functions.Count;
                 _functions.Add(new CompiledExpressionFunction(
                     kind,
@@ -1904,9 +1986,25 @@ namespace Microsoft.Build.Evaluation
                     new TableRange(
                         argumentStart,
                         argumentValues.Count),
-                    body));
+                    body,
+                    hasTargetFrameworkCompatibilitySpecialization));
                 return true;
             }
+
+#if NET
+            private bool IsDirectTargetFrameworkOperand(TableRange range)
+            {
+                if (range.Count != 1)
+                {
+                    return false;
+                }
+
+                return _valueParts[range.Start].Kind is
+                    CompiledConditionValuePartKind.Literal or
+                    CompiledConditionValuePartKind.Property or
+                    CompiledConditionValuePartKind.Metadata;
+            }
+#endif
 
             private static bool TrySplitFunctionArguments(
                 string expression,
@@ -2182,6 +2280,25 @@ namespace Microsoft.Build.Evaluation
                 result,
                 CultureInfo.InvariantCulture);
         }
+
+#if NET
+        internal static string EvaluateTargetFrameworkCompatibility(
+            ICompiledExpressionEnvironment environment,
+            string target,
+            string candidate)
+        {
+            NuGetFramework parsedTarget =
+                environment.GetOrParseTargetFramework(target);
+            NuGetFramework parsedCandidate =
+                environment.GetOrParseTargetFramework(candidate);
+            bool result = DefaultCompatibilityProvider.Instance.IsCompatible(
+                parsedTarget,
+                parsedCandidate);
+            return Convert.ToString(
+                result,
+                CultureInfo.InvariantCulture);
+        }
+#endif
     }
 
     internal static class CompiledConditionUtilities

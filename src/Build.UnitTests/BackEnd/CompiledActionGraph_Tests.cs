@@ -3,10 +3,16 @@
 
 using System;
 using System.Collections.Generic;
+#if NET
+using System.Diagnostics.Metrics;
+#endif
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
+#if NET
+using NuGet.Frameworks;
+#endif
 #if FEATURE_ASSEMBLYLOADCONTEXT
 using System.Reflection;
 using System.Runtime.Loader;
@@ -719,6 +725,581 @@ namespace Microsoft.Build.UnitTests.BackEnd
             Assert.Equal("net8.0", selected.GetMetadataValue("Original"));
             Assert.Equal("True", selected.GetMetadataValue("Supports"));
         }
+
+#if NET
+        [Fact]
+        public void CompiledTargetFrameworkRoutingExecutesDirectly()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <TargetFrameworks>net6.0;net7.0;net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            CompiledItemGroupAction action =
+                plan.GetActionRecord(0).ItemGroupAction;
+            Assert.NotNull(action);
+            Assert.NotNull(action.TargetFrameworkRoutingAction);
+
+            int routingExecutionCount = 0;
+            using MeterListener listener =
+                ListenForTargetFrameworkRouting(
+                    value => routingExecutionCount += (int)value);
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(1, routingExecutionCount);
+            Assert.Equal(
+                new[] { "net6.0", "net7.0", "net8.0" },
+                instance.GetItems("_DecomposedTargetFramework")
+                    .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                new[] { "net7.0", "net8.0" },
+                instance.GetItems(
+                        "_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning")
+                    .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                new[] { "net8.0" },
+                instance.GetItems(
+                        "_TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning")
+                    .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                new[] { "net6.0", "net7.0", "net8.0" },
+                instance.GetItems(
+                        "_TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning")
+                    .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                new[]
+                {
+                    "net6.0|False|True|False|True|True|True",
+                    "net7.0|True|True|False|True|True|True",
+                    "net8.0|True|True|True|True|True|True",
+                },
+                instance.GetItems("_DecomposedTargetFramework")
+                    .Select(DescribeDecomposedTargetFramework));
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingRunsWithInputLogging()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            const string properties = """
+                <PropertyGroup>
+                  <TargetFrameworks>net7.0;net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """;
+            string genericItemGroup =
+                CreateTargetFrameworkRoutingItemGroup().Replace(
+                    "'%(SupportsAot)' == 'true'",
+                    "'%(SupportsAot)' == 'True'",
+                    StringComparison.Ordinal);
+            using ProjectFromString specializedProject = new(
+                CreateProject(
+                    CreateTargetFrameworkRoutingItemGroup(),
+                    properties));
+            using ProjectFromString genericProject = new(
+                CreateProject(genericItemGroup, properties));
+            ProjectInstance specialized =
+                specializedProject.Project.CreateProjectInstance();
+            ProjectInstance generic =
+                genericProject.Project.CreateProjectInstance();
+
+            int routingExecutionCount = 0;
+            using MeterListener listener =
+                ListenForTargetFrameworkRouting(
+                    value => routingExecutionCount += (int)value);
+            MockLogger specializedLogger = Build(
+                specialized,
+                out BuildResult specializedResult,
+                logTaskInputs: true);
+            MockLogger genericLogger = Build(
+                generic,
+                out BuildResult genericResult,
+                logTaskInputs: true);
+
+            Assert.Equal(
+                BuildResultCode.Success,
+                specializedResult.OverallResult);
+            Assert.Equal(
+                BuildResultCode.Success,
+                genericResult.OverallResult);
+            Assert.Equal(1, routingExecutionCount);
+            Assert.Equal(
+                DescribeTaskParameterEvents(genericLogger),
+                DescribeTaskParameterEvents(specializedLogger));
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingMatchesGenericItemGroup()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            const string properties = """
+                <PropertyGroup>
+                  <TargetFrameworks>net6.0;net7.0;net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """;
+            string genericItemGroup =
+                CreateTargetFrameworkRoutingItemGroup().Replace(
+                    "'%(SupportsAot)' == 'true'",
+                    "'%(SupportsAot)' == 'True'",
+                    StringComparison.Ordinal);
+
+            using ProjectFromString specializedProject = new(
+                CreateProject(
+                    CreateTargetFrameworkRoutingItemGroup(),
+                    properties));
+            using ProjectFromString genericProject = new(
+                CreateProject(genericItemGroup, properties));
+            ProjectInstance specialized =
+                specializedProject.Project.CreateProjectInstance();
+            ProjectInstance generic =
+                genericProject.Project.CreateProjectInstance();
+
+            Assert.NotNull(
+                CompiledTargetPlan.PartiallyEvaluate(
+                        specialized,
+                        specialized.Targets["Build"])
+                    .GetActionRecord(0)
+                    .ItemGroupAction.TargetFrameworkRoutingAction);
+            Assert.Null(
+                CompiledTargetPlan.PartiallyEvaluate(
+                        generic,
+                        generic.Targets["Build"])
+                    .GetActionRecord(0)
+                    .ItemGroupAction.TargetFrameworkRoutingAction);
+
+            Build(specialized, out BuildResult specializedResult);
+            Build(generic, out BuildResult genericResult);
+
+            Assert.Equal(
+                BuildResultCode.Success,
+                specializedResult.OverallResult);
+            Assert.Equal(
+                BuildResultCode.Success,
+                genericResult.OverallResult);
+            foreach (string itemType in new[]
+            {
+                "_TargetFramework",
+                "_DecomposedTargetFramework",
+                "_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning",
+                "_TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning",
+                "_TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning",
+            })
+            {
+                Assert.Equal(
+                    DescribeItems(generic, itemType),
+                    DescribeItems(specialized, itemType));
+            }
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingPreservesFunctionErrors()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            const string properties = """
+                <PropertyGroup>
+                  <TargetFrameworks>net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>.NETCoreApp,Version=bogus</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """;
+            string genericItemGroup =
+                CreateTargetFrameworkRoutingItemGroup().Replace(
+                    "'%(SupportsAot)' == 'true'",
+                    "'%(SupportsAot)' == 'True'",
+                    StringComparison.Ordinal);
+
+            using ProjectFromString specializedProject = new(
+                CreateProject(
+                    CreateTargetFrameworkRoutingItemGroup(),
+                    properties));
+            using ProjectFromString genericProject = new(
+                CreateProject(genericItemGroup, properties));
+            ProjectInstance specialized =
+                specializedProject.Project.CreateProjectInstance();
+            ProjectInstance generic =
+                genericProject.Project.CreateProjectInstance();
+
+            MockLogger specializedLogger = Build(
+                specialized,
+                out BuildResult specializedResult);
+            MockLogger genericLogger = Build(
+                generic,
+                out BuildResult genericResult);
+
+            Assert.Equal(
+                BuildResultCode.Failure,
+                specializedResult.OverallResult);
+            Assert.Equal(
+                BuildResultCode.Failure,
+                genericResult.OverallResult);
+            BuildErrorEventArgs specializedError =
+                Assert.Single(specializedLogger.Errors);
+            BuildErrorEventArgs genericError =
+                Assert.Single(genericLogger.Errors);
+            Assert.Equal(genericError.Code, specializedError.Code);
+            Assert.Equal(genericError.Message, specializedError.Message);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingFallsBackForExistingDecomposedItems()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <TargetFrameworks>net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                <ItemGroup>
+                  <_DecomposedTargetFramework Include="preexisting" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0)
+                    .ItemGroupAction.TargetFrameworkRoutingAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingFallsBackForExistingRouteItems()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <TargetFrameworks>net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                <ItemGroup>
+                  <_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning
+                    Include="preexisting" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingFallsBackForEmptySource()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <_FirstTargetFrameworkToSupportTrimming>.NETCoreApp,Version=bogus</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingFallsBackForDuplicateIdentities()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <TargetFrameworks>net8.0;net9.0;NET8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net9.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net9.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net9.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                new[] { "net8.0", "NET8.0", "net9.0" },
+                instance.GetItems("_DecomposedTargetFramework")
+                    .Select(item => item.EvaluatedInclude));
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingRequiresExactShape()
+        {
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup().Replace(
+                    "'%(SupportsAot)' == 'true'",
+                    "'%(SupportsAot)' == 'True'",
+                    StringComparison.Ordinal)));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            CompiledItemGroupAction action =
+                plan.GetActionRecord(0).ItemGroupAction;
+            Assert.NotNull(action);
+            Assert.Null(action.TargetFrameworkRoutingAction);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkCompatibilityUsesTypedOperandsAndCachesParsedValues()
+        {
+            CompiledScalarProgram specialized =
+                CompiledScalarProgram.TryCreateItemSpecification(
+                    "$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', 'net7.0'))");
+            CompiledScalarProgram composite =
+                CompiledScalarProgram.TryCreateItemSpecification(
+                    "$([MSBuild]::IsTargetFrameworkCompatible('$(Prefix)%(Identity)', 'net7.0'))");
+            CompiledScalarProgram propertySpecialized =
+                CompiledScalarProgram.TryCreateItemSpecification(
+                    "$([MSBuild]::IsTargetFrameworkCompatible('$(Framework)', 'net7.0'))");
+            var expressionEnvironment =
+                new RecordingCompiledExpressionEnvironment
+                {
+                    MetadataValue = "net8.0",
+                };
+
+            Assert.True(
+                specialized.HasTargetFrameworkCompatibilitySpecialization);
+            Assert.False(
+                composite.HasTargetFrameworkCompatibilitySpecialization);
+            Assert.True(
+                propertySpecialized
+                    .HasTargetFrameworkCompatibilitySpecialization);
+            Assert.Equal(
+                "True",
+                specialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(
+                "True",
+                specialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(2, expressionEnvironment.ParsedFrameworkCount);
+
+            expressionEnvironment.MetadataValue = "net6.0";
+            Assert.Equal(
+                "False",
+                specialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(3, expressionEnvironment.ParsedFrameworkCount);
+
+            expressionEnvironment.PropertyValue = "net9.0";
+            Assert.Equal(
+                "True",
+                propertySpecialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(4, expressionEnvironment.ParsedFrameworkCount);
+
+            expressionEnvironment.PropertyValue = "net5.0";
+            Assert.Equal(
+                "False",
+                propertySpecialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(5, expressionEnvironment.ParsedFrameworkCount);
+
+            Assert.Equal(
+                "False",
+                composite.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(5, expressionEnvironment.ParsedFrameworkCount);
+        }
+#endif
+
+#if NET
+        private static string DescribeDecomposedTargetFramework(
+            ProjectItemInstance item) =>
+            string.Join(
+                "|",
+                item.EvaluatedInclude,
+                item.GetMetadataValue("SupportsTrimming"),
+                item.GetMetadataValue(
+                    "SupportedByMinNonEolTargetFrameworkForTrimming"),
+                item.GetMetadataValue("SupportsAot"),
+                item.GetMetadataValue(
+                    "SupportedByMinNonEolTargetFrameworkForAot"),
+                item.GetMetadataValue("SupportsSingleFile"),
+                item.GetMetadataValue(
+                    "SupportedByMinNonEolTargetFrameworkForSingleFile"));
+
+        private static string[] DescribeItems(
+            ProjectInstance project,
+            string itemType) =>
+            project.GetItems(itemType)
+                .Select(
+                    item =>
+                        $"{item.EvaluatedInclude}|{string.Join(",", item.Metadata.Select(metadata => $"{metadata.Name}={metadata.EvaluatedValue}"))}")
+                .ToArray();
+
+        private static string[] DescribeTaskParameterEvents(
+            MockLogger logger) =>
+            logger.TaskParameterEvents.Select(
+                taskParameter =>
+                    $"{taskParameter.Kind}|{taskParameter.ItemType}|{string.Join(",", taskParameter.Items.Cast<object>().Select(item => item.ToString()))}")
+                .ToArray();
+
+        private static MeterListener ListenForTargetFrameworkRouting(
+            Action<long> onMeasurement)
+        {
+            var listener = new MeterListener();
+            listener.InstrumentPublished = (instrument, meterListener) =>
+            {
+                if (instrument.Meter.Name ==
+                        BuildExecutionInstrumentation.MeterName &&
+                    instrument.Name ==
+                        BuildExecutionInstrumentation.EventInstrumentName)
+                {
+                    meterListener.EnableMeasurementEvents(instrument);
+                }
+            };
+            listener.SetMeasurementEventCallback<long>(
+                (instrument, value, tags, _) =>
+                {
+                    foreach (KeyValuePair<string, object> tag in tags)
+                    {
+                        if (tag.Key == "metric" &&
+                            tag.Value as string ==
+                                nameof(
+                                    BuildExecutionMetric
+                                        .CompiledTargetFrameworkRouting))
+                        {
+                            onMeasurement(value);
+                            break;
+                        }
+                    }
+                });
+            listener.Start();
+            return listener;
+        }
+
+        private static string CreateTargetFrameworkRoutingItemGroup() =>
+            """
+            <ItemGroup>
+              <_TargetFramework Include="$(TargetFrameworks)" />
+              <_DecomposedTargetFramework Include="@(_TargetFramework)">
+                <SupportsTrimming>$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportTrimming)'))</SupportsTrimming>
+                <SupportedByMinNonEolTargetFrameworkForTrimming>$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForTrimming)', '%(Identity)'))</SupportedByMinNonEolTargetFrameworkForTrimming>
+                <SupportsAot>$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportAot)'))</SupportsAot>
+                <SupportedByMinNonEolTargetFrameworkForAot>$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForAot)', '%(Identity)'))</SupportedByMinNonEolTargetFrameworkForAot>
+                <SupportsSingleFile>$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportSingleFile)'))</SupportsSingleFile>
+                <SupportedByMinNonEolTargetFrameworkForSingleFile>$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForSingleFile)', '%(Identity)'))</SupportedByMinNonEolTargetFrameworkForSingleFile>
+              </_DecomposedTargetFramework>
+              <_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning
+                Include="@(_DecomposedTargetFramework)"
+                Condition="'%(SupportsTrimming)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForTrimming)' == 'true'" />
+              <_TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning
+                Include="@(_DecomposedTargetFramework->'%(Identity)')"
+                Condition="'%(SupportsAot)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForAot)' == 'true'" />
+              <_TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning
+                Include="@(_DecomposedTargetFramework)"
+                Condition="'%(SupportsSingleFile)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForSingleFile)' == 'true'" />
+            </ItemGroup>
+            """;
+#endif
 
         [Fact]
         public void CompiledItemIncludeUsesDestinationItemDefinitionMetadata()
@@ -2253,25 +2834,42 @@ namespace Microsoft.Build.UnitTests.BackEnd
         private sealed class RecordingCompiledExpressionEnvironment :
             ICompiledExpressionEnvironment
         {
+#if NET
+            private readonly Dictionary<string, NuGetFramework>
+                _parsedFrameworks = new(StringComparer.Ordinal);
+#endif
+
             internal bool EnteredWithEmptyOperand { get; private set; }
 
             internal int LeaveCount { get; private set; }
 
             internal int PropertyReadCount { get; private set; }
 
+            internal string MetadataValue { get; set; } = string.Empty;
+
+            internal string PropertyValue { get; set; } = string.Empty;
+
+#if NET
+            internal int ParsedFrameworkCount => _parsedFrameworks.Count;
+#endif
+
             public string GetEscapedPropertyValue(
                 string propertyName,
                 IElementLocation location)
             {
                 PropertyReadCount++;
-                return string.Empty;
+                return propertyName.Equals(
+                    "Prefix",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? string.Empty
+                    : PropertyValue;
             }
 
             public string GetEscapedMetadataValue(
                 string itemType,
                 string metadataName,
                 IElementLocation location) =>
-                string.Empty;
+                MetadataValue;
 
             public string ExpandItems(
                 string escapedValue,
@@ -2287,6 +2885,21 @@ namespace Microsoft.Build.UnitTests.BackEnd
             {
                 LeaveCount++;
             }
+
+#if NET
+            public NuGetFramework GetOrParseTargetFramework(string framework)
+            {
+                if (!_parsedFrameworks.TryGetValue(
+                        framework,
+                        out NuGetFramework parsed))
+                {
+                    parsed = NuGetFramework.Parse(framework);
+                    _parsedFrameworks.Add(framework, parsed);
+                }
+
+                return parsed;
+            }
+#endif
         }
 
         private static string CreateProject(

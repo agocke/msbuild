@@ -20,6 +20,9 @@ using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
+#if NET
+using NuGet.Frameworks;
+#endif
 
 #nullable disable
 
@@ -578,18 +581,28 @@ namespace Microsoft.Build.BackEnd
         private readonly CompiledConditionProgram _condition;
         private readonly IElementLocation _conditionLocation;
         private readonly CompiledItemOperation[] _operations;
+        private readonly CompiledTargetFrameworkRoutingAction
+            _targetFrameworkRoutingAction;
 
         private CompiledItemGroupAction(
             CompiledConditionProgram condition,
             IElementLocation conditionLocation,
-            CompiledItemOperation[] operations)
+            CompiledItemOperation[] operations,
+            CompiledTargetFrameworkRoutingAction
+                targetFrameworkRoutingAction)
         {
             _condition = condition;
             _conditionLocation = conditionLocation;
             _operations = operations;
+            _targetFrameworkRoutingAction =
+                targetFrameworkRoutingAction;
         }
 
         internal int OperationCount => _operations.Length;
+
+        internal CompiledTargetFrameworkRoutingAction
+            TargetFrameworkRoutingAction =>
+            _targetFrameworkRoutingAction;
 
         internal static CompiledItemGroupAction TryCreate(
             ProjectItemGroupTaskInstance itemGroup)
@@ -625,7 +638,10 @@ namespace Microsoft.Build.BackEnd
             return new CompiledItemGroupAction(
                 condition,
                 itemGroup.ConditionLocation,
-                operations);
+                operations,
+                CompiledTargetFrameworkRoutingAction.TryCreate(
+                    itemGroup,
+                    operations));
         }
 
         internal bool EvaluateCondition(
@@ -636,6 +652,153 @@ namespace Microsoft.Build.BackEnd
 
         internal CompiledItemOperation GetOperation(int index) =>
             _operations[index];
+    }
+
+    internal sealed class CompiledTargetFrameworkRoutingAction
+    {
+        private static readonly string[] s_decomposedMetadataNames =
+        {
+            "SupportsTrimming",
+            "SupportedByMinNonEolTargetFrameworkForTrimming",
+            "SupportsAot",
+            "SupportedByMinNonEolTargetFrameworkForAot",
+            "SupportsSingleFile",
+            "SupportedByMinNonEolTargetFrameworkForSingleFile",
+        };
+
+        private static readonly string[] s_decomposedMetadataValues =
+        {
+            "$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportTrimming)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForTrimming)', '%(Identity)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportAot)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForAot)', '%(Identity)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportSingleFile)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForSingleFile)', '%(Identity)'))",
+        };
+
+        private CompiledTargetFrameworkRoutingAction(
+            CompiledItemOperation[] operations)
+        {
+            SourceInclude = operations[0];
+            Decomposition = operations[1];
+            TrimmingRoute = operations[2];
+            AotRoute = operations[3];
+            SingleFileRoute = operations[4];
+        }
+
+        internal CompiledItemOperation SourceInclude { get; }
+
+        internal CompiledItemOperation Decomposition { get; }
+
+        internal CompiledItemOperation TrimmingRoute { get; }
+
+        internal CompiledItemOperation AotRoute { get; }
+
+        internal CompiledItemOperation SingleFileRoute { get; }
+
+        internal static CompiledTargetFrameworkRoutingAction TryCreate(
+            ProjectItemGroupTaskInstance itemGroup,
+            CompiledItemOperation[] operations)
+        {
+            if (!string.IsNullOrEmpty(itemGroup.Condition) ||
+                operations.Length != 5 ||
+                !MatchesItem(
+                    operations[0].Item,
+                    "_TargetFramework",
+                    "$(TargetFrameworks)",
+                    condition: null,
+                    metadataNames: null,
+                    metadataValues: null) ||
+                !MatchesItem(
+                    operations[1].Item,
+                    "_DecomposedTargetFramework",
+                    "@(_TargetFramework)",
+                    condition: null,
+                    s_decomposedMetadataNames,
+                    s_decomposedMetadataValues) ||
+                !MatchesItem(
+                    operations[2].Item,
+                    "_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning",
+                    "@(_DecomposedTargetFramework)",
+                    "'%(SupportsTrimming)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForTrimming)' == 'true'",
+                    metadataNames: null,
+                    metadataValues: null) ||
+                !MatchesItem(
+                    operations[3].Item,
+                    "_TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning",
+                    "@(_DecomposedTargetFramework->'%(Identity)')",
+                    "'%(SupportsAot)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForAot)' == 'true'",
+                    metadataNames: null,
+                    metadataValues: null) ||
+                !MatchesItem(
+                    operations[4].Item,
+                    "_TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning",
+                    "@(_DecomposedTargetFramework)",
+                    "'%(SupportsSingleFile)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForSingleFile)' == 'true'",
+                    metadataNames: null,
+                    metadataValues: null))
+            {
+                return null;
+            }
+
+            return new CompiledTargetFrameworkRoutingAction(operations);
+        }
+
+        private static bool MatchesItem(
+            ProjectItemGroupTaskItemInstance item,
+            string itemType,
+            string include,
+            string condition,
+            string[] metadataNames,
+            string[] metadataValues)
+        {
+            if (!item.ItemType.Equals(
+                    itemType,
+                    StringComparison.Ordinal) ||
+                !item.Include.Equals(
+                    include,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    item.Condition,
+                    condition ?? string.Empty,
+                    StringComparison.Ordinal) ||
+                !string.IsNullOrEmpty(item.Exclude) ||
+                !string.IsNullOrEmpty(item.Remove) ||
+                !string.IsNullOrEmpty(item.KeepDuplicates) ||
+                !string.IsNullOrEmpty(item.KeepMetadata) ||
+                !string.IsNullOrEmpty(item.RemoveMetadata) ||
+                !string.IsNullOrEmpty(item.MatchOnMetadata) ||
+                !string.IsNullOrEmpty(item.MatchOnMetadataOptions) ||
+                item.Metadata.Count != (metadataNames?.Length ?? 0))
+            {
+                return false;
+            }
+
+            if (metadataNames == null)
+            {
+                return true;
+            }
+
+            int metadataIndex = 0;
+            foreach (ProjectItemGroupTaskMetadataInstance metadata
+                in item.Metadata)
+            {
+                if (!metadata.Name.Equals(
+                        metadataNames[metadataIndex],
+                        StringComparison.Ordinal) ||
+                    !metadata.Value.Equals(
+                        metadataValues[metadataIndex],
+                        StringComparison.Ordinal) ||
+                    !string.IsNullOrEmpty(metadata.Condition))
+                {
+                    return false;
+                }
+
+                metadataIndex++;
+            }
+
+            return true;
+        }
     }
 
     internal sealed class CompiledItemOperation
@@ -916,12 +1079,25 @@ namespace Microsoft.Build.BackEnd
         private readonly Expander<
             ProjectPropertyInstance,
             ProjectItemInstance> _expander;
+#if NET
+        private CompiledTargetFrameworkCache _targetFrameworkCache;
+#endif
 
         internal CompiledLookupExpressionEnvironment(
             Expander<ProjectPropertyInstance, ProjectItemInstance> expander)
         {
             _expander = expander;
         }
+
+#if NET
+        internal CompiledLookupExpressionEnvironment(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
+            CompiledTargetFrameworkCache targetFrameworkCache)
+        {
+            _expander = expander;
+            _targetFrameworkCache = targetFrameworkCache;
+        }
+#endif
 
         internal Expander<ProjectPropertyInstance, ProjectItemInstance>
             Expander => _expander;
@@ -959,6 +1135,17 @@ namespace Microsoft.Build.BackEnd
 
         void ICompiledExpressionEnvironment.LeaveConditionEvaluation() =>
             _expander.PropertiesUseTracker.ResetPropertyReadContext();
+
+#if NET
+        internal NuGetFramework GetOrParseTargetFramework(
+            string framework) =>
+            (_targetFrameworkCache ??=
+                new CompiledTargetFrameworkCache()).GetOrParse(framework);
+
+        NuGetFramework ICompiledExpressionEnvironment.GetOrParseTargetFramework(
+            string framework) =>
+            GetOrParseTargetFramework(framework);
+#endif
     }
 
     /// <summary>

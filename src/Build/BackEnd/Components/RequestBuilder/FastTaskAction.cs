@@ -23,6 +23,9 @@ using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
+#if NET
+using NuGet.Frameworks;
+#endif
 using Microsoft.Build.Shared.FileSystem;
 using EngineFileUtilities = Microsoft.Build.Internal.EngineFileUtilities;
 using ProjectItemInstanceFactory = Microsoft.Build.Execution.ProjectItemInstance.TaskItem.ProjectItemInstanceFactory;
@@ -1761,6 +1764,9 @@ namespace Microsoft.Build.BackEnd
             _executionExpressionEnvironment;
         private CompiledLookupExpressionEnvironment
             _inferenceExpressionEnvironment;
+#if NET
+        private CompiledTargetFrameworkCache _targetFrameworkCache;
+#endif
 
         internal CompiledTargetExecutionFrame(
             IBuildComponentHost host,
@@ -1847,6 +1853,12 @@ namespace Microsoft.Build.BackEnd
 
         void ICompiledExpressionEnvironment.LeaveConditionEvaluation() =>
             Expander.PropertiesUseTracker.ResetPropertyReadContext();
+
+#if NET
+        NuGetFramework ICompiledExpressionEnvironment.GetOrParseTargetFramework(
+            string framework) =>
+            GetTargetFrameworkCache().GetOrParse(framework);
+#endif
 
         internal ValueTask<WorkUnitResult> ExecuteAsync(
             CompiledTargetActionRecord record)
@@ -2177,7 +2189,34 @@ namespace Microsoft.Build.BackEnd
                 ProjectInstance project =
                     RequestEntry.RequestConfiguration.Project;
 
-                for (int operationIndex = 0;
+                int firstOperationIndex = 0;
+#if NET
+                if (action.TargetFrameworkRoutingAction != null)
+                {
+                    ExecuteCompiledItemOperation(
+                        action.TargetFrameworkRoutingAction.SourceInclude,
+                        environment,
+                        lookup,
+                        project,
+                        logTaskInputs);
+                    if (TryExecuteCompiledTargetFrameworkRouting(
+                        action.TargetFrameworkRoutingAction,
+                        environment,
+                        lookup,
+                        project,
+                        logTaskInputs))
+                    {
+                        return new WorkUnitResult(
+                            WorkUnitResultCode.Success,
+                            WorkUnitActionCode.Continue,
+                            null);
+                    }
+
+                    firstOperationIndex = 1;
+                }
+#endif
+
+                for (int operationIndex = firstOperationIndex;
                      operationIndex < action.OperationCount;
                      operationIndex++)
                 {
@@ -2207,8 +2246,7 @@ namespace Microsoft.Build.BackEnd
                         {
                             ExecuteCompiledItemOperation(
                                 operation,
-                                new CompiledLookupExpressionEnvironment(
-                                    bucket.Expander),
+                                CreateExpressionEnvironment(bucket.Expander),
                                 bucket.Lookup,
                                 project,
                                 logTaskInputs);
@@ -2240,6 +2278,405 @@ namespace Microsoft.Build.BackEnd
                     exception);
             }
         }
+
+#if NET
+        private bool TryExecuteCompiledTargetFrameworkRouting(
+            CompiledTargetFrameworkRoutingAction action,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            bool logTaskInputs)
+        {
+            ICollection<ProjectItemInstance> targetFrameworks =
+                lookup.GetItems(action.SourceInclude.Item.ItemType);
+            ICollection<ProjectItemInstance> existingDecomposedFrameworks =
+                lookup.GetItems(action.Decomposition.Item.ItemType);
+            if (targetFrameworks?.Count is not > 0 ||
+                existingDecomposedFrameworks?.Count > 0 ||
+                HasExistingRouteItems(action, lookup) ||
+                HasRelevantItemDefinitions(action, project) ||
+                !HasUniqueTargetFrameworkIdentities(targetFrameworks))
+            {
+                return false;
+            }
+
+            using (BuildExecutionInstrumentation.Measure(
+                       BuildExecutionMetric
+                           .CompiledTargetFrameworkRouting,
+                       parentName:
+                           TargetLoggingContext.Target.Name))
+            {
+                DecomposeAndRouteTargetFrameworks(
+                    action,
+                    environment,
+                    lookup,
+                    project,
+                    targetFrameworks,
+                    logTaskInputs);
+            }
+
+            return true;
+        }
+
+        private static bool HasExistingRouteItems(
+            CompiledTargetFrameworkRoutingAction action,
+            Lookup lookup) =>
+            lookup.GetItems(action.TrimmingRoute.Item.ItemType)?.Count > 0 ||
+            lookup.GetItems(action.AotRoute.Item.ItemType)?.Count > 0 ||
+            lookup.GetItems(action.SingleFileRoute.Item.ItemType)?.Count > 0;
+
+        private static bool HasRelevantItemDefinitions(
+            CompiledTargetFrameworkRoutingAction action,
+            ProjectInstance project) =>
+            project.ItemDefinitions.ContainsKey(
+                action.Decomposition.Item.ItemType) ||
+            project.ItemDefinitions.ContainsKey(
+                action.TrimmingRoute.Item.ItemType) ||
+            project.ItemDefinitions.ContainsKey(
+                action.AotRoute.Item.ItemType) ||
+            project.ItemDefinitions.ContainsKey(
+                action.SingleFileRoute.Item.ItemType);
+
+        private void DecomposeAndRouteTargetFrameworks(
+            CompiledTargetFrameworkRoutingAction action,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            ICollection<ProjectItemInstance> targetFrameworks,
+            bool logTaskInputs)
+        {
+            CompiledItemMetadataAssignment[] metadata =
+                action.Decomposition.Metadata;
+            string firstTrimmingFramework = GetRoutingPropertyValue(
+                environment,
+                "_FirstTargetFrameworkToSupportTrimming",
+                metadata[0].Metadata.Location);
+            string minimumTrimmingFramework = GetRoutingPropertyValue(
+                environment,
+                "_MinNonEolTargetFrameworkForTrimming",
+                metadata[1].Metadata.Location);
+            string firstAotFramework = GetRoutingPropertyValue(
+                environment,
+                "_FirstTargetFrameworkToSupportAot",
+                metadata[2].Metadata.Location);
+            string minimumAotFramework = GetRoutingPropertyValue(
+                environment,
+                "_MinNonEolTargetFrameworkForAot",
+                metadata[3].Metadata.Location);
+            string firstSingleFileFramework = GetRoutingPropertyValue(
+                environment,
+                "_FirstTargetFrameworkToSupportSingleFile",
+                metadata[4].Metadata.Location);
+            string minimumSingleFileFramework = GetRoutingPropertyValue(
+                environment,
+                "_MinNonEolTargetFrameworkForSingleFile",
+                metadata[5].Metadata.Location);
+
+            var decomposedFactory = new ProjectItemInstanceFactory(
+                project,
+                action.Decomposition.Item.ItemType);
+            var trimmingFactory = new ProjectItemInstanceFactory(
+                project,
+                action.TrimmingRoute.Item.ItemType);
+            var aotFactory = new ProjectItemInstanceFactory(
+                project,
+                action.AotRoute.Item.ItemType);
+            var singleFileFactory = new ProjectItemInstanceFactory(
+                project,
+                action.SingleFileRoute.Item.ItemType);
+            var decomposedItems =
+                new List<ProjectItemInstance>(targetFrameworks.Count);
+            var trimmingItems = new List<ProjectItemInstance>();
+            var aotItems = new List<ProjectItemInstance>();
+            var singleFileItems = new List<ProjectItemInstance>();
+
+            NuGetFramework parsedFirstTrimmingFramework = null;
+            NuGetFramework parsedMinimumTrimmingFramework = null;
+            NuGetFramework parsedFirstAotFramework = null;
+            NuGetFramework parsedMinimumAotFramework = null;
+            NuGetFramework parsedFirstSingleFileFramework = null;
+            NuGetFramework parsedMinimumSingleFileFramework = null;
+
+            foreach (ProjectItemInstance targetFramework in targetFrameworks)
+            {
+                string identity = FileUtilities.MaybeAdjustFilePath(
+                    targetFramework.EvaluatedInclude);
+                NuGetFramework parsedIdentity = ParseRoutingFramework(
+                    environment,
+                    identity,
+                    metadata[0].Metadata);
+                parsedFirstTrimmingFramework ??= ParseRoutingFramework(
+                    environment,
+                    firstTrimmingFramework,
+                    metadata[0].Metadata);
+                bool supportsTrimming = EvaluateRoutingCompatibility(
+                    parsedIdentity,
+                    parsedFirstTrimmingFramework,
+                    metadata[0].Metadata);
+                parsedMinimumTrimmingFramework ??= ParseRoutingFramework(
+                    environment,
+                    minimumTrimmingFramework,
+                    metadata[1].Metadata);
+                bool supportedByMinimumTrimmingFramework =
+                    EvaluateRoutingCompatibility(
+                        parsedMinimumTrimmingFramework,
+                        parsedIdentity,
+                        metadata[1].Metadata);
+                parsedFirstAotFramework ??= ParseRoutingFramework(
+                    environment,
+                    firstAotFramework,
+                    metadata[2].Metadata);
+                bool supportsAot = EvaluateRoutingCompatibility(
+                    parsedIdentity,
+                    parsedFirstAotFramework,
+                    metadata[2].Metadata);
+                parsedMinimumAotFramework ??= ParseRoutingFramework(
+                    environment,
+                    minimumAotFramework,
+                    metadata[3].Metadata);
+                bool supportedByMinimumAotFramework =
+                    EvaluateRoutingCompatibility(
+                        parsedMinimumAotFramework,
+                        parsedIdentity,
+                        metadata[3].Metadata);
+                parsedFirstSingleFileFramework ??= ParseRoutingFramework(
+                    environment,
+                    firstSingleFileFramework,
+                    metadata[4].Metadata);
+                bool supportsSingleFile = EvaluateRoutingCompatibility(
+                    parsedIdentity,
+                    parsedFirstSingleFileFramework,
+                    metadata[4].Metadata);
+                parsedMinimumSingleFileFramework ??= ParseRoutingFramework(
+                    environment,
+                    minimumSingleFileFramework,
+                    metadata[5].Metadata);
+                bool supportedByMinimumSingleFileFramework =
+                    EvaluateRoutingCompatibility(
+                        parsedMinimumSingleFileFramework,
+                        parsedIdentity,
+                        metadata[5].Metadata);
+
+                ProjectItemInstance decomposed = decomposedFactory.CreateItem(
+                    targetFramework,
+                    action.Decomposition.Item.Location.File);
+                decomposed.SetMetadata(
+                    metadata[0].Metadata.Name,
+                    GetBooleanMetadataValue(supportsTrimming));
+                decomposed.SetMetadata(
+                    metadata[1].Metadata.Name,
+                    GetBooleanMetadataValue(
+                        supportedByMinimumTrimmingFramework));
+                decomposed.SetMetadata(
+                    metadata[2].Metadata.Name,
+                    GetBooleanMetadataValue(supportsAot));
+                decomposed.SetMetadata(
+                    metadata[3].Metadata.Name,
+                    GetBooleanMetadataValue(
+                        supportedByMinimumAotFramework));
+                decomposed.SetMetadata(
+                    metadata[4].Metadata.Name,
+                    GetBooleanMetadataValue(supportsSingleFile));
+                decomposed.SetMetadata(
+                    metadata[5].Metadata.Name,
+                    GetBooleanMetadataValue(
+                        supportedByMinimumSingleFileFramework));
+                decomposedItems.Add(decomposed);
+
+                if (supportsTrimming &&
+                    supportedByMinimumTrimmingFramework)
+                {
+                    trimmingItems.Add(trimmingFactory.CreateItem(
+                        decomposed,
+                        action.TrimmingRoute.Item.Location.File));
+                }
+
+                if (supportsAot && supportedByMinimumAotFramework)
+                {
+                    aotItems.Add(aotFactory.CreateItem(
+                        decomposed,
+                        action.AotRoute.Item.Location.File));
+                }
+
+                if (supportsSingleFile &&
+                    supportedByMinimumSingleFileFramework)
+                {
+                    singleFileItems.Add(singleFileFactory.CreateItem(
+                        decomposed,
+                        action.SingleFileRoute.Item.Location.File));
+                }
+            }
+
+            AddSpecializedItems(
+                lookup,
+                action.Decomposition,
+                decomposedItems,
+                logTaskInputs,
+                logItemsIndividually: true);
+            AddSpecializedItems(
+                lookup,
+                action.TrimmingRoute,
+                trimmingItems,
+                logTaskInputs,
+                logItemsIndividually: false);
+            AddSpecializedItems(
+                lookup,
+                action.AotRoute,
+                aotItems,
+                logTaskInputs,
+                logItemsIndividually: false);
+            AddSpecializedItems(
+                lookup,
+                action.SingleFileRoute,
+                singleFileItems,
+                logTaskInputs,
+                logItemsIndividually: false);
+        }
+
+        private static string GetBooleanMetadataValue(bool value) =>
+            value ? bool.TrueString : bool.FalseString;
+
+        private void AddSpecializedItems(
+            Lookup lookup,
+            CompiledItemOperation operation,
+            List<ProjectItemInstance> items,
+            bool logTaskInputs,
+            bool logItemsIndividually)
+        {
+            Action<IList> logFunction = null;
+            if (logTaskInputs &&
+                !TargetLoggingContext.LoggingService
+                    .OnlyLogCriticalEvents &&
+                items.Count > 0)
+            {
+                if (logItemsIndividually)
+                {
+                    foreach (ProjectItemInstance item in items)
+                    {
+                        ItemGroupLoggingHelper.LogTaskParameter(
+                            TargetLoggingContext,
+                            TaskParameterMessageKind.AddItem,
+                            parameterName: null,
+                            propertyName: null,
+                            operation.Item.ItemType,
+                            new List<ProjectItemInstance>(1) { item },
+                            logItemMetadata: true,
+                            operation.Item.Location);
+                    }
+                }
+                else
+                {
+                    logFunction = itemList =>
+                        ItemGroupLoggingHelper.LogTaskParameter(
+                            TargetLoggingContext,
+                            TaskParameterMessageKind.AddItem,
+                            parameterName: null,
+                            propertyName: null,
+                            operation.Item.ItemType,
+                            itemList,
+                            logItemMetadata: true,
+                            operation.Item.Location);
+                }
+            }
+
+            lookup.AddNewItemsOfItemType(
+                operation.Item.ItemType,
+                items,
+                doNotAddDuplicates: false,
+                logFunction);
+        }
+
+        private static bool HasUniqueTargetFrameworkIdentities(
+            ICollection<ProjectItemInstance> targetFrameworks)
+        {
+            if (targetFrameworks == null || targetFrameworks.Count < 2)
+            {
+                return true;
+            }
+
+            int outerIndex = 0;
+            foreach (ProjectItemInstance outer in targetFrameworks)
+            {
+                int innerIndex = 0;
+                foreach (ProjectItemInstance inner in targetFrameworks)
+                {
+                    if (innerIndex++ >= outerIndex)
+                    {
+                        break;
+                    }
+
+                    if (MSBuildNameIgnoreCaseComparer.Default.Equals(
+                            outer.EvaluatedInclude,
+                            inner.EvaluatedInclude))
+                    {
+                        return false;
+                    }
+                }
+
+                outerIndex++;
+            }
+
+            return true;
+        }
+
+        private static string GetRoutingPropertyValue(
+            ICompiledExpressionEnvironment environment,
+            string propertyName,
+            IElementLocation location) =>
+            EscapingUtilities.UnescapeAll(
+                FileUtilities.MaybeAdjustFilePath(
+                    environment.GetEscapedPropertyValue(
+                        propertyName,
+                        location)));
+
+        private static NuGetFramework ParseRoutingFramework(
+            CompiledLookupExpressionEnvironment environment,
+            string framework,
+            ProjectItemGroupTaskMetadataInstance metadata)
+        {
+            try
+            {
+                return environment.GetOrParseTargetFramework(framework);
+            }
+            catch (Exception ex)
+                when (!ExceptionHandling.NotExpectedFunctionException(ex))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    metadata.Location,
+                    "InvalidFunctionPropertyExpression",
+                    GetRoutingFunctionBody(metadata),
+                    ex.Message.Replace("\r\n", " "));
+                return null;
+            }
+        }
+
+        private static bool EvaluateRoutingCompatibility(
+            NuGetFramework target,
+            NuGetFramework candidate,
+            ProjectItemGroupTaskMetadataInstance metadata)
+        {
+            try
+            {
+                return DefaultCompatibilityProvider.Instance.IsCompatible(
+                    target,
+                    candidate);
+            }
+            catch (Exception ex)
+                when (!ExceptionHandling.NotExpectedFunctionException(ex))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    metadata.Location,
+                    "InvalidFunctionPropertyExpression",
+                    GetRoutingFunctionBody(metadata),
+                    ex.Message.Replace("\r\n", " "));
+                return false;
+            }
+        }
+
+        private static string GetRoutingFunctionBody(
+            ProjectItemGroupTaskMetadataInstance metadata) =>
+            metadata.Value.Substring(2, metadata.Value.Length - 3);
+#endif
 
         private void ExecuteCompiledItemOperation(
             CompiledItemOperation operation,
@@ -2874,14 +3311,34 @@ namespace Microsoft.Build.BackEnd
             if (ReferenceEquals(lookup, LookupForExecution))
             {
                 return _executionExpressionEnvironment ??=
-                    new CompiledLookupExpressionEnvironment(
+                    CreateExpressionEnvironment(
                         GetConditionExpander(lookup));
             }
 
             return _inferenceExpressionEnvironment ??=
-                new CompiledLookupExpressionEnvironment(
+                CreateExpressionEnvironment(
                     GetConditionExpander(lookup));
         }
+
+        private CompiledLookupExpressionEnvironment
+            CreateExpressionEnvironment(
+                Expander<ProjectPropertyInstance, ProjectItemInstance>
+                    expander)
+        {
+#if NET
+            return new CompiledLookupExpressionEnvironment(
+                expander,
+                GetTargetFrameworkCache());
+#else
+            return new CompiledLookupExpressionEnvironment(expander);
+#endif
+        }
+
+#if NET
+        private CompiledTargetFrameworkCache GetTargetFrameworkCache() =>
+            _targetFrameworkCache ??=
+                new CompiledTargetFrameworkCache();
+#endif
 
         private Expander<ProjectPropertyInstance, ProjectItemInstance>
             CreateExpander(Lookup lookup) =>

@@ -46,6 +46,7 @@ namespace Microsoft.Build.BackEnd
         CompiledPropertyGroup,
         FallbackPropertyGroup,
         CompiledItemGroup,
+        CompiledTargetFrameworkRouting,
         FallbackItemGroup,
         TaskYield,
         TaskReacquire,
