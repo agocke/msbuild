@@ -2916,6 +2916,31 @@ $@"<Project>
         }
 
         [Fact]
+        public void HardenedGraphSwitchReportsAllValidationFailures()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build" DependsOnTargets="First;Second" />
+                  <Target Name="First">
+                    <PropertyGroup>
+                      <Value>$([System.Guid]::NewGuid())</Value>
+                    </PropertyGroup>
+                  </Target>
+                  <Target Name="Second">
+                    <PropertyGroup>
+                      <Value>$([System.IO.File]::ReadAllText('input.txt'))</Value>
+                    </PropertyGroup>
+                  </Target>
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectFailure(projectContents, arguments: "--hardened-graph");
+
+            logContents.ShouldContain("$([System.Guid]::NewGuid)");
+            logContents.ShouldContain("$([System.IO.File]::ReadAllText)");
+        }
+
+        [Fact]
         public void HardenedGraphFalseDoesNotRunValidation()
         {
             string projectContents = """
@@ -2946,17 +2971,19 @@ $@"<Project>
         }
 
         [Fact]
-        public void HardenedGraphSwitchRejectsMultipleNodes()
+        public void HardenedGraphSwitchForcesSingleNode()
         {
             string projectContents = """
                 <Project>
-                  <Target Name="Build" />
+                  <Target Name="Build">
+                    <Message Text="NodeCount=$(MSBuildNodeCount)" />
+                  </Target>
                 </Project>
                 """;
 
-            string logContents = ExecuteMSBuildExeExpectFailure(projectContents, arguments: "--hardened-graph -m:2");
+            string logContents = ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "--hardened-graph -m:2");
 
-            logContents.ShouldContain("MSB1075");
+            logContents.ShouldContain("NodeCount=1");
         }
 
         /// <summary>

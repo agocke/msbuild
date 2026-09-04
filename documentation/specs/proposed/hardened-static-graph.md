@@ -147,7 +147,7 @@ ambient state.
 Excluded functions include:
 
 - `Exists`;
-- `System.IO` APIs;
+- `System.IO` APIs that inspect or mutate the filesystem;
 - `$(registry:...)`;
 - `GetPathOfFileAbove`;
 - `GetDirectoryNameOfFileAbove`;
@@ -155,9 +155,11 @@ Excluded functions include:
 - current date or time APIs;
 - random-number generation.
 
-Pure string and path-string manipulation MAY be allowed. Allowlisting a
-function asserts that its result is determined entirely by its explicit
-arguments.
+Pure string and path-string manipulation MAY be allowed. For example,
+`System.IO.Path.Combine` is pure, while `GetTempPath`, `GetRandomFileName`,
+and relative `GetFullPath` observe ambient state or randomness and are not.
+Allowlisting a function asserts that its result is determined entirely by its
+explicit arguments.
 
 ### G4. Environment variables and global properties
 

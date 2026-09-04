@@ -79,16 +79,17 @@ invocation nodes or an alternate execution plan.
 The first slice proves the central validator: invalid target constructs and
 invalid static/deferred data flow are rejected with actionable errors.
 
-It is invoked directly by unit tests over an already evaluated
-`ProjectInstance` and one explicitly requested target. Task classifications
-are supplied by the test. The slice does not change any existing build path.
+It is invoked over an already evaluated `ProjectInstance` and the requested
+targets. Task classifications are supplied directly until sidecar discovery
+is implemented.
 
 ### Supported validation
 
 The first slice supports:
 
 - one project configuration;
-- one explicitly requested, unbatched target;
+- requested targets and their statically resolved `DependsOnTargets`,
+  `BeforeTargets`, and `AfterTargets` closure;
 - ordered `PropertyGroup`, `ItemGroup`, and task children;
 - property and item expressions needed by the test cases;
 - the graph-construction property-function allowlist in all target-body
@@ -98,15 +99,18 @@ The first slice supports:
 - static and deferred property and item outputs;
 - direct flow of a deferred output into a later non-Pure task parameter;
 - origin tracking for deferred values;
-- errors when deferred values enter static contexts.
+- errors when deferred values enter static contexts;
+- collection and deduplication of independent validation errors across the
+  reachable target closure before execution begins;
+- ordinary target `Returns`, including deferred return values;
+- pure allowlisted `System.IO.Path` operations.
 
 The first slice rejects as not yet supported:
 
 - target and task batching;
-- `DependsOnTargets`, `BeforeTargets`, and `AfterTargets`;
 - `CallTarget` and `MSBuild`;
 - `OnError` and `ContinueOnError`;
-- target `Inputs`, `Outputs`, and `Returns`;
+- target `Inputs` and `Outputs`;
 - sidecar manifest discovery;
 - filesystem and evaluation validation;
 - executing Pure or non-Pure tasks;
@@ -114,6 +118,271 @@ The first slice rejects as not yet supported:
 
 These restrictions bound the first validator. They are not proposed final
 hardened-mode semantics.
+
+## Hello-world failure burn-down plan
+
+### Baseline
+
+A no-restore build of an SDK-style hello-world project with the repository
+bootstrap SDK currently produces 849 unique target-validation diagnostics
+across the requested `Build` closure:
+
+| Code | Count | Meaning |
+| --- | ---: | --- |
+| `MSB4286` | 416 | The validator does not yet model a legal MSBuild construct. |
+| `MSB4287` | 46 | A target expression observes ambient state. |
+| `MSB4288` | 387 | A deferred task output reaches a static context. |
+
+The `MSB4286` failures divide into these implementation areas:
+
+| Construct | Count |
+| --- | ---: |
+| Metadata expressions and batching | 197 |
+| Metadata in in-target `ItemGroup` operations | 130 |
+| Target `Outputs` | 30 |
+| Target `Inputs` | 24 |
+| `ContinueOnError` | 17 |
+| `MSBuild` task | 14 |
+| `CallTarget` task | 3 |
+| `OnError` | 1 |
+
+The `MSB4287` failures are 41 `Exists` calls and five
+`System.IO.Path.GetFullPath` calls. The `MSB4288` failures are not 387
+independent design problems: many are cascades from treating every unannotated
+task as Unaudited. High-fan-out origins include `MSBuild`,
+`ResolvePackageAssets`, `AssignLinkMetadata`, `LocateRepository`,
+`ResolveComReference`, `ResolveAssemblyReference`, `AssignTargetPath`,
+`ResolveTargetingPackAssets`, `AssignCulture`, and `Copy`.
+
+`ResolvePackageAssets` and `ProcessFrameworkReferences` are architectural root
+causes, not merely missing task annotations. Restore currently writes
+`project.assets.json`; later targets test for that file, parse it in
+`ResolvePackageAssets`, and reconstruct the item groups consumed by compilation,
+copying, publishing, and project-reference logic. `ProcessFrameworkReferences`
+also combines configuration lookup, RID traversal, installed-pack probing, and
+generation of additional restore inputs. That pipeline discovers graph inputs
+after evaluation instead of importing the resolved item model directly.
+
+This baseline covers target validation only. Evaluation restrictions, imports,
+environment reads, SDK resolution, and evaluation-time globs are not yet
+represented and will add a separate failure inventory.
+
+### Burn-down rules
+
+- Fix validator blind spots before changing SDK targets merely to satisfy the
+  current prototype.
+- Count unique diagnostics by code, source file, line, column, and message.
+  Console-summary repetition is not a second failure.
+- Preserve the complete inventory, but distinguish root diagnostics from
+  diagnostics blocked by an earlier unsupported construct or unknown task
+  classification.
+- Re-run the same pinned hello-world build after every workstream and record
+  the count by code, construct, source file, target, and producing task.
+- Add a focused positive and negative test before removing each diagnostic
+  class.
+- Do not weaken a normative restriction to reduce the count. When a construct
+  is genuinely incompatible, migrate it to fetch or restructure the target.
+
+### Workstream 1 - Make the inventory causal
+
+The current collector reports every visible failure, but it can emit large
+cascades after losing precise availability information.
+
+1. Give each diagnostic a stable root identifier.
+2. Mark later diagnostics as blocked when their availability depends on an
+   unsupported expression, unknown metadata state, or unresolved task
+   classification.
+3. Keep blocked diagnostics in the machine-readable inventory while making the
+   root count the primary burn-down metric.
+4. Emit a compact end-of-validation summary grouped by code, construct, target,
+   and origin task.
+5. Add an optional output file for the deduplicated inventory so normal console
+   error repetition is not used as the working data set.
+
+Completion requires deterministic ordering and byte-identical inventories for
+repeated builds of the same evaluated project.
+
+### Workstream 2 - Model native metadata and batching
+
+This is the largest direct validator gap: 327 `MSB4286` failures.
+
+1. Reuse `BatchingEngine` and `ExpressionShredder` to identify item vectors,
+   transforms, qualified and unqualified metadata, and batching buckets.
+2. Track item-list membership, item identity, and each metadata value
+   independently as Static, Deferred, or Blocked.
+3. Support metadata assignment, `KeepMetadata`, `RemoveMetadata`,
+   `MatchOnMetadata`, `MatchOnMetadataOptions`, `KeepDuplicates`, `Remove`, and
+   `Update` with ordinary MSBuild evaluation order.
+4. Permit metadata in task parameters and conditions when the selected
+   metadata is static.
+5. Report a stall only when deferred membership or metadata determines a
+   condition, batch partition, item operation, target edge, or Pure-task
+   parameter.
+
+Completion requires eliminating the blanket metadata diagnostics. Any
+remaining metadata error must identify the exact deferred item or metadata
+origin.
+
+### Workstream 3 - Support ordinary control and routing
+
+These constructs account for 35 direct `MSB4286` failures and also create
+deferred cascades.
+
+1. Validate `ContinueOnError` as a static task-control expression. Its presence
+   is not itself illegal.
+2. Add statically named `OnError` targets to the validated closure. Treat
+   `MSBuildLastTaskResult` as execution-derived, so using it to construct later
+   graph structure remains a stall.
+3. Permit `CallTarget` only when its target list is static, and validate the
+   called targets using its existing lookup-isolation semantics.
+4. Treat `MSBuild` as the existing cross-project routing primitive rather than
+   an ordinary Unaudited task. Require `Projects`, target names, global
+   properties, `AdditionalProperties`, and batching inputs to be static.
+5. Reuse `ProjectGraph`, `ProjectInterpretation`, and the project-reference
+   protocol for child configurations; do not create a second project
+   scheduler.
+
+Completion requires the hello-world project-reference and target-framework
+routing targets to validate without special-casing their names.
+
+### Workstream 4 - Replace assets-file ingestion with imported items
+
+This is the first architectural migration. It must precede any attempt to mark
+framework or package resolution tasks Pure. `ProcessFrameworkReferences` and
+`ResolvePackageAssets` are not candidates for Pure annotations in their current
+forms.
+
+1. Make restore/fetch emit fixed, exactly named `.props` and `.targets` files
+   containing the complete resolved item model.
+2. Import those files during the fresh post-restore evaluation. The imported
+   items must cover compile assemblies, runtime assemblies, native assets,
+   resources, analyzers, content, transitive project references, transitive
+   framework references, package folders, app hosts, targeting packs, runtime
+   packs, and package provenance.
+3. Include all metadata currently reconstructed from `project.assets.json`,
+   including target framework, RID, asset role, package identity and version,
+   path, assembly version, file version, copy-local state, and related asset
+   relationships.
+4. Keep `project.assets.json` as an optional diagnostic or compatibility
+   artifact, but remove it as an input to downstream hardened graph
+   construction.
+5. Replace `ResolvePackageAssets` with pure filtering and projection over the
+   imported items. It must not open an assets file or maintain a parsed-assets
+   cache.
+6. Move framework-pack, runtime-pack, workload, and RID discovery into fetch
+   and the pinned SDK/pack index. The build-phase
+   `ProcessFrameworkReferences` residual is a pure lookup over:
+
+   ```text
+   (framework, version, target platform, rid, self-contained, publish modes)
+   ```
+
+7. Remove installed-pack probing, `RuntimeGraphPath` file reads, and generation
+   of new `PackageDownload` or implicit `PackageReference` items from the
+   build-phase `ProcessFrameworkReferences` invocation. Required downloads are
+   outputs of fetch, not discoveries made while constructing the build graph.
+8. Make transitive framework references and project references ordinary
+   imported items rather than outputs reconstructed by
+   `ResolvePackageAssets`.
+9. Remove downstream assets-file readers such as pack and project-reference
+   helper tasks. They consume the imported item groups instead.
+
+Completion requires deleting `ProjectAssetsFile` from the hardened inputs of
+`ResolvePackageAssets`, eliminating its deferred-output fan-out, and making
+`ProcessFrameworkReferences` valid as a Pure task without trusting filesystem
+state.
+
+### Workstream 5 - Resolve and apply task classifications
+
+This workstream turns the 387 `MSB4288` symptoms into a smaller set of real
+stalls.
+
+1. Implement sidecar discovery and assembly-hash binding.
+2. Produce a manifest for MSBuild-shipped tasks and coordinate equivalent
+   manifests for SDK, NuGet, SourceLink, and analyzer tasks.
+3. Classify high-fan-out tasks first, in this order:
+   - pure item and property transforms such as `AssignTargetPath`,
+     `AssignCulture`, `AssignLinkMetadata`, and
+     `AssignProjectConfiguration`;
+   - the residual framework and package projections after Workstream 4 has
+     replaced assets-file ingestion;
+   - Declared-IO producers such as `Copy`, resource generation, and generated
+     source writers;
+   - remaining discovery tasks such as `ResolveAssemblyReference`, whose
+     discovery must move to fetch. Any task that still parses
+     `project.assets.json` is removed under Workstream 4 rather than classified.
+4. Re-run the inventory after each classification group. Do not annotate a
+   task Pure merely because doing so removes downstream errors.
+5. For every remaining `MSB4288`, choose one repair:
+   - make the producer Pure;
+   - move discovery to fetch;
+   - pass the deferred value directly to a non-Pure task;
+   - move item shaping inside the producing task invocation;
+   - reject the project as a genuine stall.
+
+Completion requires every remaining deferred diagnostic to begin at a trusted
+classification and represent an actual graph-construction dependency.
+
+### Workstream 6 - Remove ambient target functions
+
+1. Replace `Exists` used for SDK, pack, or tool discovery with fetched,
+   declared items.
+2. Replace output-existence and timestamp conditions with normal task
+   invocation plus declared inputs and outputs.
+3. Replace optional-file tests with explicit item presence supplied by fetch
+   when the file changes graph structure.
+4. Extend the function parser to distinguish overloads. Permit
+   `Path.GetFullPath(path, basePath)` when both arguments are static, while
+   continuing to reject the overload that reads the process working
+   directory.
+5. Keep the five current `GetFullPath` sites invalid until each supplies an
+   explicit base path or uses another pure path operation.
+
+Completion requires zero `MSB4287` diagnostics in the pinned hello-world
+target closure.
+
+### Workstream 7 - Define hardened target incrementality
+
+The 54 `Inputs` and `Outputs` diagnostics need engine semantics, not mechanical
+deletion from SDK targets.
+
+1. Preserve their ordinary target-batching expressions and validate those
+   expressions using static/deferred availability.
+2. In hardened mode, bypass timestamp-based target skipping in
+   `TargetUpToDateChecker`; ordinary mode remains unchanged.
+3. Preserve `Outputs` as the legacy return value only when `Returns` is absent.
+4. Convert query and project-reference targets that use `Outputs` only for
+   return routing to explicit `Returns`.
+5. Record true incremental targets in a migration ledger for eventual
+   task-invocation input/output hashing. Do not implement cache lookup or
+   replay as part of this burn-down.
+
+Completion requires zero raw-presence errors for `Inputs` or `Outputs` while
+still rejecting deferred values that would determine target batching.
+
+### Workstream 8 - Cross-repository migration and gates
+
+Ownership follows the source of each target:
+
+| Area | Primary responsibility |
+| --- | --- |
+| MSBuild engine | Availability model, batching, control flow, diagnostics, task-manifest binding, and hardened incrementality semantics. |
+| MSBuild targets | `Microsoft.Common.CurrentVersion.targets` migrations and manifests for built-in tasks. |
+| .NET SDK | Framework, package, telemetry, compilation, publish, and project-reference target migrations. |
+| NuGet | Locked restore outputs, pack targets, and declarative asset items. |
+| SourceLink and Roslyn tooling | Repository discovery and analyzer target migrations. |
+
+Land engine support first, then flow it to the SDK and update targets against
+that build. Gate each stage on:
+
+1. the unique root-diagnostic count decreasing or staying constant with an
+   explained reclassification;
+2. no new ordinary-build behavior when hardened mode is off;
+3. single- and multi-targeting hello-world builds;
+4. project-reference, restore, build, publish, and design-time entry points;
+5. Windows, Linux, and macOS;
+6. a final zero-error hello-world target-validation inventory before enabling
+   evaluation validation.
 
 ### Reuse from the interpretation prototype
 
@@ -283,8 +552,8 @@ Validate
 continues to belong to ordinary MSBuild.
 
 The initial implementation accepts `--hardened-graph`,
-`--hardened-graph:true`, and `--hardened-graph:false`. It initially requires a
-single in-process build node so no unversioned field is added to the worker-node
+`--hardened-graph:true`, and `--hardened-graph:false`. It forces a single
+in-process build node so no unversioned field is added to the worker-node
 protocol. Validation runs after the project is loaded and requested targets
 are selected, but before `TargetBuilder` begins ordinary target execution.
 
@@ -472,11 +741,14 @@ new execution engine.
 
 - Run fetch through ordinary MSBuild with hardened validation enabled.
 - Require locked restore with explicit project-local configuration.
-- Emit fixed `.props` and `.targets` containing items only.
+- Emit fixed `.props` and `.targets` containing the complete resolved item
+  model; `project.assets.json` is not a downstream hardened input.
 - Start a fresh evaluation that consumes those files as ordinary source.
 - Validate SDK and pack index generation inputs.
+- Replace `ResolvePackageAssets` parsing with pure projections over imported
+  restore items.
 - Migrate one framework and RID through a Pure
-  `ProcessFrameworkReferences` lookup.
+  `ProcessFrameworkReferences` lookup over the pinned SDK/pack index.
 - Perform package override pruning during graph construction.
 - Supply exact assembly-reference inputs that avoid ambient RAR discovery.
 
@@ -490,7 +762,8 @@ The following areas require separate design before they can be validated
 completely:
 
 - Pure-task concrete outputs used to determine graph topology;
-- `ContinueOnError`, `MSBuildLastTaskResult`, `OnError`, and cancellation;
+- full execution-failure semantics beyond static validation of
+  `ContinueOnError`, `MSBuildLastTaskResult`, `OnError`, and cancellation;
 - content-derived reads for compilers, RAR dependency traversal, and depfile
   producers;
 - directory outputs, declared deletions, and stale-file removal;

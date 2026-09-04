@@ -3,9 +3,11 @@
 
 using System;
 using System.Collections.Generic;
+using Microsoft.Build.BackEnd;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation;
+using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Shared;
 
@@ -22,9 +24,35 @@ internal enum HardenedTaskClassification
 
 internal sealed class HardenedTargetValidator
 {
+    private static readonly HashSet<string> s_purePathMembers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "AltDirectorySeparatorChar",
+        "ChangeExtension",
+        "Combine",
+        "DirectorySeparatorChar",
+        "EndsInDirectorySeparator",
+        "GetDirectoryName",
+        "GetExtension",
+        "GetFileName",
+        "GetFileNameWithoutExtension",
+        "GetInvalidFileNameChars",
+        "GetInvalidPathChars",
+        "GetPathRoot",
+        "GetRelativePath",
+        "HasExtension",
+        "IsPathFullyQualified",
+        "IsPathRooted",
+        "Join",
+        "PathSeparator",
+        "TrimEndingDirectorySeparator",
+        "VolumeSeparatorChar",
+    };
+
     private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
     private readonly Dictionary<string, ValueOrigin> _deferredProperties = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly Dictionary<string, ValueOrigin> _deferredItems = new(MSBuildNameIgnoreCaseComparer.Default);
+    private readonly List<InvalidProjectFileException> _diagnostics = [];
+    private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
 
     internal HardenedTargetValidator(IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
     {
@@ -43,13 +71,35 @@ internal sealed class HardenedTargetValidator
     {
     }
 
-    internal void Validate(ProjectInstance project, string targetName)
+    internal IReadOnlyList<InvalidProjectFileException> Validate(ProjectInstance project, string targetName)
+        => Validate(project, [targetName]);
+
+    internal IReadOnlyList<InvalidProjectFileException> Validate(ProjectInstance project, IEnumerable<string> targetNames)
     {
         ArgumentNullException.ThrowIfNull(project);
-        ArgumentException.ThrowIfNullOrEmpty(targetName);
+        ArgumentNullException.ThrowIfNull(targetNames);
 
         _deferredProperties.Clear();
         _deferredItems.Clear();
+        _diagnostics.Clear();
+        _diagnosticKeys.Clear();
+
+        HashSet<string> visitedTargets = new(MSBuildNameIgnoreCaseComparer.Default);
+        foreach (string targetName in targetNames)
+        {
+            ArgumentException.ThrowIfNullOrEmpty(targetName);
+            ValidateTarget(project, targetName, visitedTargets);
+        }
+
+        return _diagnostics;
+    }
+
+    private void ValidateTarget(ProjectInstance project, string targetName, HashSet<string> visitedTargets)
+    {
+        if (!visitedTargets.Add(targetName))
+        {
+            return;
+        }
 
         if (!project.Targets.TryGetValue(targetName, out ProjectTargetInstance? target))
         {
@@ -58,6 +108,27 @@ internal sealed class HardenedTargetValidator
 
         ValidateUnsupportedTargetConstructs(target);
         ValidateExpression(target.Condition, target.ConditionLocation, $"the condition of target '{target.Name}'", requireStatic: true, isCondition: true);
+        ExpressionValidationResult dependenciesResult = ValidateExpression(
+            target.DependsOnTargets,
+            target.DependsOnTargetsLocation,
+            $"the DependsOnTargets attribute of target '{target.Name}'",
+            requireStatic: true,
+            isCondition: false);
+        ValidateExpression(target.BeforeTargets, target.BeforeTargetsLocation, $"the BeforeTargets attribute of target '{target.Name}'", requireStatic: true, isCondition: false);
+        ValidateExpression(target.AfterTargets, target.AfterTargetsLocation, $"the AfterTargets attribute of target '{target.Name}'", requireStatic: true, isCondition: false);
+
+        if (dependenciesResult.CanEvaluate)
+        {
+            foreach (string dependency in ExpressionShredder.SplitSemiColonSeparatedList(project.ExpandString(target.DependsOnTargets)))
+            {
+                ValidateTarget(project, dependency, visitedTargets);
+            }
+        }
+
+        foreach (TargetSpecification beforeTarget in project.GetTargetsWhichRunBefore(target.Name))
+        {
+            ValidateTarget(project, beforeTarget.TargetName, visitedTargets);
+        }
 
         foreach (ProjectTargetInstanceChild child in target.Children)
         {
@@ -76,24 +147,27 @@ internal sealed class HardenedTargetValidator
                     break;
 
                 default:
-                    ThrowUnsupported(child.Location, child.GetType().Name, $"target '{target.Name}'");
+                    ReportUnsupported(child.Location, child.GetType().Name, $"target '{target.Name}'");
                     break;
             }
         }
+
+        ValidateExpression(target.Returns, target.ReturnsLocation, $"the Returns attribute of target '{target.Name}'", requireStatic: false, isCondition: false);
+
+        foreach (TargetSpecification afterTarget in project.GetTargetsWhichRunAfter(target.Name))
+        {
+            ValidateTarget(project, afterTarget.TargetName, visitedTargets);
+        }
     }
 
-    private static void ValidateUnsupportedTargetConstructs(ProjectTargetInstance target)
+    private void ValidateUnsupportedTargetConstructs(ProjectTargetInstance target)
     {
         RejectNonEmpty(target.Inputs, target.InputsLocation, "the Inputs attribute", target.Name);
         RejectNonEmpty(target.Outputs, target.OutputsLocation, "the Outputs attribute", target.Name);
-        RejectNonEmpty(target.Returns, target.ReturnsLocation, "the Returns attribute", target.Name);
-        RejectNonEmpty(target.DependsOnTargets, target.DependsOnTargetsLocation, "the DependsOnTargets attribute", target.Name);
-        RejectNonEmpty(target.BeforeTargets, target.BeforeTargetsLocation, "the BeforeTargets attribute", target.Name);
-        RejectNonEmpty(target.AfterTargets, target.AfterTargetsLocation, "the AfterTargets attribute", target.Name);
 
         if (target.OnErrorChildren.Count > 0)
         {
-            ThrowUnsupported(target.OnErrorChildren[0].Location, "OnError", $"target '{target.Name}'");
+            ReportUnsupported(target.OnErrorChildren[0].Location, "OnError", $"target '{target.Name}'");
         }
     }
 
@@ -142,12 +216,12 @@ internal sealed class HardenedTargetValidator
         {
             if (item.Metadata.Count > 0)
             {
-                ThrowUnsupported(item.Location, "item metadata in an in-target ItemGroup", $"target '{targetName}'");
+                ReportUnsupported(item.Location, "item metadata in an in-target ItemGroup", $"target '{targetName}'");
             }
 
             if (_deferredItems.TryGetValue(item.ItemType, out ValueOrigin? existingOrigin))
             {
-                ThrowDeferred(item.Location, $"the '{item.ItemType}' item operation", item.ItemType, existingOrigin);
+                ReportDeferred(item.Location, $"the '{item.ItemType}' item operation", item.ItemType, existingOrigin);
             }
 
             ValidateExpression(item.Condition, item.ConditionLocation, $"the condition of item '{item.ItemType}'", requireStatic: true, isCondition: true);
@@ -174,7 +248,7 @@ internal sealed class HardenedTargetValidator
         if (MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget") ||
             MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild"))
         {
-            ThrowUnsupported(task.Location, $"the {task.Name} task", $"target '{targetName}'");
+            ReportUnsupported(task.Location, $"the {task.Name} task", $"target '{targetName}'");
         }
 
         ValidateExpression(
@@ -224,13 +298,13 @@ internal sealed class HardenedTargetValidator
                     break;
 
                 default:
-                    ThrowUnsupported(output.Location, output.GetType().Name, $"target '{targetName}'");
+                    ReportUnsupported(output.Location, output.GetType().Name, $"target '{targetName}'");
                     break;
             }
         }
     }
 
-    private ValueOrigin? ValidateExpression(
+    private ExpressionValidationResult ValidateExpression(
         string? expression,
         IElementLocation? location,
         string context,
@@ -239,16 +313,17 @@ internal sealed class HardenedTargetValidator
     {
         if (expression is null || expression.Length == 0)
         {
-            return null;
+            return new ExpressionValidationResult(null, CanEvaluate: true);
         }
 
         IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
-        ValidateProhibitedFunctions(expression, effectiveLocation, context, isCondition);
+        bool canEvaluate = ValidateProhibitedFunctions(expression, effectiveLocation, context, isCondition);
 
         ItemsAndMetadataPair references = ExpressionShredder.GetReferencedItemNamesAndMetadata([expression]);
         if (references.Metadata is not null)
         {
-            ThrowUnsupported(effectiveLocation, $"metadata expressions in {context}", context);
+            ReportUnsupported(effectiveLocation, $"metadata expressions in {context}", context);
+            canEvaluate = false;
         }
 
         ValueOrigin? origin = FindDeferredProperty(expression);
@@ -265,10 +340,11 @@ internal sealed class HardenedTargetValidator
 
         if (requireStatic && origin is not null)
         {
-            ThrowDeferred(effectiveLocation, context, expression, origin);
+            ReportDeferred(effectiveLocation, context, expression, origin);
+            canEvaluate = false;
         }
 
-        return origin;
+        return new ExpressionValidationResult(origin, canEvaluate);
     }
 
     private ValueOrigin? FindDeferredProperty(string expression)
@@ -301,20 +377,24 @@ internal sealed class HardenedTargetValidator
         return null;
     }
 
-    private static void ValidateProhibitedFunctions(
+    private bool ValidateProhibitedFunctions(
         string expression,
         IElementLocation location,
         string context,
         bool isCondition)
     {
+        bool canEvaluate = true;
+
         if (expression.Contains("$(registry:", StringComparison.OrdinalIgnoreCase))
         {
-            ThrowProhibitedFunction(location, "$(registry:...)", context);
+            ReportProhibitedFunction(location, "$(registry:...)", context);
+            canEvaluate = false;
         }
 
-        if (isCondition && expression.Contains("Exists(", StringComparison.OrdinalIgnoreCase))
+        if (isCondition && ContainsFunctionCall(expression, "Exists"))
         {
-            ThrowProhibitedFunction(location, "Exists", context);
+            ReportProhibitedFunction(location, "Exists", context);
+            canEvaluate = false;
         }
 
         int marker = expression.IndexOf("$([", StringComparison.Ordinal);
@@ -324,17 +404,30 @@ internal sealed class HardenedTargetValidator
             int typeEnd = expression.IndexOf(']', typeStart);
             if (typeEnd < 0)
             {
-                return;
+                break;
             }
 
             ReadOnlySpan<char> typeName = expression.AsSpan(typeStart, typeEnd - typeStart).Trim();
-            int separator = expression.IndexOf("::", typeEnd + 1, StringComparison.Ordinal);
-            if (separator < 0)
+            int separator = typeEnd + 1;
+            while (separator < expression.Length && char.IsWhiteSpace(expression[separator]))
             {
-                return;
+                separator++;
+            }
+
+            if (separator + 1 >= expression.Length ||
+                expression[separator] != ':' ||
+                expression[separator + 1] != ':')
+            {
+                marker = expression.IndexOf("$([", marker + 3, StringComparison.Ordinal);
+                continue;
             }
 
             int memberStart = separator + 2;
+            while (memberStart < expression.Length && char.IsWhiteSpace(expression[memberStart]))
+            {
+                memberStart++;
+            }
+
             int memberEnd = memberStart;
             while (memberEnd < expression.Length)
             {
@@ -350,15 +443,71 @@ internal sealed class HardenedTargetValidator
             ReadOnlySpan<char> memberName = expression.AsSpan(memberStart, memberEnd - memberStart);
             if (IsProhibitedFunction(typeName, memberName))
             {
-                ThrowProhibitedFunction(location, $"$([{typeName.ToString()}]::{memberName.ToString()})", context);
+                ReportProhibitedFunction(location, $"$([{typeName.ToString()}]::{memberName.ToString()})", context);
+                canEvaluate = false;
             }
 
-            marker = expression.IndexOf("$([", typeEnd + 1, StringComparison.Ordinal);
+            marker = expression.IndexOf("$([", marker + 3, StringComparison.Ordinal);
         }
+
+        return canEvaluate;
     }
+
+    private static bool ContainsFunctionCall(string expression, string functionName)
+    {
+        bool inQuote = false;
+        char quote = '\0';
+
+        for (int index = 0; index <= expression.Length - functionName.Length; index++)
+        {
+            char character = expression[index];
+            if (character is '\'' or '"' or '`')
+            {
+                if (inQuote && character == quote)
+                {
+                    inQuote = false;
+                }
+                else if (!inQuote)
+                {
+                    inQuote = true;
+                    quote = character;
+                }
+
+                continue;
+            }
+
+            if (inQuote ||
+                !expression.AsSpan(index).StartsWith(functionName, StringComparison.OrdinalIgnoreCase) ||
+                (index > 0 && IsIdentifierCharacter(expression[index - 1])))
+            {
+                continue;
+            }
+
+            int openParenthesis = index + functionName.Length;
+            while (openParenthesis < expression.Length && char.IsWhiteSpace(expression[openParenthesis]))
+            {
+                openParenthesis++;
+            }
+
+            if (openParenthesis < expression.Length && expression[openParenthesis] == '(')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsIdentifierCharacter(char character)
+        => char.IsLetterOrDigit(character) || character == '_';
 
     private static bool IsProhibitedFunction(ReadOnlySpan<char> typeName, ReadOnlySpan<char> memberName)
     {
+        if (typeName.Equals("System.IO.Path", StringComparison.OrdinalIgnoreCase))
+        {
+            return !s_purePathMembers.Contains(memberName.ToString());
+        }
+
         if (typeName.StartsWith("System.IO", StringComparison.OrdinalIgnoreCase) ||
             typeName.StartsWith("System.Net", StringComparison.OrdinalIgnoreCase) ||
             typeName.Equals("System.Environment", StringComparison.OrdinalIgnoreCase) ||
@@ -432,35 +581,59 @@ internal sealed class HardenedTargetValidator
             _ => output.GetType().Name,
         };
 
-    private static void RejectNonEmpty(string? value, IElementLocation? location, string construct, string targetName)
+    private void RejectNonEmpty(string? value, IElementLocation? location, string construct, string targetName)
     {
         if (!string.IsNullOrEmpty(value))
         {
-            ThrowUnsupported(location ?? ElementLocation.EmptyLocation, construct, $"target '{targetName}'");
+            ReportUnsupported(location ?? ElementLocation.EmptyLocation, construct, $"target '{targetName}'");
         }
     }
 
-    private static void ThrowUnsupported(IElementLocation location, string construct, string context)
-        => ProjectFileErrorUtilities.ThrowInvalidProjectFile(
-            new BuildEventFileInfo(location),
-            "HardenedGraphUnsupportedConstruct",
-            construct,
-            context);
+    private void ReportUnsupported(IElementLocation location, string construct, string context)
+        => AddDiagnostic(
+            () => ProjectFileErrorUtilities.ThrowInvalidProjectFile(
+                new BuildEventFileInfo(location),
+                "HardenedGraphUnsupportedConstruct",
+                construct,
+                context));
 
-    private static void ThrowProhibitedFunction(IElementLocation location, string function, string context)
-        => ProjectFileErrorUtilities.ThrowInvalidProjectFile(
-            new BuildEventFileInfo(location),
-            "HardenedGraphProhibitedFunction",
-            function,
-            context);
+    private void ReportProhibitedFunction(IElementLocation location, string function, string context)
+        => AddDiagnostic(
+            () => ProjectFileErrorUtilities.ThrowInvalidProjectFile(
+                new BuildEventFileInfo(location),
+                "HardenedGraphProhibitedFunction",
+                function,
+                context));
 
-    private static void ThrowDeferred(IElementLocation location, string context, string expression, ValueOrigin origin)
-        => ProjectFileErrorUtilities.ThrowInvalidProjectFile(
-            new BuildEventFileInfo(location),
-            "HardenedGraphDeferredValueInStaticContext",
-            context,
-            expression,
-            origin.ToString());
+    private void ReportDeferred(IElementLocation location, string context, string expression, ValueOrigin origin)
+        => AddDiagnostic(
+            () => ProjectFileErrorUtilities.ThrowInvalidProjectFile(
+                new BuildEventFileInfo(location),
+                "HardenedGraphDeferredValueInStaticContext",
+                context,
+                expression,
+                origin.ToString()));
+
+    private void AddDiagnostic(Action throwDiagnostic)
+    {
+        try
+        {
+            throwDiagnostic();
+        }
+        catch (InvalidProjectFileException exception)
+        {
+            string key = $"{exception.ErrorCode}\0{exception.ProjectFile}\0{exception.LineNumber}\0{exception.ColumnNumber}\0{exception.Message}";
+            if (_diagnosticKeys.Add(key))
+            {
+                _diagnostics.Add(exception);
+            }
+        }
+    }
+
+    private readonly record struct ExpressionValidationResult(ValueOrigin? Origin, bool CanEvaluate)
+    {
+        public static implicit operator ValueOrigin?(ExpressionValidationResult result) => result.Origin;
+    }
 
     private sealed class ValueOrigin(string description, ValueOrigin? previous = null)
     {

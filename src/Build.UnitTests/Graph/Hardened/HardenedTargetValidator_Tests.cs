@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Graph.Hardened;
@@ -64,6 +65,171 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             new Dictionary<string, HardenedTaskClassification>());
 
         exception.ErrorCode.ShouldBe("MSB4286");
+    }
+
+    [Fact]
+    public void ValidatesDependsOnTargetsClosure()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <PropertyGroup>
+                <BuildDependsOn>Prepare;Compile</BuildDependsOn>
+              </PropertyGroup>
+              <Target Name="Build" DependsOnTargets="$(BuildDependsOn)" Returns="@(Output)" />
+              <Target Name="Prepare" />
+              <Target Name="Compile">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4287");
+    }
+
+    [Fact]
+    public void ValidatesBeforeAndAfterTargets()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build" />
+              <Target Name="BeforeBuild" BeforeTargets="Build" />
+              <Target Name="AfterBuild" AfterTargets="Build">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4287");
+    }
+
+    [Fact]
+    public void AllowsReturns()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build" Returns="@(Output)">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Output" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Theory]
+    [InlineData("$([System.IO.Path]::Combine('a', 'b'))")]
+    [InlineData("$([System.IO.Path]::GetFileName('a/b.txt'))")]
+    public void AllowsPurePathFunctions(string expression)
+    {
+        ValidateSuccess(
+            $"""
+            <Project>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Value>{expression}</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Theory]
+    [InlineData("$([System.IO.Path]::GetTempPath())")]
+    [InlineData("$([System.IO.Path]::GetRandomFileName())")]
+    [InlineData("$([System.IO.Path]::GetFullPath('relative'))")]
+    public void RejectsAmbientPathFunctions(string expression)
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            $"""
+            <Project>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Value>{expression}</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4287");
+    }
+
+    [Fact]
+    public void DoesNotTreatFunctionNameSubstringAsExists()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build" Condition="'FileExists(value)' != ''" />
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Fact]
+    public void CollectsAllIndependentDiagnostics()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="First;Second" />
+              <Target Name="First">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+              <Target Name="Second" Inputs="input.txt" Outputs="output.txt">
+                <PropertyGroup>
+                  <Value>$([System.IO.File]::ReadAllText('input.txt'))</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """);
+
+        HardenedTargetValidator validator = new();
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
+
+        diagnostics.Count.ShouldBe(4);
+        diagnostics.Count(diagnostic => diagnostic.ErrorCode == "MSB4286").ShouldBe(2);
+        diagnostics.Count(diagnostic => diagnostic.ErrorCode == "MSB4287").ShouldBe(2);
+    }
+
+    [Fact]
+    public void DoesNotEvaluateProhibitedTargetEdgeExpression()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build"
+                      DependsOnTargets="$([System.IO.File]::ReadAllText('does-not-exist.txt'))" />
+            </Project>
+            """);
+
+        HardenedTargetValidator validator = new();
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4287");
     }
 
     [Fact]
@@ -165,7 +331,7 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
         ProjectInstance project = CreateProjectInstance(environment, projectXml);
         HardenedTargetValidator validator = new(taskClassifications);
 
-        validator.Validate(project, "Build");
+        validator.Validate(project, "Build").ShouldBeEmpty();
     }
 
     private InvalidProjectFileException ValidateFailure(
@@ -176,7 +342,9 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
         ProjectInstance project = CreateProjectInstance(environment, projectXml);
         HardenedTargetValidator validator = new(taskClassifications);
 
-        return Should.Throw<InvalidProjectFileException>(() => validator.Validate(project, "Build"));
+        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
+        diagnostics.ShouldNotBeEmpty();
+        return diagnostics[0];
     }
 
     private static ProjectInstance CreateProjectInstance(TestEnvironment environment, string projectXml)

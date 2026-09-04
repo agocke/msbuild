@@ -1240,9 +1240,17 @@ namespace Microsoft.Build.BackEnd
                 if (_componentHost.BuildParameters.HardenedGraphValidation)
                 {
                     HardenedTargetValidator validator = new();
-                    for (int i = 0; i < allTargets.Length; i++)
+                    IReadOnlyList<InvalidProjectFileException> diagnostics =
+                        validator.Validate(_requestEntry.RequestConfiguration.Project, allTargets.Select(target => target.name));
+
+                    if (diagnostics.Count > 0)
                     {
-                        validator.Validate(_requestEntry.RequestConfiguration.Project, allTargets[i].name);
+                        foreach (InvalidProjectFileException diagnostic in diagnostics)
+                        {
+                            _projectLoggingContext.LogInvalidProjectFileError(diagnostic);
+                        }
+
+                        throw diagnostics[0];
                     }
                 }
 

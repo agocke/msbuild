@@ -1508,11 +1508,11 @@
     </comment>
   </data>
   <data name="HardenedGraphRequiresSingleNode" xml:space="preserve">
-    <value>MSBUILD : error MSB1075: The --hardened-graph switch currently requires a single in-process build node. Remove the -maxCpuCount switch and ensure that the in-process node is enabled.</value>
+    <value>MSBUILD : error MSB1075: The --hardened-graph switch requires the in-process build node, but it is disabled. Enable the in-process node and try again.</value>
     <comment>
       {StrBegin="MSBUILD : error MSB1075: "}
-      UE: This message is shown when --hardened-graph is combined with multiple or out-of-process build nodes.
-      LOCALIZATION: The switch names "--hardened-graph" and "-maxCpuCount" should not be localized.
+      UE: This message is shown when --hardened-graph is used while the in-process build node is disabled.
+      LOCALIZATION: The switch name "--hardened-graph" should not be localized.
       LOCALIZATION: The prefix "MSBUILD : error MSB1075:" should not be localized.
     </comment>
   </data>

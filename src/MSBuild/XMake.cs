@@ -2694,9 +2694,15 @@ namespace Microsoft.Build.CommandLine
                         hardenedGraph = ProcessBooleanSwitch(commandLineSwitches[CommandLineSwitches.ParameterizedSwitch.HardenedGraph], defaultValue: true, resourceName: "InvalidHardenedGraphValue");
                     }
 
-                    if (hardenedGraph && (cpuCount != 1 || Traits.Instance.InProcNodeDisabled))
+                    if (hardenedGraph)
                     {
-                        CommandLineSwitchException.Throw("HardenedGraphRequiresSingleNode", "--hardened-graph");
+                        if (Traits.Instance.InProcNodeDisabled)
+                        {
+                            CommandLineSwitchException.Throw("HardenedGraphRequiresSingleNode", "--hardened-graph");
+                        }
+
+                        cpuCount = 1;
+                        multiThreaded = false;
                     }
 
                     if (commandLineSwitches.IsParameterizedSwitchSet(CommandLineSwitches.ParameterizedSwitch.IsolateProjects))
