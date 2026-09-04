@@ -1353,6 +1353,22 @@
     <value>MSB4285: A logger could not be created from its assembly and class name because loading loggers by reflection is not supported in this trimmed or Native AOT host. Provide the logger to the engine as a constructed ILogger instance, or build with a JIT-based MSBuild.</value>
     <comment>{StrBegin="MSB4285: "}</comment>
   </data>
+  <data name="HardenedGraphUnsupportedConstruct" xml:space="preserve">
+    <value>MSB4286: Hardened static graph validation does not yet support {0} in {1}. Rewrite it using supported static constructs before enabling hardened validation.</value>
+    <comment>{StrBegin="MSB4286: "}{0} is the unsupported MSBuild construct. {1} describes the context containing it.</comment>
+  </data>
+  <data name="HardenedGraphProhibitedFunction" xml:space="preserve">
+    <value>MSB4287: Hardened static graph validation prohibits the property function "{0}" in {1} because it may observe ambient state. Replace it with a pure expression over declared properties and items, or move the discovery operation to fetch.</value>
+    <comment>{StrBegin="MSB4287: "}{0} is the untranslatable property-function expression. {1} describes the MSBuild context containing it. The terms "property", "item", and "fetch" are MSBuild feature names.</comment>
+  </data>
+  <data name="HardenedGraphDeferredValueInStaticContext" xml:space="preserve">
+    <value>MSB4288: Hardened static graph validation requires {0} to be static, but the expression "{1}" depends on the deferred value {2}. Move the discovery operation to fetch, or pass the deferred value directly to a non-Pure task.</value>
+    <comment>{StrBegin="MSB4288: "}{0} describes the static MSBuild context. {1} is the expression. {2} is the dependency chain from the task output. The terms "static", "deferred", "fetch", and "Pure" are hardened static graph feature names.</comment>
+  </data>
+  <data name="HardenedGraphMissingTaskClassification" xml:space="preserve">
+    <value>MSB4289: Hardened static graph validation cannot classify task "{0}" in target "{1}". Provide a trusted task annotation before enabling hardened validation.</value>
+    <comment>{StrBegin="MSB4289: "}{0} is the task name. {1} is the target name.</comment>
+  </data>
   <data name="CouldNotLoadSdkResolver" xml:space="preserve">
     <value>MSB4237: The SDK resolver type "{0}" failed to load. {1}</value>
     <comment>{StrBegin="MSB4237: "}</comment>

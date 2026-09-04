@@ -577,6 +577,26 @@
         <target state="translated">MSB3094: "{2}" verweist auf {0} Element(e), und "{3}" verweist auf {1} Element(e). Die Anzahl von Elementen muss identisch sein.</target>
         <note>{StrBegin="MSB3094: "}</note>
       </trans-unit>
+      <trans-unit id="HardenedGraphDeferredValueInStaticContext">
+        <source>MSB4288: Hardened static graph validation requires {0} to be static, but the expression "{1}" depends on the deferred value {2}. Move the discovery operation to fetch, or pass the deferred value directly to a non-Pure task.</source>
+        <target state="new">MSB4288: Hardened static graph validation requires {0} to be static, but the expression "{1}" depends on the deferred value {2}. Move the discovery operation to fetch, or pass the deferred value directly to a non-Pure task.</target>
+        <note>{StrBegin="MSB4288: "}{0} describes the static MSBuild context. {1} is the expression. {2} is the dependency chain from the task output. The terms "static", "deferred", "fetch", and "Pure" are hardened static graph feature names.</note>
+      </trans-unit>
+      <trans-unit id="HardenedGraphMissingTaskClassification">
+        <source>MSB4289: Hardened static graph validation cannot classify task "{0}" in target "{1}". Provide a trusted task annotation before enabling hardened validation.</source>
+        <target state="new">MSB4289: Hardened static graph validation cannot classify task "{0}" in target "{1}". Provide a trusted task annotation before enabling hardened validation.</target>
+        <note>{StrBegin="MSB4289: "}{0} is the task name. {1} is the target name.</note>
+      </trans-unit>
+      <trans-unit id="HardenedGraphProhibitedFunction">
+        <source>MSB4287: Hardened static graph validation prohibits the property function "{0}" in {1} because it may observe ambient state. Replace it with a pure expression over declared properties and items, or move the discovery operation to fetch.</source>
+        <target state="new">MSB4287: Hardened static graph validation prohibits the property function "{0}" in {1} because it may observe ambient state. Replace it with a pure expression over declared properties and items, or move the discovery operation to fetch.</target>
+        <note>{StrBegin="MSB4287: "}{0} is the untranslatable property-function expression. {1} describes the MSBuild context containing it. The terms "property", "item", and "fetch" are MSBuild feature names.</note>
+      </trans-unit>
+      <trans-unit id="HardenedGraphUnsupportedConstruct">
+        <source>MSB4286: Hardened static graph validation does not yet support {0} in {1}. Rewrite it using supported static constructs before enabling hardened validation.</source>
+        <target state="new">MSB4286: Hardened static graph validation does not yet support {0} in {1}. Rewrite it using supported static constructs before enabling hardened validation.</target>
+        <note>{StrBegin="MSB4286: "}{0} is the unsupported MSBuild construct. {1} describes the context containing it.</note>
+      </trans-unit>
       <trans-unit id="HostObjectFailure">
         <source>The task "{0}" failed to acquire its host object. {1} Contact the author of the task to report this problem.</source>
         <target state="translated">Die Aufgabe „{0}“ konnte ihr Hostobjekt nicht abrufen. {1} Wenden Sie sich an die Person, die die Aufgabe erstellt hat, um dieses Problem zu melden.</target>
