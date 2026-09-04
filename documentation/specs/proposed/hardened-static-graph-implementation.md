@@ -58,6 +58,8 @@ reads, missing-path queries, or glob enumerations affected evaluation.
 Target validation walks the targets selected by the ordinary MSBuild target
 scheduler before non-Pure tasks execute. It checks:
 
+- the graph-construction property-function allowlist in every target-body
+  expression, including `PropertyGroup` values and conditions;
 - statically resolvable target edges and batching;
 - supported target-body constructs;
 - task classification;
@@ -89,6 +91,8 @@ The first slice supports:
 - one explicitly requested, unbatched target;
 - ordered `PropertyGroup`, `ItemGroup`, and task children;
 - property and item expressions needed by the test cases;
+- the graph-construction property-function allowlist in all target-body
+  conditions and values;
 - unbatched task invocations;
 - Pure, Declared-IO, and Unaudited classifications supplied by the test;
 - static and deferred property and item outputs;
@@ -177,23 +181,26 @@ loading is a later milestone.
 3. Reject unsupported target attributes and child element types at their
    source locations.
 4. Visit `ProjectTargetInstance.Children` in source order.
-5. For a `PropertyGroup` or `ItemGroup`, determine the availability of every
+5. Validate every function used by a target-body condition or value against
+   the graph-construction property-function allowlist. This includes functions
+   used in `PropertyGroup` assignments.
+6. For a `PropertyGroup` or `ItemGroup`, determine the availability of every
    expression it reads and propagate that availability to its assignments.
-6. Require static values for conditions, names, item membership operations,
+7. Require static values for conditions, names, item membership operations,
    transforms, batching expressions, and other graph-construction positions.
-7. For a task element, determine the availability of its condition,
+8. For a task element, determine the availability of its condition,
    parameters, batching expressions, and output destinations.
-8. Require every Pure-task parameter to be static.
-9. Classify Pure-task outputs as values that would be static during full graph
+9. Require every Pure-task parameter to be static.
+10. Classify Pure-task outputs as values that would be static during full graph
    construction, and Declared-IO or Unaudited task outputs as deferred. The
    first slice validates availability only and does not execute the task to
    obtain a concrete output value.
-10. Permit deferred parameters on Declared-IO and Unaudited task invocations
+11. Permit deferred parameters on Declared-IO and Unaudited task invocations
     when the parameter itself is not needed to determine graph structure.
-11. When a static context reads a deferred value, report an error containing
+12. When a static context reads a deferred value, report an error containing
     the producing task and output, intermediate assignments, consuming
     element, and the reason that context requires a static value.
-12. Complete without producing an execution graph or changing normal MSBuild
+13. Complete without producing an execution graph or changing normal MSBuild
     state.
 
 The validator must not use `Lookup` as its sole state. `Lookup` stores concrete
@@ -215,6 +222,7 @@ The initial errors should distinguish:
 
 - unsupported target attribute or child element;
 - unsupported target or task batching;
+- disallowed property function in a target-body expression;
 - missing task classification;
 - deferred task condition;
 - deferred Pure-task parameter;
@@ -246,7 +254,9 @@ Required scenarios:
 9. A deferred value used to determine item membership or batching is rejected.
 10. The error contains the complete origin chain and source locations.
 11. Unsupported target constructs fail rather than being ignored.
-12. Validation does not execute any test task or mutate the
+12. A disallowed property function in an in-target `PropertyGroup` value or
+    condition is rejected.
+13. Validation does not execute any test task or mutate the
     `ProjectInstance`.
 
 ### Completion criteria
@@ -372,6 +382,8 @@ ordering before any non-Pure task invocation executes.
 - Validate target conditions and `DependsOnTargets`.
 - Add target and task batching validation using the existing batching rules.
 - Support ordered `PropertyGroup` and `ItemGroup` operations.
+- Apply the graph-construction property-function allowlist to every
+  target-body expression, including `PropertyGroup` values and conditions.
 - Validate `BeforeTargets`, `AfterTargets`, `CallTarget`, failure paths, and
   output mappings.
 - Preserve origin chains across property assignment, item transforms,
