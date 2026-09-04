@@ -25,6 +25,222 @@ migrate restore, SDK resolution, project references, RAR, or compilation.
 - Result lookup, storage, transfer, replay, and eviction are outside the
   initial implementation.
 
+## First implementation slice
+
+### Purpose
+
+The first implementation proves execution graph construction as a distinct
+phase. It does not attempt to expose the feature through the command line or
+execute the resulting graph.
+
+It accepts an already evaluated `ProjectInstance` and one explicitly requested
+target. It partially evaluates that target body, classifies each task
+invocation, and produces an in-memory execution graph.
+
+### Scope
+
+The first slice supports:
+
+- one project configuration;
+- one explicitly requested target;
+- an unbatched target;
+- ordered `PropertyGroup`, `ItemGroup`, and task children;
+- task conditions and parameter expressions;
+- unbatched task invocations;
+- Pure, Declared-IO, and Unaudited classification supplied directly by the
+  test;
+- static and deferred property and item outputs;
+- a deferred output passed directly to a later non-Pure task invocation;
+- a stall when a deferred property or item is used in a static context.
+
+The first slice rejects:
+
+- target and task batching;
+- `BeforeTargets` and `AfterTargets`;
+- `CallTarget` and `MSBuild`;
+- `OnError` and `ContinueOnError`;
+- target `Inputs`, `Outputs`, and `Returns`;
+- sidecar manifest discovery;
+- graph input recording and filesystem restrictions;
+- executing the completed graph;
+- result caching.
+
+These restrictions bound the prototype. They are not proposed hardened-mode
+semantics.
+
+### Reuse the existing interpretation IR
+
+The `msbuild-pure-eval` prototype already contains the source-only IR needed
+for this slice:
+
+- `CompiledExpressionProgram.cs` lowers property expressions, item vectors,
+  conditions, target lists, and task parameter expressions;
+- the source-program portion of `CompiledActionGraph.cs` lowers
+  `ProjectTargetInstance.Children` into ordered target operations;
+- `EvaluationModule.cs` provides stable source operation identities and
+  reusable lowered evaluation operations.
+
+Port only the source-derived representation and expression programs. Do not
+bring over:
+
+- `FastTaskAction`;
+- task type or task-factory binding;
+- direct reflective getters and setters;
+- execution instrumentation;
+- fallback execution;
+- runtime fast-path eligibility rules.
+
+Rename the imported concepts around task invocations rather than actions.
+The source IR should remain independent of a loaded task type and reusable by
+both execution graph construction and later optimized execution.
+
+### Proposed model
+
+Add an internal area under:
+
+```text
+src/Build/Graph/Hardened/
+```
+
+with an initial model similar to:
+
+```text
+ExecutionGraphConstructor
+HardenedExecutionGraph
+TargetConstructionProgram
+TaskInvocationProgram
+TaskInvocationNode
+GraphProperty
+GraphItemList
+ValueAvailability
+ValueOrigin
+```
+
+`GraphProperty` stores a static value or a deferred origin.
+
+`GraphItemList` stores static or deferred membership. Metadata availability is
+tracked independently for static items.
+
+`ValueOrigin` identifies the producing task invocation and output parameter.
+It is also the edge between producer and consumer invocations.
+
+`TaskInvocationNode` records:
+
+- source location and task name;
+- Pure, Declared-IO, or Unaudited classification;
+- static and deferred parameter expressions;
+- declared read and write expressions for Declared-IO tasks;
+- output property and item destinations;
+- predecessor task invocations.
+
+The initial classifier is an in-memory table supplied by tests. Sidecar loading
+is a later integration step.
+
+### Construction algorithm
+
+1. Create static property and item state from
+   `ProjectInstance.PropertiesToBuildWith` and
+   `ProjectInstance.ItemsToBuildWith`.
+2. Locate the explicitly requested `ProjectTargetInstance`.
+3. Reject target batching, target `Inputs`, `Outputs`, `Returns`,
+   `BeforeTargets`, `AfterTargets`, and `OnError`.
+4. Evaluate the target condition from static state.
+5. Visit `ProjectTargetInstance.Children` in source order.
+6. For a `ProjectPropertyGroupTaskInstance` or
+   `ProjectItemGroupTaskInstance`, evaluate it only when every value required
+   by its condition, names, membership, and transforms is static.
+7. For a `ProjectTaskInstance`, compile its condition, batching inputs,
+   parameters, and output mappings through the reused source IR.
+8. Reject metadata batching in the first slice. The task element therefore
+   produces exactly one task invocation.
+9. Classify that invocation from the test-supplied table.
+10. For a Pure invocation, require static parameters and invoke the
+    test-supplied Pure-task evaluator. Store its property and item outputs as
+    static.
+11. For a Declared-IO or Unaudited invocation, add a
+    `TaskInvocationNode`. Store each property and item output as deferred and
+    record its `ValueOrigin`.
+12. When a later non-Pure task parameter reads a deferred value, add an edge
+    from the producing invocation and preserve the deferred expression.
+13. When a static context reads a deferred value, stop with a diagnostic that
+    includes the producer, output, intermediate assignments, consumer, and
+    required static context.
+14. Return the completed in-memory execution graph.
+
+The first slice should not use `Lookup` as the sole graph state because
+`Lookup` can represent only concrete `ProjectPropertyInstance` and
+`ProjectItemInstance` values. The graph state may use `Lookup` for its static
+base, but deferred properties, item membership, and metadata require a
+separate representation.
+
+### Engine integration boundaries
+
+The first slice is invoked directly by unit tests. It does not change
+`TargetBuilder`, `TargetEntry`, `TaskBuilder`, `BuildManager`, or
+`BuildParameters`.
+
+The next integration step should reuse two existing seams:
+
+- `TargetBuilder.ProcessTargetStack` and `TargetEntry.GetDependencies` for
+  final target ordering;
+- `ITaskBuilder` for processing each task element after target batching.
+
+Do not duplicate the final `DependsOnTargets`, `BeforeTargets`, and
+`AfterTargets` scheduler. The test-only constructor may support one target,
+but production integration must factor or invoke the existing ordering code.
+
+### Tests
+
+Add focused tests under:
+
+```text
+src/Build.UnitTests/Graph/Hardened/
+```
+
+The first test project should contain:
+
+```xml
+<Target Name="Build">
+  <PropertyGroup>
+    <Prefix>obj/</Prefix>
+  </PropertyGroup>
+
+  <PureConcat Left="$(Prefix)" Right="generated.cs">
+    <Output TaskParameter="Result" PropertyName="OutputPath" />
+  </PureConcat>
+
+  <DeclaredGenerate OutputPath="$(OutputPath)">
+    <Output TaskParameter="GeneratedFiles" ItemName="Generated" />
+  </DeclaredGenerate>
+
+  <DeclaredCompile Sources="@(Generated)" />
+</Target>
+```
+
+Required tests:
+
+1. Pure output becomes a static property.
+2. Declared-IO property output becomes deferred.
+3. Declared-IO item output becomes a deferred item list.
+4. A deferred item list passed to a later Declared-IO task creates an
+   invocation dependency.
+5. A deferred property in a target or task condition produces a stall.
+6. A deferred property passed to a Pure task produces a stall.
+7. An Unaudited invocation marks the graph as not fully cacheable.
+8. Child ordering matches `ProjectTargetInstance.Children`.
+9. Unsupported batching and target constructs fail explicitly.
+
+### Completion criteria
+
+The first slice is complete when:
+
+- the same project always produces the same execution graph;
+- Pure invocations affect later static construction state;
+- non-Pure invocations produce deferred values without executing;
+- deferred values flow directly between non-Pure task invocations;
+- static contexts reject deferred values with a complete dependency chain;
+- no existing build path changes when the constructor is unused.
+
 ## Repository ownership
 
 ### MSBuild
