@@ -228,6 +228,8 @@ namespace Microsoft.Build.Execution
         /// </summary>
         private bool _multiThreaded;
 
+        private bool _hardenedGraphValidation;
+
         private ProjectIsolationMode _projectIsolationMode;
 
         private string[] _inputResultsCacheFiles;
@@ -326,6 +328,7 @@ namespace Microsoft.Build.Execution
             WarningsAsMessages = other.WarningsAsMessages == null ? null : new HashSet<string>(other.WarningsAsMessages, StringComparer.OrdinalIgnoreCase);
             _projectLoadSettings = other._projectLoadSettings;
             _interactive = other._interactive;
+            _hardenedGraphValidation = other._hardenedGraphValidation;
             _projectIsolationMode = other.ProjectIsolationMode;
             _inputResultsCacheFiles = other._inputResultsCacheFiles;
             _outputResultsCacheFile = other._outputResultsCacheFile;
@@ -865,6 +868,15 @@ namespace Microsoft.Build.Execution
         /// Gets or sets a value indicating the isolation mode to use.
         /// </summary>
         public ProjectIsolationMode ProjectIsolationMode { get => _projectIsolationMode; set => _projectIsolationMode = value; }
+
+        /// <summary>
+        /// Gets or sets whether hardened static graph validation is enabled.
+        /// </summary>
+        public bool HardenedGraphValidation
+        {
+            get => _hardenedGraphValidation;
+            set => _hardenedGraphValidation = value;
+        }
 
         /// <summary>
         /// Input cache files that MSBuild will use to read build results from.

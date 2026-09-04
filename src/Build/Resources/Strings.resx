@@ -1365,10 +1365,6 @@
     <value>MSB4288: Hardened static graph validation requires {0} to be static, but the expression "{1}" depends on the deferred value {2}. Move the discovery operation to fetch, or pass the deferred value directly to a non-Pure task.</value>
     <comment>{StrBegin="MSB4288: "}{0} describes the static MSBuild context. {1} is the expression. {2} is the dependency chain from the task output. The terms "static", "deferred", "fetch", and "Pure" are hardened static graph feature names.</comment>
   </data>
-  <data name="HardenedGraphMissingTaskClassification" xml:space="preserve">
-    <value>MSB4289: Hardened static graph validation cannot classify task "{0}" in target "{1}". Provide a trusted task annotation before enabling hardened validation.</value>
-    <comment>{StrBegin="MSB4289: "}{0} is the task name. {1} is the target name.</comment>
-  </data>
   <data name="CouldNotLoadSdkResolver" xml:space="preserve">
     <value>MSB4237: The SDK resolver type "{0}" failed to load. {1}</value>
     <comment>{StrBegin="MSB4237: "}</comment>

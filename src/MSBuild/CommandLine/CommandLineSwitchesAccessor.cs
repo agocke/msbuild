@@ -124,6 +124,8 @@ namespace Microsoft.Build.CommandLine.Experimental
 
         public string[]? Interactive => GetParameterizedSwitchValue(ParameterizedSwitch.Interactive);
 
+        public string[]? HardenedGraph => GetParameterizedSwitchValue(ParameterizedSwitch.HardenedGraph);
+
         public string[]? IsolateProjects => GetParameterizedSwitchValue(ParameterizedSwitch.IsolateProjects);
 
         public string[]? GraphBuild => GetParameterizedSwitchValue(ParameterizedSwitch.GraphBuild);

@@ -269,7 +269,7 @@ supported valid cases, and leave ordinary MSBuild execution untouched.
 
 ### Goal
 
-Add an experimental hardened validation mode with no behavior change when it
+Add an experimental `--hardened-graph` switch with no behavior change when it
 is disabled.
 
 Use an internal two-state mode:
@@ -281,6 +281,12 @@ Validate
 
 `Off` is the unconditional default. Do not add an `Execute` mode: execution
 continues to belong to ordinary MSBuild.
+
+The initial implementation accepts `--hardened-graph`,
+`--hardened-graph:true`, and `--hardened-graph:false`. It initially requires a
+single in-process build node so no unversioned field is added to the worker-node
+protocol. Validation runs after the project is loaded and requested targets
+are selected, but before `TargetBuilder` begins ordinary target execution.
 
 The initial command-line surface may be experimental. A public
 `BuildParameters` API should wait until the contract is stable.

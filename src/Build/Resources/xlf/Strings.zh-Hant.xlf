@@ -582,11 +582,6 @@
         <target state="new">MSB4288: Hardened static graph validation requires {0} to be static, but the expression "{1}" depends on the deferred value {2}. Move the discovery operation to fetch, or pass the deferred value directly to a non-Pure task.</target>
         <note>{StrBegin="MSB4288: "}{0} describes the static MSBuild context. {1} is the expression. {2} is the dependency chain from the task output. The terms "static", "deferred", "fetch", and "Pure" are hardened static graph feature names.</note>
       </trans-unit>
-      <trans-unit id="HardenedGraphMissingTaskClassification">
-        <source>MSB4289: Hardened static graph validation cannot classify task "{0}" in target "{1}". Provide a trusted task annotation before enabling hardened validation.</source>
-        <target state="new">MSB4289: Hardened static graph validation cannot classify task "{0}" in target "{1}". Provide a trusted task annotation before enabling hardened validation.</target>
-        <note>{StrBegin="MSB4289: "}{0} is the task name. {1} is the target name.</note>
-      </trans-unit>
       <trans-unit id="HardenedGraphProhibitedFunction">
         <source>MSB4287: Hardened static graph validation prohibits the property function "{0}" in {1} because it may observe ambient state. Replace it with a pure expression over declared properties and items, or move the discovery operation to fetch.</source>
         <target state="new">MSB4287: Hardened static graph validation prohibits the property function "{0}" in {1} because it may observe ambient state. Replace it with a pure expression over declared properties and items, or move the discovery operation to fetch.</target>

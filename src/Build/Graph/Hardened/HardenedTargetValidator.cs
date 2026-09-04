@@ -38,6 +38,11 @@ internal sealed class HardenedTargetValidator
         }
     }
 
+    internal HardenedTargetValidator()
+        : this(new Dictionary<string, HardenedTaskClassification>())
+    {
+    }
+
     internal void Validate(ProjectInstance project, string targetName)
     {
         ArgumentNullException.ThrowIfNull(project);
@@ -161,14 +166,16 @@ internal sealed class HardenedTargetValidator
     {
         if (!_taskClassifications.TryGetValue(task.Name, out HardenedTaskClassification classification))
         {
-            ProjectFileErrorUtilities.ThrowInvalidProjectFile(
-                new BuildEventFileInfo(task.Location),
-                "HardenedGraphMissingTaskClassification",
-                task.Name,
-                targetName);
+            classification = HardenedTaskClassification.Unaudited;
         }
 
         RejectNonEmpty(task.ContinueOnError, task.ContinueOnErrorLocation, "ContinueOnError", targetName);
+
+        if (MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget") ||
+            MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild"))
+        {
+            ThrowUnsupported(task.Location, $"the {task.Name} task", $"target '{targetName}'");
+        }
 
         ValidateExpression(
             task.Condition,

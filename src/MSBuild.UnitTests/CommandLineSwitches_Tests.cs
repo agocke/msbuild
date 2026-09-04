@@ -1193,6 +1193,7 @@ namespace Microsoft.Build.UnitTests
                                         profilerLogger: null,
                                         enableProfiler: false,
                                         interactive: false,
+                                        hardenedGraph: false,
                                         isolateProjects: ProjectIsolationMode.False,
                                         graphBuildOptions: null,
                                         lowPriority: false,

@@ -1048,6 +1048,18 @@
     LOCALIZATION: None of the lines should be longer than a standard width console window, eg 80 chars.
   </comment>
   </data>
+  <data name="HelpMessage_53_HardenedGraphSwitch" Visibility="Public">
+    <value>  -hardenedGraph[:True|False]
+                     Enables experimental hardened static graph validation.
+                     Invalid or unsupported graph-construction constructs fail
+                     before target task execution. Initially requires a
+                     single in-process node. (Alias: --hardened-graph)
+    </value>
+    <comment>
+      LOCALIZATION: None of the lines should be longer than a standard width console window, eg 80 chars.
+      The switch names "hardenedGraph" and "--hardened-graph" should not be localized.
+    </comment>
+  </data>
   <data name="HelpMessage_48_TerminalLoggerParametersSwitch" Visibility="Public">
     <value>  -terminalLoggerParameters: &lt;parameters&gt;
                      Parameters to terminal logger. (Short form: -tlp)
@@ -1484,6 +1496,24 @@
       UE: This message does not need in-line parameters because the exception takes care of displaying the invalid arg.
       This error is shown when a user specifies a value for the interactive parameter that is not equivalent to Boolean.TrueString or Boolean.FalseString.
       LOCALIZATION: The prefix "MSBUILD : error MSBxxxx:" should not be localized.
+    </comment>
+  </data>
+  <data name="InvalidHardenedGraphValue" xml:space="preserve">
+    <value>MSBUILD : error MSB1074: Hardened graph value is not valid. {0}</value>
+    <comment>
+      {StrBegin="MSBUILD : error MSB1074: "}
+      UE: This message is shown when the value passed to --hardened-graph is not "true" or "false".
+      LOCALIZATION: The switch name "--hardened-graph" and values "true" and "false" should not be localized.
+      LOCALIZATION: The prefix "MSBUILD : error MSB1074:" should not be localized.
+    </comment>
+  </data>
+  <data name="HardenedGraphRequiresSingleNode" xml:space="preserve">
+    <value>MSBUILD : error MSB1075: The --hardened-graph switch currently requires a single in-process build node. Remove the -maxCpuCount switch and ensure that the in-process node is enabled.</value>
+    <comment>
+      {StrBegin="MSBUILD : error MSB1075: "}
+      UE: This message is shown when --hardened-graph is combined with multiple or out-of-process build nodes.
+      LOCALIZATION: The switch names "--hardened-graph" and "-maxCpuCount" should not be localized.
+      LOCALIZATION: The prefix "MSBUILD : error MSB1075:" should not be localized.
     </comment>
   </data>
   <data name="InvalidNoLogoValue" xml:space="preserve">

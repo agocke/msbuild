@@ -918,6 +918,7 @@ namespace Microsoft.Build.CommandLine
                 ProfilerLogger profilerLogger = null;
                 bool enableProfiler = false;
                 bool interactive = false;
+                bool hardenedGraph = false;
                 ProjectIsolationMode isolateProjects = ProjectIsolationMode.False;
                 GraphBuildOptions graphBuildOptions = null;
                 bool lowPriority = false;
@@ -978,6 +979,7 @@ namespace Microsoft.Build.CommandLine
                                             ref warningsAsMessages,
                                             ref enableRestore,
                                             ref interactive,
+                                            ref hardenedGraph,
                                             ref profilerLogger,
                                             ref enableProfiler,
                                             ref restoreProperties,
@@ -1130,6 +1132,7 @@ namespace Microsoft.Build.CommandLine
                                     profilerLogger,
                                     enableProfiler,
                                     interactive,
+                                    hardenedGraph,
                                     isolateProjects,
                                     graphBuildOptions,
                                     lowPriority,
@@ -1590,6 +1593,7 @@ namespace Microsoft.Build.CommandLine
             ProfilerLogger profilerLogger,
             bool enableProfiler,
             bool interactive,
+            bool hardenedGraph,
             ProjectIsolationMode isolateProjects,
             GraphBuildOptions graphBuildOptions,
             bool lowPriority,
@@ -1798,6 +1802,7 @@ namespace Microsoft.Build.CommandLine
                     parameters.WarningsNotAsErrors = warningsNotAsErrors;
                     parameters.WarningsAsMessages = warningsAsMessages;
                     parameters.Interactive = interactive;
+                    parameters.HardenedGraphValidation = hardenedGraph;
                     parameters.ProjectIsolationMode = isolateProjects;
                     parameters.InputResultsCacheFiles = inputResultsCaches;
                     parameters.OutputResultsCacheFile = outputResultsCache;
@@ -2430,6 +2435,7 @@ namespace Microsoft.Build.CommandLine
             ref ISet<string> warningsAsMessages,
             ref bool enableRestore,
             ref bool interactive,
+            ref bool hardenedGraph,
             ref ProfilerLogger profilerLogger,
             ref bool enableProfiler,
             ref Dictionary<string, string> restoreProperties,
@@ -2589,6 +2595,7 @@ namespace Microsoft.Build.CommandLine
                                                            ref warningsAsMessages,
                                                            ref enableRestore,
                                                            ref interactive,
+                                                           ref hardenedGraph,
                                                            ref profilerLogger,
                                                            ref enableProfiler,
                                                            ref restoreProperties,
@@ -2680,6 +2687,16 @@ namespace Microsoft.Build.CommandLine
                     if (commandLineSwitches.IsParameterizedSwitchSet(CommandLineSwitches.ParameterizedSwitch.Interactive))
                     {
                         interactive = ProcessBooleanSwitch(commandLineSwitches[CommandLineSwitches.ParameterizedSwitch.Interactive], defaultValue: true, resourceName: "InvalidInteractiveValue");
+                    }
+
+                    if (commandLineSwitches.IsParameterizedSwitchSet(CommandLineSwitches.ParameterizedSwitch.HardenedGraph))
+                    {
+                        hardenedGraph = ProcessBooleanSwitch(commandLineSwitches[CommandLineSwitches.ParameterizedSwitch.HardenedGraph], defaultValue: true, resourceName: "InvalidHardenedGraphValue");
+                    }
+
+                    if (hardenedGraph && (cpuCount != 1 || Traits.Instance.InProcNodeDisabled))
+                    {
+                        CommandLineSwitchException.Throw("HardenedGraphRequiresSingleNode", "--hardened-graph");
                     }
 
                     if (commandLineSwitches.IsParameterizedSwitchSet(CommandLineSwitches.ParameterizedSwitch.IsolateProjects))

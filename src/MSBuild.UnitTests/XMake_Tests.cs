@@ -2897,6 +2897,68 @@ $@"<Project>
             logContents.ShouldContain("MSBuildInteractive = [true]");
         }
 
+        [Fact]
+        public void HardenedGraphSwitchRejectsProhibitedTargetPropertyFunction()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build">
+                    <PropertyGroup>
+                      <Value>$([System.Guid]::NewGuid())</Value>
+                    </PropertyGroup>
+                  </Target>
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectFailure(projectContents, arguments: "--hardened-graph");
+
+            logContents.ShouldContain("MSB4287");
+        }
+
+        [Fact]
+        public void HardenedGraphFalseDoesNotRunValidation()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build">
+                    <PropertyGroup>
+                      <Value>$([System.Guid]::NewGuid())</Value>
+                    </PropertyGroup>
+                  </Target>
+                </Project>
+                """;
+
+            ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "--hardened-graph:false");
+        }
+
+        [Fact]
+        public void HardenedGraphSwitchRejectsInvalidBoolean()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build" />
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectFailure(projectContents, arguments: "--hardened-graph:invalid");
+
+            logContents.ShouldContain("MSB1074");
+        }
+
+        [Fact]
+        public void HardenedGraphSwitchRejectsMultipleNodes()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build" />
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectFailure(projectContents, arguments: "--hardened-graph -m:2");
+
+            logContents.ShouldContain("MSB1075");
+        }
+
         /// <summary>
         /// Regression test for https://github.com/dotnet/msbuild/issues/4631
         /// </summary>

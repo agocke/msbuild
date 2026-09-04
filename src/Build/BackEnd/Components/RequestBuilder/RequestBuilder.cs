@@ -20,6 +20,7 @@ using Microsoft.Build.Experimental.BuildCheck;
 using Microsoft.Build.Experimental.BuildCheck.Infrastructure;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Framework.Telemetry;
+using Microsoft.Build.Graph.Hardened;
 using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.Debugging;
@@ -1235,6 +1236,15 @@ namespace Microsoft.Build.BackEnd
 
                 ProjectErrorUtilities.VerifyThrowInvalidProject(allTargets.Length > 0,
                     _requestEntry.RequestConfiguration.Project.ProjectFileLocation, "NoTargetSpecified");
+
+                if (_componentHost.BuildParameters.HardenedGraphValidation)
+                {
+                    HardenedTargetValidator validator = new();
+                    for (int i = 0; i < allTargets.Length; i++)
+                    {
+                        validator.Validate(_requestEntry.RequestConfiguration.Project, allTargets[i].name);
+                    }
+                }
 
                 // Set the current directory to that required by the project.
                 SetProjectDirectory();
