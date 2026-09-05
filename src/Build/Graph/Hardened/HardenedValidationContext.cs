@@ -53,7 +53,18 @@ internal sealed class HardenedConcreteState :
         _project = project;
     }
 
+    private HardenedConcreteState(
+        ProjectInstance project,
+        PropertyDictionary<ProjectPropertyInstance> properties)
+    {
+        _project = project;
+        _properties = properties;
+    }
+
     internal string ProjectDirectory => _project.Directory;
+
+    internal HardenedConcreteState Clone()
+        => new(_project, new PropertyDictionary<ProjectPropertyInstance>(_properties));
 
     internal void SetProperty(string name, string value)
     {
@@ -76,6 +87,26 @@ internal sealed class HardenedValidationContext
     private readonly Dictionary<string, ValueState> _properties = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly Dictionary<string, ItemListState> _items = new(MSBuildNameIgnoreCaseComparer.Default);
 
+    private HardenedValidationContext(HardenedValidationContext other)
+    {
+        foreach (KeyValuePair<string, ValueState> property in other._properties)
+        {
+            _properties.Add(property.Key, property.Value);
+        }
+
+        foreach (KeyValuePair<string, ItemListState> item in other._items)
+        {
+            _items.Add(item.Key, new ItemListState(item.Value));
+        }
+    }
+
+    internal HardenedValidationContext()
+    {
+    }
+
+    internal HardenedValidationContext Clone()
+        => new(this);
+
     internal ValueState GetProperty(string propertyName)
         => _properties.TryGetValue(propertyName, out ValueState state) ? state : ValueState.Static;
 
@@ -85,6 +116,11 @@ internal sealed class HardenedValidationContext
         _properties[propertyName] = overwrite
             ? propertyState
             : ValueState.Combine(GetProperty(propertyName), propertyState);
+    }
+
+    internal void CopyPropertyFrom(HardenedValidationContext source, string propertyName)
+    {
+        _properties[propertyName] = source.GetProperty(propertyName);
     }
 
     internal ValueState GetItemMembership(string itemType)
@@ -244,6 +280,11 @@ internal sealed class HardenedValidationContext
         itemList.Metadata[metadataName] = blocked;
     }
 
+    internal void CopyItemFrom(HardenedValidationContext source, string itemType)
+    {
+        _items[itemType] = new ItemListState(source.GetOrCreateItemList(itemType));
+    }
+
     private ItemListState GetOrCreateItemList(string itemType)
     {
         if (!_items.TryGetValue(itemType, out ItemListState? itemList))
@@ -280,6 +321,20 @@ internal sealed class HardenedValidationContext
 
     private sealed class ItemListState
     {
+        internal ItemListState()
+        {
+        }
+
+        internal ItemListState(ItemListState other)
+        {
+            Membership = other.Membership;
+            DefaultMetadata = other.DefaultMetadata;
+            foreach (KeyValuePair<string, ValueState> metadata in other.Metadata)
+            {
+                Metadata.Add(metadata.Key, metadata.Value);
+            }
+        }
+
         internal ValueState Membership { get; set; } = ValueState.Static;
 
         internal ValueState DefaultMetadata { get; set; } = ValueState.Static;

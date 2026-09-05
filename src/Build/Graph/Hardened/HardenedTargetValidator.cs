@@ -180,20 +180,23 @@ internal sealed class HardenedTargetValidator
                 target.Location,
                 $"target '{target.Name}'");
 
+            LegacyCallTargetScope? callTargetScope = ContainsCallTarget(target)
+                ? new LegacyCallTargetScope(CaptureState())
+                : null;
             foreach (ProjectTargetInstanceChild child in target.Children)
             {
                 switch (child)
                 {
                     case ProjectPropertyGroupTaskInstance propertyGroup:
-                        ValidatePropertyGroup(propertyGroup, target.Name);
+                        ValidatePropertyGroup(propertyGroup, target.Name, callTargetScope);
                         break;
 
                     case ProjectItemGroupTaskInstance itemGroup:
-                        ValidateItemGroup(itemGroup, target.Name);
+                        ValidateItemGroup(itemGroup, target.Name, callTargetScope);
                         break;
 
                     case ProjectTaskInstance task:
-                        ValidateTask(task, target.Name);
+                        ValidateTask(project, task, target.Name, visitedTargets, callTargetScope);
                         break;
 
                     default:
@@ -217,6 +220,10 @@ internal sealed class HardenedTargetValidator
                 includeItemMetadata: true);
 
             ValidateOnErrorTargets(project, target, visitedTargets);
+            if (callTargetScope is not null)
+            {
+                CompleteLegacyCallTargetScope(callTargetScope);
+            }
         }
 
         foreach (TargetSpecification afterTarget in project.GetTargetsWhichRunAfter(target.Name))
@@ -225,7 +232,10 @@ internal sealed class HardenedTargetValidator
         }
     }
 
-    private void ValidatePropertyGroup(ProjectPropertyGroupTaskInstance propertyGroup, string targetName)
+    private void ValidatePropertyGroup(
+        ProjectPropertyGroupTaskInstance propertyGroup,
+        string targetName,
+        LegacyCallTargetScope? callTargetScope)
     {
         ExpressionValidationResult groupConditionResult = ValidateExpression(
             propertyGroup.Condition,
@@ -288,6 +298,7 @@ internal sealed class HardenedTargetValidator
                 groupConditionValue &&
                 propertyConditionKnown &&
                 propertyConditionValue;
+            callTargetScope?.CallerAssignedProperties.Add(property.Name);
             Context.SetProperty(property.Name, propertyState, overwrite: overwrites);
 
             if (overwrites &&
@@ -309,7 +320,10 @@ internal sealed class HardenedTargetValidator
         }
     }
 
-    private void ValidateItemGroup(ProjectItemGroupTaskInstance itemGroup, string targetName)
+    private void ValidateItemGroup(
+        ProjectItemGroupTaskInstance itemGroup,
+        string targetName,
+        LegacyCallTargetScope? callTargetScope)
     {
         ValidateExpression(
             itemGroup.Condition,
@@ -320,20 +334,25 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectItemGroupTaskItemInstance item in itemGroup.Items)
         {
+            callTargetScope?.CallerAssignedItemTypes.Add(item.ItemType);
             _targetAssignedItemTypes.Add(item.ItemType);
             ValidateItemOperation(item, targetName);
         }
     }
 
-    private void ValidateTask(ProjectTaskInstance task, string targetName)
+    private void ValidateTask(
+        ProjectInstance project,
+        ProjectTaskInstance task,
+        string targetName,
+        HashSet<string> visitedTargets,
+        LegacyCallTargetScope? callTargetScope)
     {
         if (!_taskClassifications.TryGetValue(task.Name, out HardenedTaskClassification classification))
         {
             classification = HardenedTaskClassification.Unaudited;
         }
 
-        if (MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget") ||
-            MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild"))
+        if (MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild"))
         {
             ReportUnsupported(task.Location, $"the {task.Name} task", $"target '{targetName}'");
         }
@@ -378,22 +397,42 @@ internal sealed class HardenedTargetValidator
         ValueState taskControlState = ValueState.Combine(
             taskBatchingState,
             ValueState.Combine(taskConditionResult.State, continueOnErrorResult.State));
+
+        bool isCallTarget = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget");
+
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
             ExpressionValidationResult parameterResult = ValidateExpression(
                 parameter.Value.Item1,
                 parameter.Value.Item2,
                 $"parameter '{parameter.Key}' of task '{task.Name}'",
-                requireStatic: classification == HardenedTaskClassification.Pure,
+                requireStatic: classification == HardenedTaskClassification.Pure || isCallTarget,
                 isCondition: false,
                 metadataBatchingValidated: true,
                 includeItemMetadata: true);
 
             if (classification == HardenedTaskClassification.Pure ||
+                isCallTarget ||
                 parameterResult.State.Availability == ValueAvailability.Blocked)
             {
                 taskControlState = ValueState.Combine(taskControlState, parameterResult.State);
             }
+        }
+
+        if (isCallTarget &&
+            (!TryEvaluateCondition(
+                task.Condition,
+                task.ConditionLocation,
+                taskConditionResult,
+                out bool taskConditionValue) ||
+             taskConditionValue))
+        {
+            ValidateCallTarget(
+                project,
+                task,
+                taskControlState,
+                visitedTargets,
+                callTargetScope ?? throw new InvalidOperationException("CallTarget scope was not captured."));
         }
 
         bool outputsAreDeferred = classification != HardenedTaskClassification.Pure;
@@ -473,11 +512,13 @@ internal sealed class HardenedTargetValidator
             switch (output)
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
+                    callTargetScope?.CallerAssignedProperties.Add(destination);
                     Context.SetProperty(destination, outputState);
                     _propertiesWithoutConcreteValues.Add(destination);
                     break;
 
                 case ProjectTaskOutputItemInstance itemOutput:
+                    callTargetScope?.CallerAssignedItemTypes.Add(destination);
                     Context.AddTaskOutputItems(destination, outputState);
                     _targetAssignedItemTypes.Add(destination);
                     break;
@@ -485,8 +526,116 @@ internal sealed class HardenedTargetValidator
         }
 
         ValueState taskStatus = ValueState.Deferred(new ValueOrigin($"result of task '{task.Name}'"));
+        callTargetScope?.CallerAssignedProperties.Add(ReservedPropertyNames.lastTaskResult);
         Context.SetProperty(ReservedPropertyNames.lastTaskResult, taskStatus, overwrite: true);
         _propertiesWithoutConcreteValues.Add(ReservedPropertyNames.lastTaskResult);
+    }
+
+    private void ValidateCallTarget(
+        ProjectInstance project,
+        ProjectTaskInstance task,
+        ValueState taskControlState,
+        HashSet<string> visitedTargets,
+        LegacyCallTargetScope callTargetScope)
+    {
+        string? targets = null;
+        IElementLocation targetsLocation = task.Location;
+        foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
+        {
+            if (MSBuildNameIgnoreCaseComparer.Default.Equals(parameter.Key, "Targets"))
+            {
+                targets = parameter.Value.Item1;
+                targetsLocation = parameter.Value.Item2;
+            }
+        }
+
+        if (targets is not { Length: > 0 } targetsExpression ||
+            !taskControlState.IsStatic ||
+            !TryExpandConcreteExpression(
+                targetsExpression,
+                targetsLocation,
+                $"Targets parameter of task '{task.Name}'",
+                reportUnmodeled: true,
+                out string expandedTargets))
+        {
+            return;
+        }
+
+        ValidatorState callerState = CaptureState();
+
+        try
+        {
+            callTargetScope.WasInvoked = true;
+            RestoreState(callTargetScope.CalledState);
+            foreach (string calledTarget in ExpressionShredder.SplitSemiColonSeparatedList(expandedTargets))
+            {
+                ValidateTarget(project, calledTarget, targetsLocation, visitedTargets);
+            }
+        }
+        finally
+        {
+            callTargetScope.CalledState = CaptureState();
+            RestoreState(callerState);
+        }
+    }
+
+    private void CompleteLegacyCallTargetScope(LegacyCallTargetScope callTargetScope)
+    {
+        if (!callTargetScope.WasInvoked)
+        {
+            return;
+        }
+
+        ValidatorState callerState = CaptureState();
+        ValidatorState mergedState = callTargetScope.CalledState;
+
+        foreach (string propertyName in callTargetScope.CallerAssignedProperties)
+        {
+            mergedState.Context.CopyPropertyFrom(callerState.Context, propertyName);
+            if (callerState.PropertiesWithoutConcreteValues.Contains(propertyName))
+            {
+                mergedState.PropertiesWithoutConcreteValues.Add(propertyName);
+            }
+            else
+            {
+                mergedState.PropertiesWithoutConcreteValues.Remove(propertyName);
+                mergedState.ConcreteState.SetProperty(
+                    propertyName,
+                    callerState.ConcreteState.GetProperty(propertyName).EvaluatedValue);
+            }
+        }
+
+        foreach (string itemType in callTargetScope.CallerAssignedItemTypes)
+        {
+            mergedState.Context.CopyItemFrom(callerState.Context, itemType);
+        }
+
+        mergedState.TargetAssignedItemTypes.UnionWith(callerState.TargetAssignedItemTypes);
+        RestoreState(mergedState);
+    }
+
+    private ValidatorState CaptureState()
+        => new(
+            Context.Clone(),
+            ConcreteState.Clone(),
+            new HashSet<string>(
+                _propertiesWithoutConcreteValues,
+                MSBuildNameIgnoreCaseComparer.Default),
+            new HashSet<string>(
+                _targetAssignedItemTypes,
+                MSBuildNameIgnoreCaseComparer.Default));
+
+    private void RestoreState(ValidatorState state)
+    {
+        _context = state.Context;
+        _concreteState = state.ConcreteState;
+        _concreteExpander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
+            _concreteState,
+            _concreteState,
+            FileSystems.Default,
+            loggingContext: null);
+        RestoreSet(_propertiesWithoutConcreteValues, state.PropertiesWithoutConcreteValues);
+        RestoreSet(_targetAssignedItemTypes, state.TargetAssignedItemTypes);
     }
 
     private void ValidateOnErrorTargets(
@@ -1328,6 +1477,26 @@ internal sealed class HardenedTargetValidator
         }
     }
 
+    private static bool ContainsCallTarget(ProjectTargetInstance target)
+    {
+        foreach (ProjectTargetInstanceChild child in target.Children)
+        {
+            if (child is ProjectTaskInstance task &&
+                MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void RestoreSet(HashSet<string> destination, HashSet<string> source)
+    {
+        destination.Clear();
+        destination.UnionWith(source);
+    }
+
     private bool ValidateProhibitedFunctions(
         string expression,
         IElementLocation location,
@@ -1593,6 +1762,25 @@ internal sealed class HardenedTargetValidator
 
     private Expander<ProjectPropertyInstance, ProjectItemInstance> ConcreteExpander
         => _concreteExpander ?? throw new InvalidOperationException("Concrete expander has not been initialized.");
+
+    private sealed class LegacyCallTargetScope(ValidatorState calledState)
+    {
+        internal ValidatorState CalledState { get; set; } = calledState;
+
+        internal HashSet<string> CallerAssignedProperties { get; } =
+            new(MSBuildNameIgnoreCaseComparer.Default);
+
+        internal HashSet<string> CallerAssignedItemTypes { get; } =
+            new(MSBuildNameIgnoreCaseComparer.Default);
+
+        internal bool WasInvoked { get; set; }
+    }
+
+    private sealed record ValidatorState(
+        HardenedValidationContext Context,
+        HardenedConcreteState ConcreteState,
+        HashSet<string> PropertiesWithoutConcreteValues,
+        HashSet<string> TargetAssignedItemTypes);
 
     private readonly record struct ExpressionValidationResult(ValueState State, bool CanEvaluate);
 }

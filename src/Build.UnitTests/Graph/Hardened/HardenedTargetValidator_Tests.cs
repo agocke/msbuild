@@ -941,6 +941,197 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ValidatesCallTargetClosure()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <CallTarget Targets="Called" />
+              </Target>
+              <Target Name="Called">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4287");
+    }
+
+    [Fact]
+    public void RejectsDeferredCallTargetTargets()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="CalledTarget" />
+                </Generate>
+                <CallTarget Targets="$(CalledTarget)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("Targets");
+    }
+
+    [Fact]
+    public void FalseCallTargetConditionSkipsCalledClosure()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <CallTarget Targets="Called" Condition="false" />
+              </Target>
+              <Target Name="Called">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Fact]
+    public void CollectsMissingCallTargetTarget()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <CallTarget Targets="Missing" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4057");
+    }
+
+    [Fact]
+    public void CallTargetDoesNotLeakPropertyAssignmentsToCaller()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Value" />
+                </Generate>
+                <CallTarget Targets="SetValue" />
+                <PureConsume Input="$(Value)" />
+              </Target>
+              <Target Name="SetValue">
+                <PropertyGroup>
+                  <Value>static</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("parameter 'Input'");
+    }
+
+    [Fact]
+    public void CallTargetDoesNotSeeEarlierCallerAssignments()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Value" />
+                </Generate>
+                <CallTarget Targets="Consume" />
+              </Target>
+              <Target Name="Consume">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void CallTargetAssignmentsAreVisibleAfterCallerCompletes()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <CallTarget Targets="GenerateValue" />
+              </Target>
+              <Target Name="GenerateValue">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Value" />
+                </Generate>
+              </Target>
+              <Target Name="Consume" AfterTargets="Build">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("parameter 'Input'");
+    }
+
+    [Fact]
+    public void CallerAssignmentsOverrideCallTargetAssignments()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <CallTarget Targets="GenerateValue" />
+                <PropertyGroup>
+                  <Value>static</Value>
+                </PropertyGroup>
+              </Target>
+              <Target Name="GenerateValue">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Value" />
+                </Generate>
+              </Target>
+              <Target Name="Consume" AfterTargets="Build">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
     public void RejectsDeferredOutputPassedToPureTask()
     {
         InvalidProjectFileException exception = ValidateFailure(

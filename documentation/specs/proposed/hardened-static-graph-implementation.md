@@ -167,12 +167,13 @@ This baseline covers target validation only. Evaluation restrictions, imports,
 environment reads, SDK resolution, and evaluation-time globs are not yet
 represented and will add a separate failure inventory.
 
-After the metadata, expression, target-closure, and target input/output
-validation quanta, the same pinned build produces 84 diagnostics:
+After the metadata, expression, target-closure, target input/output, and
+ordinary control-flow validation quanta, the same pinned build produces 82
+diagnostics:
 
 | Code | Count |
 | --- | ---: |
-| `MSB4286` | 8 |
+| `MSB4286` | 6 |
 | `MSB4287` | 23 |
 | `MSB4288` | 53 |
 
@@ -185,6 +186,12 @@ timestamp skipping, and `Outputs` retains its legacy return role when
 control expression rather than rejected by its presence. Statically named
 `OnError` targets are included in the validated failure closure, and
 `MSBuildLastTaskResult` is treated as task status rather than a static value.
+Static `CallTarget` target lists are included in the closure using legacy
+lookup isolation: called targets see the lookup from the start of the caller,
+their mutations remain hidden while the caller runs, and caller mutations win
+when both scopes merge at target completion. This exposes one additional
+`MSBuild` invocation in the real closure while eliminating all three blanket
+`CallTarget` diagnostics.
 
 ### Burn-down rules
 
