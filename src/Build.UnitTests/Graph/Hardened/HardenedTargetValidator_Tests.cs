@@ -941,6 +941,92 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void FalseTaskConditionDoesNotCreateOutputs()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate Condition="false">
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <PureConsume Input="$(Generated)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void FalseTaskConditionDoesNotValidateUnusedParameters()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <PureConsume Condition="false" Input="$(Deferred)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void FalseTaskConditionDoesNotSetTaskStatus()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate Condition="false" />
+                <PropertyGroup Condition="'$(MSBuildLastTaskResult)' == ''">
+                  <Observed>true</Observed>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void FalseTaskConditionStillValidatesBatching()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Generated" />
+                </Generate>
+                <PureConsume Condition="false" Input="%(Generated.Identity)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("batching of task 'PureConsume'");
+    }
+
+    [Fact]
     public void AllowsStaticMSBuildRoutingInputs()
     {
         ValidateSuccess(

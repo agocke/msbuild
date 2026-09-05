@@ -403,6 +403,16 @@ internal sealed class HardenedTargetValidator
             isCondition: true,
             metadataBatchingValidated: true);
 
+        if (TryEvaluateCondition(
+            task.Condition,
+            task.ConditionLocation,
+            taskConditionResult,
+            out bool taskConditionValue) &&
+            !taskConditionValue)
+        {
+            return;
+        }
+
         ExpressionValidationResult continueOnErrorResult = ValidateExpression(
             task.ContinueOnError,
             task.ContinueOnErrorLocation,
@@ -445,13 +455,7 @@ internal sealed class HardenedTargetValidator
             taskControlState = ValidateMSBuildProjectMetadata(task, taskControlState);
         }
 
-        if (isCallTarget &&
-            (!TryEvaluateCondition(
-                task.Condition,
-                task.ConditionLocation,
-                taskConditionResult,
-                out bool taskConditionValue) ||
-             taskConditionValue))
+        if (isCallTarget)
         {
             ValidateCallTarget(
                 project,
