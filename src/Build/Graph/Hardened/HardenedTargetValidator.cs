@@ -334,73 +334,90 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectPropertyGroupTaskPropertyInstance property in propertyGroup.Properties)
         {
-            ValueState batchingState = ValidateBatching(
+            BatchingValidationResult batchingResult = ValidateBatching(
                 property,
                 [property.Condition, property.Value],
                 implicitItemType: null,
                 property.Location,
-                $"property '{property.Name}'").State;
+                $"property '{property.Name}'");
 
-            ExpressionValidationResult conditionResult = ValidateExpression(
-                property,
-                property.Condition,
-                property.ConditionLocation,
-                $"the condition of property '{property.Name}'",
-                requireStatic: true,
-                isCondition: true,
-                metadataBatchingValidated: true);
-            bool propertyConditionKnown = TryEvaluateCondition(
-                property,
-                property.Condition,
-                property.ConditionLocation,
-                conditionResult,
-                out bool propertyConditionValue);
-            if (propertyConditionKnown && !propertyConditionValue)
-            {
-                continue;
-            }
+            ValidateInBuckets(
+                batchingResult,
+                batchingState => ValidateProperty(
+                    property,
+                    groupConditionKnown,
+                    groupConditionValue,
+                    callTargetScope,
+                    batchingState));
+        }
+    }
 
-            ExpressionValidationResult valueResult = ValidateExpression(
+    private void ValidateProperty(
+        ProjectPropertyGroupTaskPropertyInstance property,
+        bool groupConditionKnown,
+        bool groupConditionValue,
+        LegacyCallTargetScope? callTargetScope,
+        ValueState batchingState)
+    {
+        ExpressionValidationResult conditionResult = ValidateExpression(
+            property,
+            property.Condition,
+            property.ConditionLocation,
+            $"the condition of property '{property.Name}'",
+            requireStatic: true,
+            isCondition: true,
+            metadataBatchingValidated: true);
+        bool propertyConditionKnown = TryEvaluateCondition(
+            property,
+            property.Condition,
+            property.ConditionLocation,
+            conditionResult,
+            out bool propertyConditionValue);
+        if (propertyConditionKnown && !propertyConditionValue)
+        {
+            return;
+        }
+
+        ExpressionValidationResult valueResult = ValidateExpression(
+            property,
+            property.Value,
+            property.Location,
+            $"the value of property '{property.Name}'",
+            requireStatic: false,
+            isCondition: false,
+            metadataBatchingValidated: true);
+
+        ValueState propertyState = ValueState.Combine(
+            batchingState,
+            ValueState.Combine(conditionResult.State, valueResult.State));
+        if (!conditionResult.State.IsStatic)
+        {
+            propertyState = ToBlocked(propertyState, $"property '{property.Name}' has an unavailable condition");
+        }
+
+        bool overwrites = groupConditionKnown &&
+            groupConditionValue &&
+            propertyConditionKnown &&
+            propertyConditionValue;
+        callTargetScope?.CallerAssignedProperties.Add(property.Name);
+        Context.SetProperty(property.Name, propertyState, overwrite: overwrites);
+
+        if (overwrites &&
+            propertyState.IsStatic &&
+            TryExpandConcreteExpression(
                 property,
                 property.Value,
                 property.Location,
                 $"the value of property '{property.Name}'",
-                requireStatic: false,
-                isCondition: false,
-                metadataBatchingValidated: true);
-
-            ValueState propertyState = ValueState.Combine(
-                batchingState,
-                ValueState.Combine(conditionResult.State, valueResult.State));
-            if (!conditionResult.State.IsStatic)
-            {
-                propertyState = ToBlocked(propertyState, $"property '{property.Name}' has an unavailable condition");
-            }
-
-            bool overwrites = groupConditionKnown &&
-                groupConditionValue &&
-                propertyConditionKnown &&
-                propertyConditionValue;
-            callTargetScope?.CallerAssignedProperties.Add(property.Name);
-            Context.SetProperty(property.Name, propertyState, overwrite: overwrites);
-
-            if (overwrites &&
-                propertyState.IsStatic &&
-                TryExpandConcreteExpression(
-                    property,
-                    property.Value,
-                    property.Location,
-                    $"the value of property '{property.Name}'",
-                    reportUnmodeled: false,
-                    out string expandedValue))
-            {
-                ValidationLookup.SetProperty(ProjectPropertyInstance.Create(property.Name, expandedValue));
-                _propertiesWithoutConcreteValues.Remove(property.Name);
-            }
-            else
-            {
-                _propertiesWithoutConcreteValues.Add(property.Name);
-            }
+                reportUnmodeled: false,
+                out string expandedValue))
+        {
+            ValidationLookup.SetProperty(ProjectPropertyInstance.Create(property.Name, expandedValue));
+            _propertiesWithoutConcreteValues.Remove(property.Name);
+        }
+        else
+        {
+            _propertiesWithoutConcreteValues.Add(property.Name);
         }
     }
 
@@ -459,31 +476,9 @@ internal sealed class HardenedTargetValidator
             task.Location,
             $"task '{task.Name}'");
 
-        if (batchingResult.Buckets is null)
-        {
-            ValidateTaskCore(
-                project,
-                task,
-                targetName,
-                visitedTargets,
-                callTargetScope,
-                classification,
-                batchingResult.State);
-            return;
-        }
-
-        Lookup parentLookup = ValidationLookup;
-        Expander<ProjectPropertyInstance, ProjectItemInstance> parentExpander = ConcreteExpander;
-        IMetadataTable? parentMetadata = _activeMetadata;
-        for (int i = 0; i < batchingResult.Buckets.Count; i++)
-        {
-            ItemBucket bucket = batchingResult.Buckets[i];
-            bucket.Initialize(loggingContext: null);
-            _validationLookup = bucket.Lookup;
-            _activeMetadata = bucket.Expander.Metadata;
-            _concreteExpander = bucket.Expander;
-            try
-            {
+        ValidateInBuckets(
+            batchingResult,
+            batchingState =>
                 ValidateTaskCore(
                     project,
                     task,
@@ -491,22 +486,7 @@ internal sealed class HardenedTargetValidator
                     visitedTargets,
                     callTargetScope,
                     classification,
-                    batchingResult.State);
-            }
-            finally
-            {
-                try
-                {
-                    bucket.LeaveScope();
-                }
-                finally
-                {
-                    _validationLookup = parentLookup;
-                    _activeMetadata = parentMetadata;
-                    _concreteExpander = parentExpander;
-                }
-            }
-        }
+                    batchingState));
     }
 
     private void ValidateTaskCore(
@@ -1184,13 +1164,22 @@ internal sealed class HardenedTargetValidator
             AddIfNotEmpty(batchableExpressions, metadata.Condition);
         }
 
-        ValueState batchingState = ValidateBatching(
+        BatchingValidationResult batchingResult = ValidateBatching(
             item,
             batchableExpressions,
             item.ItemType,
             item.Location,
-            $"item '{item.ItemType}' in target '{targetName}'").State;
+            $"item '{item.ItemType}' in target '{targetName}'");
 
+        ValidateInBuckets(
+            batchingResult,
+            batchingState => ValidateItemOperation(item, batchingState));
+    }
+
+    private void ValidateItemOperation(
+        ProjectItemGroupTaskItemInstance item,
+        ValueState batchingState)
+    {
         ExpressionValidationResult conditionResult = ValidateExpression(
             item,
             item.Condition,
@@ -1200,6 +1189,17 @@ internal sealed class HardenedTargetValidator
             isCondition: true,
             metadataBatchingValidated: true,
             implicitItemType: item.ItemType);
+        if (TryEvaluateCondition(
+                item,
+                item.Condition,
+                item.ConditionLocation,
+                conditionResult,
+                out bool conditionValue) &&
+            !conditionValue)
+        {
+            return;
+        }
+
         ExpressionValidationResult includeResult = ValidateExpression(
             item,
             item.Include,
@@ -1281,7 +1281,17 @@ internal sealed class HardenedTargetValidator
             item.ItemType);
 
         Dictionary<string, ValueState> assignedMetadata = ValidateMetadataAssignments(item);
-        ValueState matchOnMetadataValuesState = GetMatchOnMetadataValuesState(item);
+        string? evaluatedMatchOnMetadata = TryExpandConcreteExpression(
+            item,
+            item.MatchOnMetadata,
+            item.MatchOnMetadataLocation,
+            $"MatchOnMetadata on item '{item.ItemType}'",
+            reportUnmodeled: false,
+            out string expandedMatchOnMetadata)
+                ? expandedMatchOnMetadata
+                : item.MatchOnMetadata;
+        ValueState matchOnMetadataValuesState =
+            GetMatchOnMetadataValuesState(item, evaluatedMatchOnMetadata);
         ValueState operationState = ValueState.Combine(
             batchingState,
             ValueState.Combine(
@@ -1333,6 +1343,25 @@ internal sealed class HardenedTargetValidator
             return;
         }
 
+        string? evaluatedKeepMetadata = TryExpandConcreteExpression(
+            item,
+            item.KeepMetadata,
+            item.KeepMetadataLocation,
+            $"KeepMetadata on item '{item.ItemType}'",
+            reportUnmodeled: false,
+            out string expandedKeepMetadata)
+                ? expandedKeepMetadata
+                : item.KeepMetadata;
+        string? evaluatedRemoveMetadata = TryExpandConcreteExpression(
+            item,
+            item.RemoveMetadata,
+            item.RemoveMetadataLocation,
+            $"RemoveMetadata on item '{item.ItemType}'",
+            reportUnmodeled: false,
+            out string expandedRemoveMetadata)
+                ? expandedRemoveMetadata
+                : item.RemoveMetadata;
+
         if (isInclude)
         {
             GetInheritedMetadata(
@@ -1347,14 +1376,78 @@ internal sealed class HardenedTargetValidator
                 inheritedMetadata,
                 inheritedDefaultMetadata,
                 assignedMetadata,
-                item.KeepMetadata,
-                item.RemoveMetadata,
+                evaluatedKeepMetadata,
+                evaluatedRemoveMetadata,
                 $"Include into item '{item.ItemType}'");
         }
-        else if (!isRemove)
+        else if (isRemove)
         {
-            Context.ApplyMetadataFilters(item.ItemType, item.KeepMetadata, item.RemoveMetadata);
-            Context.UpdateMetadata(item.ItemType, assignedMetadata);
+            ICollection<ProjectItemInstance> items =
+                ValidationLookup.GetItems(item.ItemType) ?? [];
+            if (items.Count == 0 ||
+                !TryExpandConcreteExpression(
+                    item,
+                    item.Remove,
+                    item.RemoveLocation,
+                    $"the Remove of item '{item.ItemType}'",
+                    reportUnmodeled: false,
+                    out string expandedRemove))
+            {
+                return;
+            }
+
+            List<ProjectItemInstance> itemsToRemove;
+            if (TryParseLiteralMetadataNames(
+                    evaluatedMatchOnMetadata,
+                    out HashSet<string>? matchOnMetadata))
+            {
+                MatchOnMetadataOptions matchingOptions =
+                    MatchOnMetadataConstants.MatchOnMetadataOptionsDefaultValue;
+                if (TryExpandConcreteExpression(
+                        item,
+                        item.MatchOnMetadataOptions,
+                        item.MatchOnMetadataOptionsLocation,
+                        $"MatchOnMetadataOptions on item '{item.ItemType}'",
+                        reportUnmodeled: false,
+                        out string expandedMatchingOptions))
+                {
+                    Enum.TryParse(expandedMatchingOptions, out matchingOptions);
+                }
+
+                itemsToRemove = ItemGroupIntrinsicTask.FindItemsMatchingMetadataSpecification(
+                    items,
+                    item,
+                    ConcreteExpander,
+                    matchOnMetadata!,
+                    matchingOptions,
+                    ProjectDirectory);
+            }
+            else
+            {
+                itemsToRemove = ItemGroupIntrinsicTask.FindItemsMatchingSpecification(
+                    items,
+                    expandedRemove,
+                    item.RemoveLocation,
+                    ConcreteExpander,
+                    ProjectDirectory,
+                    loggingContext: null);
+            }
+
+            if (itemsToRemove is { Count: > 0 })
+            {
+                ValidationLookup.RemoveItems(item.ItemType, itemsToRemove);
+            }
+        }
+        else
+        {
+            ICollection<ProjectItemInstance> items =
+                ValidationLookup.GetItems(item.ItemType) ?? [];
+            Context.ApplyMetadataFilters(
+                item.ItemType,
+                items,
+                evaluatedKeepMetadata,
+                evaluatedRemoveMetadata);
+            Context.UpdateMetadata(item.ItemType, items, assignedMetadata);
         }
     }
 
@@ -1372,6 +1465,17 @@ internal sealed class HardenedTargetValidator
                 isCondition: true,
                 metadataBatchingValidated: true,
                 implicitItemType: item.ItemType);
+            if (TryEvaluateCondition(
+                    item,
+                    metadata.Condition,
+                    metadata.ConditionLocation,
+                    conditionResult,
+                    out bool conditionValue) &&
+                !conditionValue)
+            {
+                continue;
+            }
+
             ExpressionValidationResult valueResult = ValidateExpression(
                 item,
                 metadata.Value,
@@ -1396,9 +1500,11 @@ internal sealed class HardenedTargetValidator
         return assignedMetadata;
     }
 
-    private ValueState GetMatchOnMetadataValuesState(ProjectItemGroupTaskItemInstance item)
+    private ValueState GetMatchOnMetadataValuesState(
+        ProjectItemGroupTaskItemInstance item,
+        string? matchOnMetadata)
     {
-        if (!TryParseLiteralMetadataNames(item.MatchOnMetadata, out HashSet<string>? metadataNames))
+        if (!TryParseLiteralMetadataNames(matchOnMetadata, out HashSet<string>? metadataNames))
         {
             return ValueState.Static;
         }
@@ -1434,6 +1540,46 @@ internal sealed class HardenedTargetValidator
         }
 
         return state;
+    }
+
+    private void ValidateInBuckets(
+        BatchingValidationResult batchingResult,
+        Action<ValueState> validate)
+    {
+        if (batchingResult.Buckets is null)
+        {
+            validate(batchingResult.State);
+            return;
+        }
+
+        Lookup parentLookup = ValidationLookup;
+        Expander<ProjectPropertyInstance, ProjectItemInstance> parentExpander = ConcreteExpander;
+        IMetadataTable? parentMetadata = _activeMetadata;
+        for (int i = 0; i < batchingResult.Buckets.Count; i++)
+        {
+            ItemBucket bucket = batchingResult.Buckets[i];
+            bucket.Initialize(loggingContext: null);
+            _validationLookup = bucket.Lookup;
+            _activeMetadata = bucket.Expander.Metadata;
+            _concreteExpander = bucket.Expander;
+            try
+            {
+                validate(batchingResult.State);
+            }
+            finally
+            {
+                try
+                {
+                    bucket.LeaveScope();
+                }
+                finally
+                {
+                    _validationLookup = parentLookup;
+                    _activeMetadata = parentMetadata;
+                    _concreteExpander = parentExpander;
+                }
+            }
+        }
     }
 
     private void GetInheritedMetadata(
@@ -1742,7 +1888,7 @@ internal sealed class HardenedTargetValidator
         return false;
     }
 
-    private static bool TryParseLiteralMetadataNames(string expression, out HashSet<string>? metadataNames)
+    private static bool TryParseLiteralMetadataNames(string? expression, out HashSet<string>? metadataNames)
     {
         metadataNames = null;
         if (string.IsNullOrEmpty(expression) ||

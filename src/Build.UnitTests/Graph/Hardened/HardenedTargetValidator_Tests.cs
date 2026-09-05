@@ -1748,6 +1748,208 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void PropertyBucketsEvaluateConditionsAndValuesPerMetadataValue()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>first</Kind>
+                </Input>
+                <Input Include="b">
+                  <Kind>second</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Result Condition="'%(Input.Kind)' == 'first'">%(Input.Kind)</Result>
+                </PropertyGroup>
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="$(Result)" />
+                </Generate>
+                <PureConsume Items="@(first)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("item 'first'");
+    }
+
+    [Fact]
+    public void FalsePropertyBucketDoesNotApplyDeferredValue()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>skip</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <PropertyGroup>
+                  <Result Condition="'%(Input.Kind)' == 'run'">$(Generated)</Result>
+                </PropertyGroup>
+                <PureConsume Input="$(Result)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void FalseItemBucketDoesNotApplyDeferredMetadata()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>skip</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Selected Include="selected" Condition="'%(Input.Kind)' == 'run'">
+                    <Payload>$(Generated)</Payload>
+                  </Selected>
+                </ItemGroup>
+                <PureConsume Items="@(Selected)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void FalseItemMetadataConditionDoesNotApplyDeferredValue()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>skip</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Selected Include="selected">
+                    <Payload Condition="'%(Input.Kind)' == 'run'">$(Generated)</Payload>
+                  </Selected>
+                </ItemGroup>
+                <PureConsume Items="@(Selected)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void ItemUpdateAppliesMetadataOnlyToSelectedBucketItems()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>run</Kind>
+                </Input>
+                <Input Include="b">
+                  <Kind>skip</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Input Condition="'%(Input.Kind)' == 'run'">
+                    <Payload>$(Generated)</Payload>
+                  </Input>
+                </ItemGroup>
+                <PureConsume Items="@(Input)"
+                             Kind="%(Input.Kind)"
+                             Condition="'%(Input.Kind)' == 'skip'" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void ItemRemoveClearsQualifierStateForRemovedBucketItems()
+    {
+        ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>remove</Kind>
+                  <Payload>one</Payload>
+                </Input>
+                <Input Include="b">
+                  <Kind>keep</Kind>
+                  <Payload>two</Payload>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Input Remove="%(Input.Identity)"
+                         Condition="'%(Input.Kind)' == 'remove'" />
+                </ItemGroup>
+                <PureConsume Items="@(Input)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            lookup =>
+            {
+                ProjectItemInstance removedItem = lookup.GetItems("Input").Single(
+                    item => item.EvaluatedInclude == "a");
+                lookup.EnableHardenedState().SetMetadata(
+                    removedItem,
+                    "Payload",
+                    ValueState.Deferred(new ValueOrigin("removed payload")));
+            }).ShouldBeEmpty();
+    }
+
+    [Fact]
     public void AllowsStaticMetadataInItemAndTaskConditions()
     {
         ValidateSuccess(

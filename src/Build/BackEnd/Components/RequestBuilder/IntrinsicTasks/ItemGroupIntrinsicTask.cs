@@ -261,11 +261,23 @@ namespace Microsoft.Build.BackEnd
             List<ProjectItemInstance> itemsToRemove;
             if (matchOnMetadata == null)
             {
-                itemsToRemove = FindItemsMatchingSpecification(group, child.Remove, child.RemoveLocation, bucket.Expander);
+                itemsToRemove = FindItemsMatchingSpecification(
+                    group,
+                    child.Remove,
+                    child.RemoveLocation,
+                    bucket.Expander,
+                    Project.Directory,
+                    LoggingContext);
             }
             else
             {
-                itemsToRemove = FindItemsMatchingMetadataSpecification(group, child, bucket.Expander, matchOnMetadata, matchingOptions);
+                itemsToRemove = FindItemsMatchingMetadataSpecification(
+                    group,
+                    child,
+                    bucket.Expander,
+                    matchOnMetadata,
+                    matchingOptions,
+                    Project.Directory);
             }
 
             if (itemsToRemove != null)
@@ -582,12 +594,16 @@ namespace Microsoft.Build.BackEnd
         /// <param name="specification">The specification to match against the items.</param>
         /// <param name="specificationLocation">The specification to match against the provided items</param>
         /// <param name="expander">The expander to use</param>
+        /// <param name="projectDirectory">The directory of the project containing the item operation.</param>
+        /// <param name="loggingContext">The logging context for wildcard expansion.</param>
         /// <returns>A list of matching items</returns>
-        private List<ProjectItemInstance> FindItemsMatchingSpecification(
+        internal static List<ProjectItemInstance> FindItemsMatchingSpecification(
             ICollection<ProjectItemInstance> items,
             string specification,
             ElementLocation specificationLocation,
-            Expander<ProjectPropertyInstance, ProjectItemInstance> expander)
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
+            string projectDirectory,
+            LoggingContext loggingContext)
         {
             if (items.Count == 0 || specification.Length == 0)
             {
@@ -611,9 +627,9 @@ namespace Microsoft.Build.BackEnd
                 // as literals. Everything else is safe to unescape at this point, since we're only matching
                 // against the file system.
                 string[] fileList = EngineFileUtilities.GetFileListEscaped(
-                    Project.Directory,
+                    projectDirectory,
                     piece,
-                    loggingMechanism: LoggingContext,
+                    loggingMechanism: loggingContext,
                     includeLocation: specificationLocation,
                     excludeLocation: specificationLocation);
 
@@ -651,14 +667,15 @@ namespace Microsoft.Build.BackEnd
             return itemsRemoved;
         }
 
-        private List<ProjectItemInstance> FindItemsMatchingMetadataSpecification(
+        internal static List<ProjectItemInstance> FindItemsMatchingMetadataSpecification(
             ICollection<ProjectItemInstance> group,
             ProjectItemGroupTaskItemInstance child,
             Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
             HashSet<string> matchOnMetadata,
-            MatchOnMetadataOptions matchingOptions)
+            MatchOnMetadataOptions matchingOptions,
+            string projectDirectory)
         {
-            ItemSpec<ProjectPropertyInstance, ProjectItemInstance> itemSpec = new ItemSpec<ProjectPropertyInstance, ProjectItemInstance>(child.Remove, expander, child.RemoveLocation, Project.Directory, true);
+            ItemSpec<ProjectPropertyInstance, ProjectItemInstance> itemSpec = new ItemSpec<ProjectPropertyInstance, ProjectItemInstance>(child.Remove, expander, child.RemoveLocation, projectDirectory, true);
             ProjectFileErrorUtilities.VerifyThrowInvalidProjectFile(
                 itemSpec.Fragments.All(f => f is ItemSpec<ProjectPropertyInstance, ProjectItemInstance>.ItemExpressionFragment),
                 BuildEventFileInfo.Empty,

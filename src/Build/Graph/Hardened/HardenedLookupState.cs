@@ -294,8 +294,25 @@ internal sealed class HardenedLookupState
 
     internal void UpdateMetadata(
         string itemType,
+        ICollection<ProjectItemInstance> items,
         IReadOnlyDictionary<string, ValueState> assignedMetadata)
     {
+        if (items.Count > 0)
+        {
+            foreach (ProjectItemInstance item in items)
+            {
+                ItemState itemState = GetOrCreateItemState(item);
+                foreach (KeyValuePair<string, ValueState> metadata in assignedMetadata)
+                {
+                    itemState.Metadata[metadata.Key] =
+                        metadata.Value.WithOrigin($"metadata '{metadata.Key}' on item '{itemType}'");
+                }
+            }
+
+            CurrentScopeState.MarkItemChanged(itemType);
+            return;
+        }
+
         ItemListState itemList = GetOrCreateItemList(itemType);
         CurrentScopeState.MarkItemListChanged(itemType);
         foreach (KeyValuePair<string, ValueState> metadata in assignedMetadata)
@@ -307,12 +324,53 @@ internal sealed class HardenedLookupState
         }
     }
 
-    internal void ApplyMetadataFilters(string itemType, string? keepMetadata, string? removeMetadata)
+    internal void ApplyMetadataFilters(
+        string itemType,
+        ICollection<ProjectItemInstance> items,
+        string? keepMetadata,
+        string? removeMetadata)
     {
+        bool hasKeepFilter = TryParseLiteralMetadataNames(keepMetadata, out HashSet<string>? metadataToKeep);
+        bool hasRemoveFilter = TryParseLiteralMetadataNames(removeMetadata, out HashSet<string>? metadataToRemove);
+        if (items.Count > 0)
+        {
+            foreach (ProjectItemInstance item in items)
+            {
+                ItemState itemState = GetOrCreateItemState(item);
+                if (hasKeepFilter)
+                {
+                    var keptMetadata = new Dictionary<string, ValueState>(
+                        MSBuildNameIgnoreCaseComparer.Default);
+                    foreach (string metadataName in metadataToKeep!)
+                    {
+                        keptMetadata[metadataName] = GetItemMetadata(item, metadataName);
+                    }
+
+                    itemState.IgnoreListMetadata = true;
+                    itemState.Metadata.Clear();
+                    foreach (KeyValuePair<string, ValueState> metadata in keptMetadata)
+                    {
+                        itemState.Metadata.Add(metadata.Key, metadata.Value);
+                    }
+                }
+
+                if (hasRemoveFilter)
+                {
+                    foreach (string metadataName in metadataToRemove!)
+                    {
+                        itemState.Metadata[metadataName] = ValueState.Static;
+                    }
+                }
+            }
+
+            CurrentScopeState.MarkItemChanged(itemType);
+            return;
+        }
+
         ItemListState itemList = GetOrCreateItemList(itemType);
         CurrentScopeState.MarkItemListChanged(itemType);
 
-        if (TryParseLiteralMetadataNames(keepMetadata, out HashSet<string>? metadataToKeep))
+        if (hasKeepFilter)
         {
             List<string> keysToRemove = [];
             foreach (string metadataName in itemList.Metadata.Keys)
@@ -331,7 +389,7 @@ internal sealed class HardenedLookupState
             itemList.DefaultMetadata = ValueState.Static;
         }
 
-        if (TryParseLiteralMetadataNames(removeMetadata, out HashSet<string>? metadataToRemove))
+        if (hasRemoveFilter)
         {
             foreach (string metadataName in metadataToRemove!)
             {
