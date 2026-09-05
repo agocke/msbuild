@@ -82,8 +82,9 @@ internal sealed class HardenedTargetValidator
     private readonly HashSet<string> _targetAssignedItemTypes = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HardenedExpressionDescriptorCache _expressionDescriptors = new();
     private Lookup? _validationLookup;
-    private HardenedConcreteState? _concreteState;
     private Expander<ProjectPropertyInstance, ProjectItemInstance>? _concreteExpander;
+    private IMetadataTable? _activeMetadata;
+    private string? _projectDirectory;
 
     internal HardenedTargetValidator(IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
     {
@@ -129,12 +130,10 @@ internal sealed class HardenedTargetValidator
         _expressionDescriptors.Clear();
         _validationLookup = lookup.Clone();
         _validationLookup.EnableHardenedState();
-        _concreteState = new HardenedConcreteState(project);
-        _concreteExpander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
-            _concreteState,
-            _concreteState,
-            FileSystems.Default,
-            loggingContext: null);
+        _validationLookup.EnterScope("HardenedTargetValidator");
+        _activeMetadata = null;
+        _projectDirectory = project.Directory;
+        _concreteExpander = CreateConcreteExpander(_validationLookup);
 
         HashSet<string> visitedTargets = new(MSBuildNameIgnoreCaseComparer.Default);
         foreach (string targetName in targetNames)
@@ -340,7 +339,7 @@ internal sealed class HardenedTargetValidator
                 [property.Condition, property.Value],
                 implicitItemType: null,
                 property.Location,
-                $"property '{property.Name}'");
+                $"property '{property.Name}'").State;
 
             ExpressionValidationResult conditionResult = ValidateExpression(
                 property,
@@ -395,7 +394,7 @@ internal sealed class HardenedTargetValidator
                     reportUnmodeled: false,
                     out string expandedValue))
             {
-                ConcreteState.SetProperty(property.Name, expandedValue);
+                ValidationLookup.SetProperty(ProjectPropertyInstance.Create(property.Name, expandedValue));
                 _propertiesWithoutConcreteValues.Remove(property.Name);
             }
             else
@@ -453,13 +452,72 @@ internal sealed class HardenedTargetValidator
             AddIfNotEmpty(batchableExpressions, output.Condition);
         }
 
-        ValueState taskBatchingState = ValidateBatching(
+        BatchingValidationResult batchingResult = ValidateBatching(
             task,
             batchableExpressions,
             implicitItemType: null,
             task.Location,
             $"task '{task.Name}'");
 
+        if (batchingResult.Buckets is null)
+        {
+            ValidateTaskCore(
+                project,
+                task,
+                targetName,
+                visitedTargets,
+                callTargetScope,
+                classification,
+                batchingResult.State);
+            return;
+        }
+
+        Lookup parentLookup = ValidationLookup;
+        Expander<ProjectPropertyInstance, ProjectItemInstance> parentExpander = ConcreteExpander;
+        IMetadataTable? parentMetadata = _activeMetadata;
+        for (int i = 0; i < batchingResult.Buckets.Count; i++)
+        {
+            ItemBucket bucket = batchingResult.Buckets[i];
+            bucket.Initialize(loggingContext: null);
+            _validationLookup = bucket.Lookup;
+            _activeMetadata = bucket.Expander.Metadata;
+            _concreteExpander = bucket.Expander;
+            try
+            {
+                ValidateTaskCore(
+                    project,
+                    task,
+                    targetName,
+                    visitedTargets,
+                    callTargetScope,
+                    classification,
+                    batchingResult.State);
+            }
+            finally
+            {
+                try
+                {
+                    bucket.LeaveScope();
+                }
+                finally
+                {
+                    _validationLookup = parentLookup;
+                    _activeMetadata = parentMetadata;
+                    _concreteExpander = parentExpander;
+                }
+            }
+        }
+    }
+
+    private void ValidateTaskCore(
+        ProjectInstance project,
+        ProjectTaskInstance task,
+        string targetName,
+        HashSet<string> visitedTargets,
+        LegacyCallTargetScope? callTargetScope,
+        HardenedTaskClassification classification,
+        ValueState taskBatchingState)
+    {
         ExpressionValidationResult taskConditionResult = ValidateExpression(
             task,
             task.Condition,
@@ -546,7 +604,7 @@ internal sealed class HardenedTargetValidator
                 implicitItemType: null,
                 output.ConditionLocation,
                 $"condition of output '{outputTaskParameter}' from task '{task.Name}'",
-                reportDiagnostics: false);
+                reportDiagnostics: false).State;
 
             ExpressionValidationResult outputTaskParameterResult = ValidateExpression(
                 output,
@@ -573,7 +631,7 @@ internal sealed class HardenedTargetValidator
                 implicitItemType: null,
                 output.Location,
                 $"output destination of task '{task.Name}'",
-                reportDiagnostics: false);
+                reportDiagnostics: false).State;
 
             string? destination;
             switch (output)
@@ -735,11 +793,13 @@ internal sealed class HardenedTargetValidator
         }
 
         ValidatorState callerState = CaptureState();
+        IMetadataTable? callerMetadata = _activeMetadata;
         ValueState targetOutputs = ValueState.Static;
 
         try
         {
             callTargetScope.WasInvoked = true;
+            _activeMetadata = null;
             RestoreState(callTargetScope.CalledState);
             foreach (string calledTarget in ExpressionShredder.SplitSemiColonSeparatedList(expandedTargets))
             {
@@ -751,6 +811,7 @@ internal sealed class HardenedTargetValidator
         finally
         {
             callTargetScope.CalledState = CaptureState();
+            _activeMetadata = callerMetadata;
             RestoreState(callerState);
         }
 
@@ -777,9 +838,9 @@ internal sealed class HardenedTargetValidator
             else
             {
                 mergedState.PropertiesWithoutConcreteValues.Remove(propertyName);
-                mergedState.ConcreteState.SetProperty(
-                    propertyName,
-                    callerState.ConcreteState.GetProperty(propertyName).EvaluatedValue);
+                ProjectPropertyInstance property = callerState.Lookup.GetProperty(propertyName);
+                Assumed.NotNull(property);
+                mergedState.Lookup.SetProperty(property);
             }
         }
 
@@ -795,7 +856,6 @@ internal sealed class HardenedTargetValidator
     private ValidatorState CaptureState()
         => new(
             ValidationLookup.SnapshotHardenedLookup(),
-            ConcreteState.Clone(),
             new HashSet<string>(
                 _propertiesWithoutConcreteValues,
                 MSBuildNameIgnoreCaseComparer.Default),
@@ -806,12 +866,7 @@ internal sealed class HardenedTargetValidator
     private void RestoreState(ValidatorState state)
     {
         _validationLookup = state.Lookup;
-        _concreteState = state.ConcreteState;
-        _concreteExpander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
-            _concreteState,
-            _concreteState,
-            FileSystems.Default,
-            loggingContext: null);
+        _concreteExpander = CreateConcreteExpander(_validationLookup);
         RestoreSet(_propertiesWithoutConcreteValues, state.PropertiesWithoutConcreteValues);
         RestoreSet(_targetAssignedItemTypes, state.TargetAssignedItemTypes);
     }
@@ -938,12 +993,18 @@ internal sealed class HardenedTargetValidator
         ElementLocation conditionLocation = effectiveLocation as ElementLocation ?? ElementLocation.EmptyLocation;
         try
         {
+            ParserOptions parserOptions = _activeMetadata is null
+                ? ParserOptions.AllowPropertiesAndItemLists
+                : ParserOptions.AllowAll;
+            ExpanderOptions expanderOptions = _activeMetadata is null
+                ? ExpanderOptions.ExpandPropertiesAndItems
+                : ExpanderOptions.ExpandAll;
             result = ConditionEvaluator.EvaluateCondition(
                 condition,
-                ParserOptions.AllowPropertiesAndItemLists,
+                parserOptions,
                 ConcreteExpander,
-                ExpanderOptions.ExpandPropertiesAndItems,
-                ConcreteState.ProjectDirectory,
+                expanderOptions,
+                ProjectDirectory,
                 conditionLocation,
                 FileSystems.Default,
                 loggingContext: null);
@@ -983,7 +1044,9 @@ internal sealed class HardenedTargetValidator
         {
             expanded = ConcreteExpander.ExpandIntoStringAndUnescape(
                 expression,
-                ExpanderOptions.ExpandPropertiesAndItems,
+                _activeMetadata is null
+                    ? ExpanderOptions.ExpandPropertiesAndItems
+                    : ExpanderOptions.ExpandAll,
                 effectiveLocation);
             return true;
         }
@@ -1003,7 +1066,7 @@ internal sealed class HardenedTargetValidator
             return false;
         }
 
-        if (descriptor.BatchMetadata is not null)
+        if (descriptor.BatchMetadata is not null && _activeMetadata is null)
         {
             return false;
         }
@@ -1126,7 +1189,7 @@ internal sealed class HardenedTargetValidator
             batchableExpressions,
             item.ItemType,
             item.Location,
-            $"item '{item.ItemType}' in target '{targetName}'");
+            $"item '{item.ItemType}' in target '{targetName}'").State;
 
         ExpressionValidationResult conditionResult = ValidateExpression(
             item,
@@ -1400,7 +1463,7 @@ internal sealed class HardenedTargetValidator
         }
     }
 
-    private ValueState ValidateBatching(
+    private BatchingValidationResult ValidateBatching(
         object owner,
         IReadOnlyList<string?> expressions,
         string? implicitItemType,
@@ -1447,12 +1510,12 @@ internal sealed class HardenedTargetValidator
 
         if (!hasExpression)
         {
-            return ValueState.Static;
+            return new BatchingValidationResult(ValueState.Static, Buckets: null);
         }
 
         if (metadataReferences.Count == 0)
         {
-            return ValueState.Static;
+            return new BatchingValidationResult(ValueState.Static, Buckets: null);
         }
 
         if (implicitItemType is not null)
@@ -1482,7 +1545,9 @@ internal sealed class HardenedTargetValidator
                     context);
             }
 
-            return ValueState.Blocked(new ValueOrigin($"unresolved batching metadata in {context}"));
+            return new BatchingValidationResult(
+                ValueState.Blocked(new ValueOrigin($"unresolved batching metadata in {context}")),
+                Buckets: null);
         }
 
         ValueState state = ValueState.Static;
@@ -1541,7 +1606,7 @@ internal sealed class HardenedTargetValidator
 
         if (!keysAreStatic || !reportDiagnostics)
         {
-            return state;
+            return new BatchingValidationResult(state, Buckets: null);
         }
 
         try
@@ -1551,19 +1616,20 @@ internal sealed class HardenedTargetValidator
                 consumedItemTypes,
                 ValidationLookup,
                 effectiveLocation);
-            BatchingEngine.PrepareBatchingBuckets(
+            List<ItemBucket> buckets = BatchingEngine.PrepareBatchingBuckets(
                 batchingInfo,
                 ValidationLookup,
                 effectiveLocation,
                 loggingContext: null);
+            return new BatchingValidationResult(state, buckets);
         }
         catch (InvalidProjectFileException exception)
         {
             AddDiagnostic(exception);
-            return ValueState.Blocked(new ValueOrigin($"invalid batching in {context}"));
+            return new BatchingValidationResult(
+                ValueState.Blocked(new ValueOrigin($"invalid batching in {context}")),
+                Buckets: null);
         }
-
-        return state;
     }
 
     private ValueState GetMetadataReferenceState(
@@ -1955,11 +2021,25 @@ internal sealed class HardenedTargetValidator
     private Lookup ValidationLookup
         => _validationLookup ?? throw new InvalidOperationException("Validation lookup has not been initialized.");
 
-    private HardenedConcreteState ConcreteState
-        => _concreteState ?? throw new InvalidOperationException("Concrete state has not been initialized.");
-
     private Expander<ProjectPropertyInstance, ProjectItemInstance> ConcreteExpander
         => _concreteExpander ?? throw new InvalidOperationException("Concrete expander has not been initialized.");
+
+    private string ProjectDirectory
+        => _projectDirectory ?? throw new InvalidOperationException("Project directory has not been initialized.");
+
+    private Expander<ProjectPropertyInstance, ProjectItemInstance> CreateConcreteExpander(Lookup lookup)
+        => _activeMetadata is null
+            ? new Expander<ProjectPropertyInstance, ProjectItemInstance>(
+                lookup,
+                lookup,
+                FileSystems.Default,
+                loggingContext: null)
+            : new Expander<ProjectPropertyInstance, ProjectItemInstance>(
+                lookup,
+                lookup,
+                _activeMetadata,
+                FileSystems.Default,
+                loggingContext: null);
 
     private sealed class LegacyCallTargetScope(ValidatorState calledState)
     {
@@ -1976,12 +2056,15 @@ internal sealed class HardenedTargetValidator
 
     private sealed record ValidatorState(
         Lookup Lookup,
-        HardenedConcreteState ConcreteState,
         HashSet<string> PropertiesWithoutConcreteValues,
         HashSet<string> TargetAssignedItemTypes)
     {
         internal HardenedLookupState Context => Lookup.HardenedState;
     }
+
+    private readonly record struct BatchingValidationResult(
+        ValueState State,
+        List<ItemBucket>? Buckets);
 
     private readonly record struct ExpressionValidationResult(ValueState State, bool CanEvaluate);
 }

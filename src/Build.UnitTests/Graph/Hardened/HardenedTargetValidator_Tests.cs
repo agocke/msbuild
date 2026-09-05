@@ -1601,6 +1601,153 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void TaskBucketsEvaluateConditionsAndOutputDestinationsPerMetadataValue()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>skip</Kind>
+                </Input>
+                <Input Include="b">
+                  <Kind>run</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate Condition="'%(Input.Kind)' == 'run'">
+                  <Output TaskParameter="Result" PropertyName="Result_%(Input.Kind)" />
+                </Generate>
+                <PureConsume Run="$(Result_run)" Skip="$(Result_skip)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4288");
+        diagnostics[0].Message.ShouldContain("$(Result_run)");
+        diagnostics[0].Message.ShouldNotContain("$(Result_skip)");
+    }
+
+    [Fact]
+    public void FalseTaskBucketDoesNotConsumeDeferredPayloadMetadata()
+    {
+        ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>run</Kind>
+                  <Payload>static</Payload>
+                </Input>
+                <Input Include="b">
+                  <Kind>skip</Kind>
+                  <Payload>deferred</Payload>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <PureConsume Items="@(Input)"
+                             Kind="%(Input.Kind)"
+                             Condition="'%(Input.Kind)' == 'run'" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            lookup =>
+            {
+                ProjectItemInstance deferredItem = lookup.GetItems("Input").Single(
+                    item => item.EvaluatedInclude == "b");
+                lookup.EnableHardenedState().SetMetadata(
+                    deferredItem,
+                    "Payload",
+                    ValueState.Deferred(new ValueOrigin("deferred skipped payload")));
+            }).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void ReportsDeferredPayloadForEveryTaskBucketInOrder()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>first</Kind>
+                  <Payload>one</Payload>
+                </Input>
+                <Input Include="b">
+                  <Kind>second</Kind>
+                  <Payload>two</Payload>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <PureConsume Items="@(Input)" Kind="%(Input.Kind)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            lookup =>
+            {
+                ProjectItemInstance[] items = [.. lookup.GetItems("Input")];
+                HardenedLookupState state = lookup.EnableHardenedState();
+                state.SetMetadata(
+                    items[0],
+                    "Payload",
+                    ValueState.Deferred(new ValueOrigin("first bucket payload")));
+                state.SetMetadata(
+                    items[1],
+                    "Payload",
+                    ValueState.Deferred(new ValueOrigin("second bucket payload")));
+            });
+
+        diagnostics.Count.ShouldBe(2);
+        diagnostics[0].Message.ShouldContain("first bucket payload");
+        diagnostics[1].Message.ShouldContain("second bucket payload");
+    }
+
+    [Fact]
+    public void MergedTaskBucketOutputsAreVisibleToLaterBuckets()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>first</Kind>
+                </Input>
+                <Input Include="b">
+                  <Kind>second</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate Condition="'%(Input.Kind)' == 'first' Or '$(Result_first)' == ''">
+                  <Output TaskParameter="Result" PropertyName="Result_%(Input.Kind)" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("condition of task 'Generate'");
+        exception.Message.ShouldContain("output 'Result' of task 'Generate'");
+    }
+
+    [Fact]
     public void AllowsStaticMetadataInItemAndTaskConditions()
     {
         ValidateSuccess(
