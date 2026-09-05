@@ -111,6 +111,136 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void CollectsMissingTargetsAcrossRequestedAndDependencyClosure()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="MissingDependency;Existing" />
+              <Target Name="Existing">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """);
+
+        HardenedTargetValidator validator = new();
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics =
+            validator.Validate(project, ["MissingRequested", "Build"]);
+
+        diagnostics.Count.ShouldBe(3);
+        diagnostics.Count(diagnostic => diagnostic.ErrorCode == "MSB4057").ShouldBe(2);
+        diagnostics.Count(diagnostic => diagnostic.ErrorCode == "MSB4287").ShouldBe(1);
+    }
+
+    [Fact]
+    public void TargetAssignedPropertyCanDetermineLaterTargetDependency()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="SetDependency;Dispatch" />
+              <Target Name="SetDependency">
+                <PropertyGroup>
+                  <NextTarget>Leaf</NextTarget>
+                </PropertyGroup>
+              </Target>
+              <Target Name="Dispatch" DependsOnTargets="$(NextTarget)" />
+              <Target Name="Leaf">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4287");
+    }
+
+    [Fact]
+    public void UnconditionalPropertyAssignmentOverwritesDeferredStateForLaterTargetDependency()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="SetDependency;Dispatch" />
+              <Target Name="SetDependency">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="NextTarget" />
+                </Generate>
+                <PropertyGroup>
+                  <NextTarget>Leaf</NextTarget>
+                </PropertyGroup>
+              </Target>
+              <Target Name="Dispatch" DependsOnTargets="$(NextTarget)" />
+              <Target Name="Leaf">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4287");
+    }
+
+    [Fact]
+    public void FalseTargetConditionSkipsDependenciesAndBody()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build"
+                      Condition="'false' == 'true'"
+                      DependsOnTargets="Missing">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Fact]
+    public void CollectsTargetDependencyExpansionFailure()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build"
+                      DependsOnTargets="$([System.String]::MethodThatDoesNotExist())" />
+              <Target Name="Other">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """);
+
+        HardenedTargetValidator validator = new();
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics =
+            validator.Validate(project, ["Build", "Other"]);
+
+        diagnostics.Count.ShouldBe(2);
+        diagnostics.ShouldContain(diagnostic => diagnostic.ErrorCode == "MSB4186");
+        diagnostics.ShouldContain(diagnostic => diagnostic.ErrorCode == "MSB4287");
+    }
+
+    [Fact]
     public void AllowsReturns()
     {
         ValidateSuccess(
@@ -286,9 +416,9 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void DoesNotResolveOutputDestinationAgainstStaleEvaluationProperty()
+    public void ResolvesOutputDestinationAgainstTargetAssignedProperty()
     {
-        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+        InvalidProjectFileException exception = ValidateFailure(
             """
             <Project>
               <PropertyGroup>
@@ -301,17 +431,18 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
                 <Generate>
                   <Output TaskParameter="Result" ItemName="Discovered$(Suffix)" />
                 </Generate>
+                <PureConsume Input="@(DiscoveredNew)" />
               </Target>
             </Project>
             """,
             new Dictionary<string, HardenedTaskClassification>
             {
                 ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
             });
 
-        diagnostics.Count.ShouldBe(1);
-        diagnostics[0].ErrorCode.ShouldBe("MSB4286");
-        diagnostics[0].Message.ShouldContain("target-assigned property");
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("item 'DiscoveredNew'");
     }
 
     [Fact]

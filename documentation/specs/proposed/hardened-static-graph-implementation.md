@@ -167,6 +167,20 @@ This baseline covers target validation only. Evaluation restrictions, imports,
 environment reads, SDK resolution, and evaluation-time globs are not yet
 represented and will add a separate failure inventory.
 
+After the metadata, expression, and target-closure validation quanta, the same
+pinned build produces 146 diagnostics:
+
+| Code | Count |
+| --- | ---: |
+| `MSB4286` | 70 |
+| `MSB4287` | 23 |
+| `MSB4288` | 53 |
+
+The blanket metadata diagnostics are gone. Static target conditions are now
+evaluated against sequential target-time property assignments, so unreachable
+dependencies and target bodies no longer contribute ambient-read or deferred
+value cascades.
+
 ### Burn-down rules
 
 - Fix validator blind spots before changing SDK targets merely to satisfy the
@@ -451,35 +465,48 @@ loading is a later milestone.
 1. Initialize properties and items from
    `ProjectInstance.PropertiesToBuildWith` and
    `ProjectInstance.ItemsToBuildWith` as static.
-2. Locate the explicitly requested `ProjectTargetInstance`.
-3. Reject unsupported target attributes and child element types at their
+2. Traverse the requested target closure in ordinary dependency, `BeforeTargets`,
+   body, and `AfterTargets` order. Missing requested or nested targets are
+   collected as ordinary `MSB4057` diagnostics rather than escaping validation.
+3. Maintain a mutable deep copy of the evaluated `ProjectInstance` as a
+   concrete expansion overlay for statically evaluable intrinsic property
+   assignments. Availability and origin state remain in
+   `HardenedValidationContext`; the concrete overlay never substitutes for it.
+4. Locate each selected `ProjectTargetInstance`.
+5. Reject unsupported target attributes and child element types at their
    source locations.
-4. Visit `ProjectTargetInstance.Children` in source order.
-5. Validate every function used by a target-body condition or value against
+6. Visit `ProjectTargetInstance.Children` in source order.
+7. Validate every function used by a target-body condition or value against
    the graph-construction property-function allowlist. This includes functions
    used in `PropertyGroup` assignments.
-6. For a `PropertyGroup` or `ItemGroup`, determine the availability of every
+8. For a `PropertyGroup` or `ItemGroup`, determine the availability of every
    expression it reads and propagate that availability to its assignments.
-7. Require static values for conditions, names, item membership operations,
+9. Require static values for conditions, names, item membership operations,
    transforms, batching expressions, and other graph-construction positions.
-8. For a task element, determine the availability of its condition,
+10. For a task element, determine the availability of its condition,
    parameters, batching expressions, and output destinations.
-9. Require every Pure-task parameter to be static.
-10. Classify Pure-task outputs as values that would be static during full graph
+11. Require every Pure-task parameter to be static.
+12. Classify Pure-task outputs as values that would be static during full graph
    construction, and Declared-IO or Unaudited task outputs as deferred. The
    first slice validates availability only and does not execute the task to
    obtain a concrete output value.
-11. Permit deferred parameters on Declared-IO and Unaudited task invocations
-    when the parameter itself is not needed to determine graph structure.
-12. When a static context reads a deferred value, report an error containing
-    the producing task and output, intermediate assignments, consuming
-    element, and the reason that context requires a static value.
-13. Complete without producing an execution graph or changing normal MSBuild
-    state.
+13. Permit deferred parameters on Declared-IO and Unaudited task invocations
+   when the parameter itself is not needed to determine graph structure.
+14. When a static context reads a deferred value, report an error containing
+   the producing task and output, intermediate assignments, consuming
+   element, and the reason that context requires a static value.
+15. Complete without producing an execution graph or changing normal MSBuild
+   state.
 
 The validator must not use `Lookup` as its sole state. `Lookup` stores concrete
 `ProjectPropertyInstance` and `ProjectItemInstance` values and cannot represent
 deferred availability or origin chains.
+
+The concrete expansion overlay is intentionally limited to values the
+validator can reproduce without task execution or target-item batching. If an
+expression depends on a task output or an item operation whose concrete value
+has not been partially evaluated, the overlay must not fall back to the stale
+evaluation-time value.
 
 ### Diagnostics
 

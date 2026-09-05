@@ -66,10 +66,12 @@ internal sealed class HardenedValidationContext
     internal ValueState GetProperty(string propertyName)
         => _properties.TryGetValue(propertyName, out ValueState state) ? state : ValueState.Static;
 
-    internal void SetProperty(string propertyName, ValueState state)
+    internal void SetProperty(string propertyName, ValueState state, bool overwrite = false)
     {
-        ValueState existing = GetProperty(propertyName);
-        _properties[propertyName] = ValueState.Combine(existing, state.WithOrigin($"property '{propertyName}'"));
+        ValueState propertyState = state.WithOrigin($"property '{propertyName}'");
+        _properties[propertyName] = overwrite
+            ? propertyState
+            : ValueState.Combine(GetProperty(propertyName), propertyState);
     }
 
     internal ValueState GetItemMembership(string itemType)

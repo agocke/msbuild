@@ -10,6 +10,7 @@ using Microsoft.Build.Evaluation;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Shared;
+using Microsoft.Build.Shared.FileSystem;
 
 #nullable enable
 
@@ -51,8 +52,11 @@ internal sealed class HardenedTargetValidator
     private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
     private readonly List<InvalidProjectFileException> _diagnostics = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _targetAssignedProperties = new(MSBuildNameIgnoreCaseComparer.Default);
+    private readonly HashSet<string> _propertiesWithoutConcreteValues = new(MSBuildNameIgnoreCaseComparer.Default);
+    private readonly HashSet<string> _targetAssignedItemTypes = new(MSBuildNameIgnoreCaseComparer.Default);
     private HardenedValidationContext? _context;
+    private ProjectInstance? _concreteProject;
+    private Expander<ProjectPropertyInstance, ProjectItemInstance>? _concreteExpander;
 
     internal HardenedTargetValidator(IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
     {
@@ -81,20 +85,31 @@ internal sealed class HardenedTargetValidator
 
         _diagnostics.Clear();
         _diagnosticKeys.Clear();
-        _targetAssignedProperties.Clear();
+        _propertiesWithoutConcreteValues.Clear();
+        _targetAssignedItemTypes.Clear();
         _context = new HardenedValidationContext(project);
+        _concreteProject = project.DeepCopy(isImmutable: false);
+        _concreteExpander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
+            _concreteProject,
+            _concreteProject,
+            FileSystems.Default,
+            loggingContext: null);
 
         HashSet<string> visitedTargets = new(MSBuildNameIgnoreCaseComparer.Default);
         foreach (string targetName in targetNames)
         {
             ArgumentException.ThrowIfNullOrEmpty(targetName);
-            ValidateTarget(project, targetName, visitedTargets);
+            ValidateTarget(project, targetName, project.ProjectFileLocation, visitedTargets);
         }
 
         return _diagnostics;
     }
 
-    private void ValidateTarget(ProjectInstance project, string targetName, HashSet<string> visitedTargets)
+    private void ValidateTarget(
+        ProjectInstance project,
+        string targetName,
+        IElementLocation referenceLocation,
+        HashSet<string> visitedTargets)
     {
         if (!visitedTargets.Add(targetName))
         {
@@ -103,7 +118,8 @@ internal sealed class HardenedTargetValidator
 
         if (!project.Targets.TryGetValue(targetName, out ProjectTargetInstance? target))
         {
-            throw new ArgumentException($"Target '{targetName}' does not exist.", nameof(targetName));
+            ReportMissingTarget(referenceLocation, targetName);
+            return;
         }
 
         ValidateUnsupportedTargetConstructs(target);
@@ -111,71 +127,90 @@ internal sealed class HardenedTargetValidator
             target.Condition,
             target.ConditionLocation,
             $"the condition of target '{target.Name}'");
-        ValidateExpression(
+        ExpressionValidationResult targetConditionResult = ValidateExpression(
             target.Condition,
             target.ConditionLocation,
             $"the condition of target '{target.Name}'",
             requireStatic: true,
             isCondition: true,
             metadataBatchingValidated: targetConditionMetadataValidated);
-        ExpressionValidationResult dependenciesResult = ValidateExpression(
-            target.DependsOnTargets,
-            target.DependsOnTargetsLocation,
-            $"the DependsOnTargets attribute of target '{target.Name}'",
-            requireStatic: true,
-            isCondition: false);
         ValidateExpression(target.BeforeTargets, target.BeforeTargetsLocation, $"the BeforeTargets attribute of target '{target.Name}'", requireStatic: true, isCondition: false);
         ValidateExpression(target.AfterTargets, target.AfterTargetsLocation, $"the AfterTargets attribute of target '{target.Name}'", requireStatic: true, isCondition: false);
 
-        if (dependenciesResult.CanEvaluate)
+        bool targetExecutes = !TryEvaluateCondition(
+            target.Condition,
+            target.ConditionLocation,
+            targetConditionResult,
+            out bool conditionValue) || conditionValue;
+
+        if (targetExecutes)
         {
-            foreach (string dependency in ExpressionShredder.SplitSemiColonSeparatedList(project.ExpandString(target.DependsOnTargets)))
+            ExpressionValidationResult dependenciesResult = ValidateExpression(
+                target.DependsOnTargets,
+                target.DependsOnTargetsLocation,
+                $"the DependsOnTargets attribute of target '{target.Name}'",
+                requireStatic: true,
+                isCondition: false);
+
+            if (dependenciesResult.CanEvaluate &&
+                TryExpandConcreteExpression(
+                    target.DependsOnTargets,
+                    target.DependsOnTargetsLocation,
+                    $"the DependsOnTargets attribute of target '{target.Name}'",
+                    reportUnmodeled: true,
+                    out string expandedDependencies))
             {
-                ValidateTarget(project, dependency, visitedTargets);
+                foreach (string dependency in ExpressionShredder.SplitSemiColonSeparatedList(expandedDependencies))
+                {
+                    ValidateTarget(project, dependency, target.DependsOnTargetsLocation, visitedTargets);
+                }
             }
         }
 
         foreach (TargetSpecification beforeTarget in project.GetTargetsWhichRunBefore(target.Name))
         {
-            ValidateTarget(project, beforeTarget.TargetName, visitedTargets);
+            ValidateTarget(project, beforeTarget.TargetName, beforeTarget.ReferenceLocation, visitedTargets);
         }
 
-        ValidateBatching([target.Returns], implicitItemType: null, target.ReturnsLocation, $"target '{target.Name}'");
-
-        foreach (ProjectTargetInstanceChild child in target.Children)
+        if (targetExecutes)
         {
-            switch (child)
+            ValidateBatching([target.Returns], implicitItemType: null, target.ReturnsLocation, $"target '{target.Name}'");
+
+            foreach (ProjectTargetInstanceChild child in target.Children)
             {
-                case ProjectPropertyGroupTaskInstance propertyGroup:
-                    ValidatePropertyGroup(propertyGroup, target.Name);
-                    break;
+                switch (child)
+                {
+                    case ProjectPropertyGroupTaskInstance propertyGroup:
+                        ValidatePropertyGroup(propertyGroup, target.Name);
+                        break;
 
-                case ProjectItemGroupTaskInstance itemGroup:
-                    ValidateItemGroup(itemGroup, target.Name);
-                    break;
+                    case ProjectItemGroupTaskInstance itemGroup:
+                        ValidateItemGroup(itemGroup, target.Name);
+                        break;
 
-                case ProjectTaskInstance task:
-                    ValidateTask(project, task, target.Name);
-                    break;
+                    case ProjectTaskInstance task:
+                        ValidateTask(task, target.Name);
+                        break;
 
-                default:
-                    ReportUnsupported(child.Location, child.GetType().Name, $"target '{target.Name}'");
-                    break;
+                    default:
+                        ReportUnsupported(child.Location, child.GetType().Name, $"target '{target.Name}'");
+                        break;
+                }
             }
-        }
 
-        ValidateExpression(
-            target.Returns,
-            target.ReturnsLocation,
-            $"the Returns attribute of target '{target.Name}'",
-            requireStatic: false,
-            isCondition: false,
-            metadataBatchingValidated: true,
-            includeItemMetadata: true);
+            ValidateExpression(
+                target.Returns,
+                target.ReturnsLocation,
+                $"the Returns attribute of target '{target.Name}'",
+                requireStatic: false,
+                isCondition: false,
+                metadataBatchingValidated: true,
+                includeItemMetadata: true);
+        }
 
         foreach (TargetSpecification afterTarget in project.GetTargetsWhichRunAfter(target.Name))
         {
-            ValidateTarget(project, afterTarget.TargetName, visitedTargets);
+            ValidateTarget(project, afterTarget.TargetName, afterTarget.ReferenceLocation, visitedTargets);
         }
     }
 
@@ -192,12 +227,21 @@ internal sealed class HardenedTargetValidator
 
     private void ValidatePropertyGroup(ProjectPropertyGroupTaskInstance propertyGroup, string targetName)
     {
-        ValidateExpression(
+        ExpressionValidationResult groupConditionResult = ValidateExpression(
             propertyGroup.Condition,
             propertyGroup.ConditionLocation,
             $"the condition of a PropertyGroup in target '{targetName}'",
             requireStatic: true,
             isCondition: true);
+        bool groupConditionKnown = TryEvaluateCondition(
+            propertyGroup.Condition,
+            propertyGroup.ConditionLocation,
+            groupConditionResult,
+            out bool groupConditionValue);
+        if (groupConditionKnown && !groupConditionValue)
+        {
+            return;
+        }
 
         foreach (ProjectPropertyGroupTaskPropertyInstance property in propertyGroup.Properties)
         {
@@ -214,6 +258,15 @@ internal sealed class HardenedTargetValidator
                 requireStatic: true,
                 isCondition: true,
                 metadataBatchingValidated: true);
+            bool propertyConditionKnown = TryEvaluateCondition(
+                property.Condition,
+                property.ConditionLocation,
+                conditionResult,
+                out bool propertyConditionValue);
+            if (propertyConditionKnown && !propertyConditionValue)
+            {
+                continue;
+            }
 
             ExpressionValidationResult valueResult = ValidateExpression(
                 property.Value,
@@ -231,8 +284,28 @@ internal sealed class HardenedTargetValidator
                 propertyState = ToBlocked(propertyState, $"property '{property.Name}' has an unavailable condition");
             }
 
-            _targetAssignedProperties.Add(property.Name);
-            Context.SetProperty(property.Name, propertyState);
+            bool overwrites = groupConditionKnown &&
+                groupConditionValue &&
+                propertyConditionKnown &&
+                propertyConditionValue;
+            Context.SetProperty(property.Name, propertyState, overwrite: overwrites);
+
+            if (overwrites &&
+                propertyState.IsStatic &&
+                TryExpandConcreteExpression(
+                    property.Value,
+                    property.Location,
+                    $"the value of property '{property.Name}'",
+                    reportUnmodeled: false,
+                    out string expandedValue))
+            {
+                ConcreteProject.SetProperty(property.Name, expandedValue);
+                _propertiesWithoutConcreteValues.Remove(property.Name);
+            }
+            else
+            {
+                _propertiesWithoutConcreteValues.Add(property.Name);
+            }
         }
     }
 
@@ -247,11 +320,12 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectItemGroupTaskItemInstance item in itemGroup.Items)
         {
+            _targetAssignedItemTypes.Add(item.ItemType);
             ValidateItemOperation(item, targetName);
         }
     }
 
-    private void ValidateTask(ProjectInstance project, ProjectTaskInstance task, string targetName)
+    private void ValidateTask(ProjectTaskInstance task, string targetName)
     {
         if (!_taskClassifications.TryGetValue(task.Name, out HardenedTaskClassification classification))
         {
@@ -354,7 +428,6 @@ internal sealed class HardenedTargetValidator
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
                     destination = ValidateOutputDestination(
-                        project,
                         propertyOutput.PropertyName,
                         propertyOutput.PropertyNameLocation,
                         $"PropertyName of output from task '{task.Name}'",
@@ -363,7 +436,6 @@ internal sealed class HardenedTargetValidator
 
                 case ProjectTaskOutputItemInstance itemOutput:
                     destination = ValidateOutputDestination(
-                        project,
                         itemOutput.ItemType,
                         itemOutput.ItemTypeLocation,
                         $"ItemName of output from task '{task.Name}'",
@@ -393,17 +465,18 @@ internal sealed class HardenedTargetValidator
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
                     Context.SetProperty(destination, outputState);
+                    _propertiesWithoutConcreteValues.Add(destination);
                     break;
 
                 case ProjectTaskOutputItemInstance itemOutput:
                     Context.AddTaskOutputItems(destination, outputState);
+                    _targetAssignedItemTypes.Add(destination);
                     break;
             }
         }
     }
 
     private string? ValidateOutputDestination(
-        ProjectInstance project,
         string destination,
         IElementLocation location,
         string context,
@@ -422,16 +495,16 @@ internal sealed class HardenedTargetValidator
             return null;
         }
 
-        if (ReferencesTargetAssignedProperty(destination))
-        {
-            ReportUnsupported(
+        if (!TryExpandConcreteExpression(
+                destination,
                 location,
-                "an output destination computed from a target-assigned property",
-                context);
+                context,
+                reportUnmodeled: true,
+                out string expandedDestination))
+        {
             return null;
         }
 
-        string expandedDestination = project.ExpandString(destination);
         if (string.IsNullOrEmpty(expandedDestination) ||
             ExpressionShredder.ContainsPropertyMarker(expandedDestination) ||
             ExpressionShredder.ContainsItemVectorMarker(expandedDestination) ||
@@ -444,10 +517,10 @@ internal sealed class HardenedTargetValidator
         return expandedDestination;
     }
 
-    private bool ReferencesTargetAssignedProperty(string expression)
-        => ReferencesTargetAssignedProperty(expression, 0, expression.Length);
+    private bool ReferencesPropertyWithoutConcreteValue(string expression)
+        => ReferencesPropertyWithoutConcreteValue(expression, 0, expression.Length);
 
-    private bool ReferencesTargetAssignedProperty(string expression, int startIndex, int endIndex)
+    private bool ReferencesPropertyWithoutConcreteValue(string expression, int startIndex, int endIndex)
     {
         int marker = ExpressionShredder.IndexOfPropertyMarker(
             expression,
@@ -467,13 +540,13 @@ internal sealed class HardenedTargetValidator
             {
                 int nameEnd = body.IndexOfAny('.', '[');
                 ReadOnlySpan<char> propertyName = (nameEnd < 0 ? body : body[..nameEnd]).Trim();
-                if (!propertyName.IsEmpty && _targetAssignedProperties.Contains(propertyName.ToString()))
+                if (!propertyName.IsEmpty && _propertiesWithoutConcreteValues.Contains(propertyName.ToString()))
                 {
                     return true;
                 }
             }
 
-            if (ReferencesTargetAssignedProperty(expression, bodyStart, close))
+            if (ReferencesPropertyWithoutConcreteValue(expression, bodyStart, close))
             {
                 return true;
             }
@@ -485,6 +558,111 @@ internal sealed class HardenedTargetValidator
         }
 
         return false;
+    }
+
+    private bool TryEvaluateCondition(
+        string condition,
+        IElementLocation? location,
+        ExpressionValidationResult validationResult,
+        out bool result)
+    {
+        result = true;
+        if (condition.Length == 0)
+        {
+            return true;
+        }
+
+        if (!validationResult.CanEvaluate ||
+            !validationResult.State.IsStatic ||
+            !CanExpandConcreteExpression(condition))
+        {
+            return false;
+        }
+
+        IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
+        ElementLocation conditionLocation = effectiveLocation as ElementLocation ?? ElementLocation.EmptyLocation;
+        try
+        {
+            result = ConditionEvaluator.EvaluateCondition(
+                condition,
+                ParserOptions.AllowPropertiesAndItemLists,
+                ConcreteExpander,
+                ExpanderOptions.ExpandPropertiesAndItems,
+                ConcreteProject.Directory,
+                conditionLocation,
+                FileSystems.Default,
+                loggingContext: null);
+            return true;
+        }
+        catch (InvalidProjectFileException exception)
+        {
+            AddDiagnostic(exception);
+            return false;
+        }
+    }
+
+    private bool TryExpandConcreteExpression(
+        string expression,
+        IElementLocation? location,
+        string context,
+        bool reportUnmodeled,
+        out string expanded)
+    {
+        expanded = string.Empty;
+        IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
+        if (!CanExpandConcreteExpression(expression))
+        {
+            if (reportUnmodeled)
+            {
+                ReportUnsupported(
+                    effectiveLocation,
+                    "an expression whose target-time value cannot yet be represented",
+                    context);
+            }
+
+            return false;
+        }
+
+        try
+        {
+            expanded = ConcreteExpander.ExpandIntoStringAndUnescape(
+                expression,
+                ExpanderOptions.ExpandPropertiesAndItems,
+                effectiveLocation);
+            return true;
+        }
+        catch (InvalidProjectFileException exception)
+        {
+            AddDiagnostic(exception);
+            return false;
+        }
+    }
+
+    private bool CanExpandConcreteExpression(string expression)
+    {
+        if (ReferencesPropertyWithoutConcreteValue(expression))
+        {
+            return false;
+        }
+
+        ItemsAndMetadataPair references = ExpressionShredder.GetReferencedItemNamesAndMetadata([expression]);
+        if (references.Metadata is not null)
+        {
+            return false;
+        }
+
+        if (references.Items is not null)
+        {
+            foreach (string itemType in references.Items)
+            {
+                if (_targetAssignedItemTypes.Contains(itemType))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private static string? GetOutputDestination(ProjectTaskInstanceChild output)
@@ -1323,6 +1501,13 @@ internal sealed class HardenedTargetValidator
                 expression,
                 origin.ToString()));
 
+    private void ReportMissingTarget(IElementLocation location, string targetName)
+        => AddDiagnostic(
+            () => ProjectErrorUtilities.ThrowInvalidProject(
+                location,
+                "TargetDoesNotExist",
+                targetName));
+
     private void AddDiagnostic(Action throwDiagnostic)
     {
         try
@@ -1331,16 +1516,27 @@ internal sealed class HardenedTargetValidator
         }
         catch (InvalidProjectFileException exception)
         {
-            string key = $"{exception.ErrorCode}\0{exception.ProjectFile}\0{exception.LineNumber}\0{exception.ColumnNumber}\0{exception.Message}";
-            if (_diagnosticKeys.Add(key))
-            {
-                _diagnostics.Add(exception);
-            }
+            AddDiagnostic(exception);
+        }
+    }
+
+    private void AddDiagnostic(InvalidProjectFileException exception)
+    {
+        string key = $"{exception.ErrorCode}\0{exception.ProjectFile}\0{exception.LineNumber}\0{exception.ColumnNumber}\0{exception.Message}";
+        if (_diagnosticKeys.Add(key))
+        {
+            _diagnostics.Add(exception);
         }
     }
 
     private HardenedValidationContext Context
         => _context ?? throw new InvalidOperationException("Validation context has not been initialized.");
+
+    private ProjectInstance ConcreteProject
+        => _concreteProject ?? throw new InvalidOperationException("Concrete project has not been initialized.");
+
+    private Expander<ProjectPropertyInstance, ProjectItemInstance> ConcreteExpander
+        => _concreteExpander ?? throw new InvalidOperationException("Concrete expander has not been initialized.");
 
     private readonly record struct ExpressionValidationResult(ValueState State, bool CanEvaluate);
 }
