@@ -786,6 +786,73 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void AllowsStaticContinueOnError()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <PropertyGroup>
+                <FailureBehavior>WarnAndContinue</FailureBehavior>
+              </PropertyGroup>
+              <Target Name="Build">
+                <Generate ContinueOnError="$(FailureBehavior)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void AllowsStaticMetadataToBatchContinueOnError()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <FailureBehavior>WarnAndContinue</FailureBehavior>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate Input="@(Input)"
+                          ContinueOnError="%(Input.FailureBehavior)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void RejectsDeferredContinueOnError()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="FailureBehavior" />
+                </Generate>
+                <Consume ContinueOnError="$(FailureBehavior)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("ContinueOnError");
+    }
+
+    [Fact]
     public void RejectsDeferredOutputPassedToPureTask()
     {
         InvalidProjectFileException exception = ValidateFailure(

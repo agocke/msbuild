@@ -338,8 +338,6 @@ internal sealed class HardenedTargetValidator
             classification = HardenedTaskClassification.Unaudited;
         }
 
-        RejectNonEmpty(task.ContinueOnError, task.ContinueOnErrorLocation, "ContinueOnError", targetName);
-
         if (MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget") ||
             MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild"))
         {
@@ -348,6 +346,7 @@ internal sealed class HardenedTargetValidator
 
         List<string> batchableExpressions = [];
         AddIfNotEmpty(batchableExpressions, task.Condition);
+        AddIfNotEmpty(batchableExpressions, task.ContinueOnError);
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
             AddIfNotEmpty(batchableExpressions, parameter.Value.Item1);
@@ -374,7 +373,17 @@ internal sealed class HardenedTargetValidator
             isCondition: true,
             metadataBatchingValidated: true);
 
-        ValueState taskControlState = ValueState.Combine(taskBatchingState, taskConditionResult.State);
+        ExpressionValidationResult continueOnErrorResult = ValidateExpression(
+            task.ContinueOnError,
+            task.ContinueOnErrorLocation,
+            $"ContinueOnError of task '{task.Name}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+
+        ValueState taskControlState = ValueState.Combine(
+            taskBatchingState,
+            ValueState.Combine(taskConditionResult.State, continueOnErrorResult.State));
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
             ExpressionValidationResult parameterResult = ValidateExpression(
@@ -1477,14 +1486,6 @@ internal sealed class HardenedTargetValidator
             ProjectTaskOutputItemInstance item => item.TaskParameter,
             _ => output.GetType().Name,
         };
-
-    private void RejectNonEmpty(string? value, IElementLocation? location, string construct, string targetName)
-    {
-        if (!string.IsNullOrEmpty(value))
-        {
-            ReportUnsupported(location ?? ElementLocation.EmptyLocation, construct, $"target '{targetName}'");
-        }
-    }
 
     private void ReportUnsupported(IElementLocation location, string construct, string context)
         => AddDiagnostic(
