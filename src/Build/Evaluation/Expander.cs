@@ -578,7 +578,7 @@ internal partial class Expander<P, I>
     /// Returns an array of unexpanded arguments.
     /// If there are no arguments, returns an empty array.
     /// </summary>
-    private static string[] ExtractFunctionArguments(IElementLocation elementLocation, string expressionFunction, ReadOnlyMemory<char> argumentsMemory)
+    internal static string[] ExtractFunctionArguments(IElementLocation elementLocation, string expressionFunction, ReadOnlyMemory<char> argumentsMemory)
     {
         int argumentsContentLength = argumentsMemory.Length;
         ReadOnlySpan<char> argumentsSpan = argumentsMemory.Span;

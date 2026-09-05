@@ -778,7 +778,7 @@ namespace Microsoft.Build.BackEnd
             // Put in the set table
             PrimaryPropertySets ??= new PropertyDictionary<ProjectPropertyInstance>();
             PrimaryPropertySets.Set(property);
-            _hardenedState?.SetConcreteProperty(property.Name);
+            _hardenedState?.SetConcreteProperty(property.Name, property.EvaluatedValue);
         }
 
         /// <summary>

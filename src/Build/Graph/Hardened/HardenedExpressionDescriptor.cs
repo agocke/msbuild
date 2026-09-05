@@ -186,7 +186,8 @@ internal sealed class HardenedExpressionDescriptor
                             transform.Value,
                             transform.FunctionName,
                             transform.FunctionArguments,
-                            metadata));
+                            metadata,
+                            GetMetadataItemFunctionKind(transform.FunctionName)));
                 }
 
                 transforms = transformBuilder.DrainToImmutable();
@@ -197,6 +198,33 @@ internal sealed class HardenedExpressionDescriptor
         }
 
         return itemVectors.DrainToImmutable();
+    }
+
+    private static HardenedMetadataItemFunctionKind? GetMetadataItemFunctionKind(string? functionName)
+    {
+        if (functionName is null)
+        {
+            return null;
+        }
+
+        if (functionName.Equals("Metadata", StringComparison.OrdinalIgnoreCase))
+        {
+            return HardenedMetadataItemFunctionKind.Metadata;
+        }
+
+        if (functionName.Equals("HasMetadata", StringComparison.OrdinalIgnoreCase))
+        {
+            return HardenedMetadataItemFunctionKind.HasMetadata;
+        }
+
+        if (functionName.Equals("WithMetadataValue", StringComparison.OrdinalIgnoreCase))
+        {
+            return HardenedMetadataItemFunctionKind.WithMetadataValue;
+        }
+
+        return functionName.Equals("AnyHaveMetadataValue", StringComparison.OrdinalIgnoreCase)
+            ? HardenedMetadataItemFunctionKind.AnyHaveMetadataValue
+            : null;
     }
 
     private static int FindClosingParenthesis(string expression, int start)
@@ -242,4 +270,13 @@ internal readonly record struct HardenedItemTransformDescriptor(
     string Expression,
     string? FunctionName,
     string? FunctionArguments,
-    ImmutableArray<MetadataReference> Metadata);
+    ImmutableArray<MetadataReference> Metadata,
+    HardenedMetadataItemFunctionKind? MetadataItemFunctionKind);
+
+internal enum HardenedMetadataItemFunctionKind
+{
+    Metadata,
+    HasMetadata,
+    WithMetadataValue,
+    AnyHaveMetadataValue,
+}

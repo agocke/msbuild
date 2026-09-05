@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 using Microsoft.Build.BackEnd;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
@@ -78,7 +79,6 @@ internal sealed class HardenedTargetValidator
     private readonly Dictionary<string, ValueState> _targetResults =
         new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _activeTargets = new(MSBuildNameIgnoreCaseComparer.Default);
-    private readonly HashSet<string> _propertiesWithoutConcreteValues = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _targetAssignedItemTypes = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HardenedExpressionDescriptorCache _expressionDescriptors = new();
     private Lookup? _validationLookup;
@@ -125,7 +125,6 @@ internal sealed class HardenedTargetValidator
         _diagnosticKeys.Clear();
         _targetResults.Clear();
         _activeTargets.Clear();
-        _propertiesWithoutConcreteValues.Clear();
         _targetAssignedItemTypes.Clear();
         _expressionDescriptors.Clear();
         _validationLookup = lookup.Clone();
@@ -400,8 +399,7 @@ internal sealed class HardenedTargetValidator
             propertyConditionKnown &&
             propertyConditionValue;
         callTargetScope?.CallerAssignedProperties.Add(property.Name);
-        Context.SetProperty(property.Name, propertyState, overwrite: overwrites);
-
+        HardenedValue<string> propertyValue;
         if (overwrites &&
             propertyState.IsStatic &&
             TryExpandConcreteExpression(
@@ -412,13 +410,18 @@ internal sealed class HardenedTargetValidator
                 reportUnmodeled: false,
                 out string expandedValue))
         {
-            ValidationLookup.SetProperty(ProjectPropertyInstance.Create(property.Name, expandedValue));
-            _propertiesWithoutConcreteValues.Remove(property.Name);
+            propertyValue = HardenedValue<string>.Static(expandedValue);
         }
         else
         {
-            _propertiesWithoutConcreteValues.Add(property.Name);
+            ValueState nonStaticState = propertyState.IsStatic
+                ? ValueState.Blocked(
+                    new ValueOrigin($"concrete value of property '{property.Name}' is unavailable"))
+                : propertyState;
+            propertyValue = HardenedValue<string>.NonStatic(nonStaticState);
         }
+
+        Context.SetProperty(property.Name, propertyValue, overwrite: overwrites);
     }
 
     private void ValidateItemGroup(
@@ -573,7 +576,6 @@ internal sealed class HardenedTargetValidator
                 callTargetScope ?? throw new InvalidOperationException("CallTarget scope was not captured."));
         }
 
-        bool outputsAreDeferred = classification != HardenedTaskClassification.Pure;
         foreach (ProjectTaskInstanceChild output in task.Outputs)
         {
             string outputTaskParameter = GetTaskParameter(output);
@@ -664,14 +666,15 @@ internal sealed class HardenedTargetValidator
             }
             else
             {
-                outputState = outputsAreDeferred ? ValueState.Deferred(origin) : ValueState.Static;
+                outputState = ValueState.Deferred(origin);
             }
             switch (output)
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
                     callTargetScope?.CallerAssignedProperties.Add(destination);
-                    Context.SetProperty(destination, outputState);
-                    _propertiesWithoutConcreteValues.Add(destination);
+                    Context.SetProperty(
+                        destination,
+                        HardenedValue<string>.NonStatic(outputState));
                     break;
 
                 case ProjectTaskOutputItemInstance itemOutput:
@@ -684,8 +687,10 @@ internal sealed class HardenedTargetValidator
 
         ValueState taskStatus = ValueState.Deferred(new ValueOrigin($"result of task '{task.Name}'"));
         callTargetScope?.CallerAssignedProperties.Add(ReservedPropertyNames.lastTaskResult);
-        Context.SetProperty(ReservedPropertyNames.lastTaskResult, taskStatus, overwrite: true);
-        _propertiesWithoutConcreteValues.Add(ReservedPropertyNames.lastTaskResult);
+        Context.SetProperty(
+            ReservedPropertyNames.lastTaskResult,
+            HardenedValue<string>.NonStatic(taskStatus),
+            overwrite: true);
     }
 
     private ValueState ValidateMSBuildProjectMetadata(
@@ -811,17 +816,6 @@ internal sealed class HardenedTargetValidator
         foreach (string propertyName in callTargetScope.CallerAssignedProperties)
         {
             mergedState.Context.CopyPropertyFrom(callerState.Context, propertyName);
-            if (callerState.PropertiesWithoutConcreteValues.Contains(propertyName))
-            {
-                mergedState.PropertiesWithoutConcreteValues.Add(propertyName);
-            }
-            else
-            {
-                mergedState.PropertiesWithoutConcreteValues.Remove(propertyName);
-                ProjectPropertyInstance property = callerState.Lookup.GetProperty(propertyName);
-                Assumed.NotNull(property);
-                mergedState.Lookup.SetProperty(property);
-            }
         }
 
         foreach (string itemType in callTargetScope.CallerAssignedItemTypes)
@@ -837,9 +831,6 @@ internal sealed class HardenedTargetValidator
         => new(
             ValidationLookup.SnapshotHardenedLookup(),
             new HashSet<string>(
-                _propertiesWithoutConcreteValues,
-                MSBuildNameIgnoreCaseComparer.Default),
-            new HashSet<string>(
                 _targetAssignedItemTypes,
                 MSBuildNameIgnoreCaseComparer.Default));
 
@@ -847,7 +838,6 @@ internal sealed class HardenedTargetValidator
     {
         _validationLookup = state.Lookup;
         _concreteExpander = CreateConcreteExpander(_validationLookup);
-        RestoreSet(_propertiesWithoutConcreteValues, state.PropertiesWithoutConcreteValues);
         RestoreSet(_targetAssignedItemTypes, state.TargetAssignedItemTypes);
     }
 
@@ -940,7 +930,7 @@ internal sealed class HardenedTargetValidator
     {
         foreach (string propertyName in descriptor.Properties)
         {
-            if (_propertiesWithoutConcreteValues.Contains(propertyName))
+            if (!Context.GetProperty(propertyName).IsStatic)
             {
                 return true;
             }
@@ -1108,7 +1098,14 @@ internal sealed class HardenedTargetValidator
             }
         }
 
-        state = ValueState.Combine(state, FindTransformMetadataState(descriptor, includeItemMetadata));
+        state = ValueState.Combine(
+            state,
+            FindTransformMetadataState(
+                owner,
+                descriptor,
+                effectiveLocation,
+                context,
+                includeItemMetadata));
 
         if (!metadataBatchingValidated && descriptor.BatchMetadata is not null)
         {
@@ -1144,7 +1141,7 @@ internal sealed class HardenedTargetValidator
                     propertyName,
                     ReservedPropertyNames.lastTaskResult))
             {
-                state = ValueState.Combine(state, Context.GetProperty(propertyName));
+                state = ValueState.Combine(state, Context.GetProperty(propertyName).State);
             }
         }
 
@@ -1827,7 +1824,10 @@ internal sealed class HardenedTargetValidator
     }
 
     private ValueState FindTransformMetadataState(
+        object owner,
         HardenedExpressionDescriptor descriptor,
+        IElementLocation location,
+        string context,
         bool includeItemMetadata)
     {
         ValueState state = ValueState.Static;
@@ -1838,8 +1838,28 @@ internal sealed class HardenedTargetValidator
                 state = ValueState.Combine(state, Context.GetItemValue(itemVector.ItemType, includeMetadata: true));
             }
 
-            foreach (HardenedItemTransformDescriptor transform in itemVector.Transforms)
+            bool canExpandPrefix =
+                Context.GetItemMembership(itemVector.ItemType).IsStatic &&
+                !_targetAssignedItemTypes.Contains(itemVector.ItemType);
+            for (int transformIndex = 0; transformIndex < itemVector.Transforms.Length; transformIndex++)
             {
+                HardenedItemTransformDescriptor transform = itemVector.Transforms[transformIndex];
+                if (transform.MetadataItemFunctionKind is HardenedMetadataItemFunctionKind functionKind)
+                {
+                    ValueState functionState = ValidateMetadataItemFunction(
+                        owner,
+                        itemVector,
+                        transformIndex,
+                        transform,
+                        functionKind,
+                        location,
+                        context,
+                        canExpandPrefix);
+                    state = ValueState.Combine(state, functionState);
+                    canExpandPrefix &= functionState.IsStatic;
+                    continue;
+                }
+
                 foreach (MetadataReference metadataReference in transform.Metadata)
                 {
                     string itemType = metadataReference.ItemName ?? itemVector.ItemType;
@@ -1847,11 +1867,240 @@ internal sealed class HardenedTargetValidator
                     state = ValueState.Combine(
                         state,
                         metadataState.WithOrigin($"transform of item '{itemVector.ItemType}'"));
+                    canExpandPrefix &= metadataState.IsStatic;
                 }
             }
         }
 
         return state;
+    }
+
+    private ValueState ValidateMetadataItemFunction(
+        object owner,
+        HardenedItemVectorDescriptor itemVector,
+        int transformIndex,
+        HardenedItemTransformDescriptor transform,
+        HardenedMetadataItemFunctionKind functionKind,
+        IElementLocation location,
+        string context,
+        bool canExpandPrefix)
+    {
+        string argumentsExpression = transform.FunctionArguments ?? string.Empty;
+        string[] arguments = Expander<ProjectPropertyInstance, ProjectItemInstance>.ExtractFunctionArguments(
+            location,
+            transform.Expression,
+            argumentsExpression.AsMemory());
+        int expectedArgumentCount = functionKind is
+            HardenedMetadataItemFunctionKind.Metadata or
+            HardenedMetadataItemFunctionKind.HasMetadata
+                ? 1
+                : 2;
+        if (arguments.Length != expectedArgumentCount)
+        {
+            TryExpandItemVectorPrefix(itemVector, transformIndex + 1, location, out _);
+            return ValueState.Blocked(
+                new ValueOrigin($"invalid arguments to item function '{transform.FunctionName}' in {context}"));
+        }
+
+        ValueState keyState = ValidateStaticItemFunctionArgument(
+            owner,
+            arguments[0],
+            itemVector.ItemType,
+            location,
+            $"the metadata key of item function '{transform.FunctionName}' in {context}");
+        if (!keyState.IsStatic)
+        {
+            return keyState.Availability == ValueAvailability.Blocked
+                ? keyState
+                : ToBlocked(
+                    keyState,
+                    $"metadata key of item function '{transform.FunctionName}' is not static");
+        }
+
+        ValueState comparisonState = ValueState.Static;
+        if (expectedArgumentCount == 2)
+        {
+            comparisonState = ValidateStaticItemFunctionArgument(
+                owner,
+                arguments[1],
+                itemVector.ItemType,
+                location,
+                $"the comparison value of item function '{transform.FunctionName}' in {context}");
+            if (!comparisonState.IsStatic)
+            {
+                return comparisonState.Availability == ValueAvailability.Blocked
+                    ? comparisonState
+                    : ToBlocked(
+                        comparisonState,
+                        $"comparison value of item function '{transform.FunctionName}' is not static");
+            }
+        }
+
+        if (!canExpandPrefix ||
+            !TryExpandItemFunctionArguments(transform, location, out string[] expandedArguments) ||
+            !TryExpandItemVectorPrefix(itemVector, transformIndex, location, out List<Expander<ProjectPropertyInstance, ProjectItemInstance>.TransformEntry> entries))
+        {
+            return ValueState.Combine(keyState, comparisonState);
+        }
+
+        string metadataName = expandedArguments[0];
+        string? comparisonValue = expandedArguments.Length == 2 ? expandedArguments[1] : null;
+        ValueState state = ValueState.Static;
+        foreach (Expander<ProjectPropertyInstance, ProjectItemInstance>.TransformEntry entry in entries)
+        {
+            ProjectItemInstance? item = entry.Item;
+            if (item is null)
+            {
+                continue;
+            }
+
+            HardenedValue<string> metadataValue = Context.GetItemMetadataValue(item, metadataName);
+            ValueState metadataState = metadataValue.State.WithOrigin(
+                $"metadata '{metadataName}' on item '{item.EvaluatedInclude}' used by item function '{transform.FunctionName}'");
+            state = ValueState.Combine(state, metadataState);
+            if (!metadataState.IsStatic)
+            {
+                break;
+            }
+
+            string concreteMetadataValue = metadataValue.GetStaticValue();
+            switch (functionKind)
+            {
+                case HardenedMetadataItemFunctionKind.Metadata:
+                    break;
+
+                case HardenedMetadataItemFunctionKind.HasMetadata:
+                    if (!string.IsNullOrEmpty(concreteMetadataValue))
+                    {
+                        HardenedValue<string> identity = Context.GetItemIdentityValue(item);
+                        state = ValueState.Combine(
+                            state,
+                            identity.State.WithOrigin(
+                                $"identity of item '{item.EvaluatedInclude}' selected by item function '{transform.FunctionName}'"));
+                    }
+
+                    break;
+
+                case HardenedMetadataItemFunctionKind.WithMetadataValue:
+                    if (string.Equals(concreteMetadataValue, comparisonValue, StringComparison.OrdinalIgnoreCase))
+                    {
+                        HardenedValue<string> identity = Context.GetItemIdentityValue(item);
+                        state = ValueState.Combine(
+                            state,
+                            identity.State.WithOrigin(
+                                $"identity of item '{item.EvaluatedInclude}' selected by item function '{transform.FunctionName}'"));
+                    }
+
+                    break;
+
+                case HardenedMetadataItemFunctionKind.AnyHaveMetadataValue:
+                    if (string.Equals(concreteMetadataValue, comparisonValue, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return state;
+                    }
+
+                    break;
+            }
+        }
+
+        return state;
+    }
+
+    private ValueState ValidateStaticItemFunctionArgument(
+        object owner,
+        string argument,
+        string implicitItemType,
+        IElementLocation location,
+        string context)
+    {
+        ExpressionValidationResult result = ValidateExpression(
+            owner,
+            argument,
+            location,
+            context,
+            requireStatic: false,
+            isCondition: false,
+            implicitItemType: implicitItemType);
+        if (result.State.Availability == ValueAvailability.Deferred)
+        {
+            RequireStatic(result.State, location, context, argument);
+        }
+
+        return result.State;
+    }
+
+    private bool TryExpandItemFunctionArguments(
+        HardenedItemTransformDescriptor transform,
+        IElementLocation location,
+        out string[] arguments)
+    {
+        arguments = [];
+        try
+        {
+            string argumentsExpression = transform.FunctionArguments ?? string.Empty;
+            string expandedArguments = ConcreteExpander.ExpandIntoStringLeaveEscaped(
+                argumentsExpression,
+                _activeMetadata is null
+                    ? ExpanderOptions.ExpandProperties
+                    : ExpanderOptions.ExpandPropertiesAndMetadata,
+                location);
+            arguments = Expander<ProjectPropertyInstance, ProjectItemInstance>.ExtractFunctionArguments(
+                location,
+                transform.Expression,
+                expandedArguments.AsMemory());
+            return true;
+        }
+        catch (InvalidProjectFileException exception)
+        {
+            AddDiagnostic(exception);
+            return false;
+        }
+    }
+
+    private bool TryExpandItemVectorPrefix(
+        HardenedItemVectorDescriptor itemVector,
+        int transformCount,
+        IElementLocation location,
+        out List<Expander<ProjectPropertyInstance, ProjectItemInstance>.TransformEntry> entries)
+    {
+        entries = [];
+        var expression = new StringBuilder("@(").Append(itemVector.ItemType);
+        for (int i = 0; i < transformCount; i++)
+        {
+            expression.Append("->").Append(itemVector.Transforms[i].Expression);
+        }
+
+        expression.Append(')');
+
+        try
+        {
+            string expandedExpression = ConcreteExpander.ExpandIntoStringLeaveEscaped(
+                expression.ToString(),
+                _activeMetadata is null
+                    ? ExpanderOptions.ExpandProperties
+                    : ExpanderOptions.ExpandPropertiesAndMetadata,
+                location);
+            if (!ExpressionShredder.TryGetNextItemVectorExpression(
+                    expandedExpression,
+                    out ExpressionShredder.ItemExpressionCapture capture))
+            {
+                return false;
+            }
+
+            ConcreteExpander.ExpandExpressionCapture(
+                capture,
+                location,
+                ExpanderOptions.ExpandItems,
+                includeNullEntries: false,
+                out _,
+                out entries);
+            return true;
+        }
+        catch (InvalidProjectFileException exception)
+        {
+            AddDiagnostic(exception);
+            return false;
+        }
     }
 
     private bool RequireStatic(
@@ -2202,7 +2451,6 @@ internal sealed class HardenedTargetValidator
 
     private sealed record ValidatorState(
         Lookup Lookup,
-        HashSet<string> PropertiesWithoutConcreteValues,
         HashSet<string> TargetAssignedItemTypes)
     {
         internal HardenedLookupState Context => Lookup.HardenedState;

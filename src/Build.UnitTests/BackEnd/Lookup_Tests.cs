@@ -1295,7 +1295,8 @@ namespace Microsoft.Build.UnitTests.BackEnd
             HardenedLookupState state = lookup.EnableHardenedState();
             state.SetProperty(
                 "p",
-                ValueState.Deferred(new ValueOrigin("initial deferred value")),
+                HardenedValue<string>.NonStatic(
+                    ValueState.Deferred(new ValueOrigin("initial deferred value"))),
                 overwrite: true);
 
             Lookup clone = lookup.Clone();
@@ -1303,16 +1304,17 @@ namespace Microsoft.Build.UnitTests.BackEnd
             cloneScope.HardenedState.ShouldNotBeNull();
             clone.HardenedState.SetProperty(
                 "p",
-                ValueState.Blocked(new ValueOrigin("bucket-local blocked value")),
+                HardenedValue<string>.NonStatic(
+                    ValueState.Blocked(new ValueOrigin("bucket-local blocked value"))),
                 overwrite: true);
 
-            state.GetProperty("p").Availability.ShouldBe(ValueAvailability.Deferred);
-            clone.HardenedState.GetProperty("p").Availability.ShouldBe(ValueAvailability.Blocked);
+            state.GetProperty("p").State.Availability.ShouldBe(ValueAvailability.Deferred);
+            clone.HardenedState.GetProperty("p").State.Availability.ShouldBe(ValueAvailability.Blocked);
 
             cloneScope.LeaveScope();
 
-            state.GetProperty("p").Availability.ShouldBe(ValueAvailability.Blocked);
-            state.GetProperty("p").Origin.ToString().ShouldContain("bucket-local blocked value");
+            state.GetProperty("p").State.Availability.ShouldBe(ValueAvailability.Blocked);
+            state.GetProperty("p").State.Origin.ToString().ShouldContain("bucket-local blocked value");
         }
 
         [Fact]
@@ -1324,14 +1326,39 @@ namespace Microsoft.Build.UnitTests.BackEnd
             HardenedLookupState cloneState = clone.EnableHardenedState();
             cloneState.SetProperty(
                 "p",
-                ValueState.Deferred(new ValueOrigin("clone value")),
+                HardenedValue<string>.NonStatic(
+                    ValueState.Deferred(new ValueOrigin("clone value"))),
                 overwrite: true);
 
             source.HardenedState.ShouldBeNull();
 
             HardenedLookupState sourceState = source.EnableHardenedState();
-            sourceState.GetProperty("p").ShouldBe(ValueState.Static);
-            cloneState.GetProperty("p").Availability.ShouldBe(ValueAvailability.Deferred);
+            sourceState.GetProperty("p").GetStaticValue().ShouldBe(string.Empty);
+            cloneState.GetProperty("p").State.Availability.ShouldBe(ValueAvailability.Deferred);
+        }
+
+        [Fact]
+        public void StaticHardenedPropertyCarriesAndSynchronizesConcreteValue()
+        {
+            default(HardenedValue<string>).IsStatic.ShouldBeFalse();
+
+            Lookup lookup = LookupHelpers.CreateEmptyLookup();
+            HardenedLookupState state = lookup.EnableHardenedState();
+            Lookup.Scope scope = lookup.EnterScope("static property");
+
+            state.SetProperty(
+                "p",
+                HardenedValue<string>.Static("first"),
+                overwrite: true);
+
+            state.GetProperty("p").GetStaticValue().ShouldBe("first");
+            lookup.GetProperty("p").EvaluatedValue.ShouldBe("first");
+
+            lookup.SetProperty(ProjectPropertyInstance.Create("p", "second"));
+
+            state.GetProperty("p").GetStaticValue().ShouldBe("second");
+
+            scope.LeaveScope();
         }
 
         [Fact]

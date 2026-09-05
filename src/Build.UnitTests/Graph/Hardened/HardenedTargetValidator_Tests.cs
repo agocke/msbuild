@@ -1525,9 +1525,9 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void PureOutputRemainsStaticForLaterPureTask()
+    public void RejectsUnmodeledPureTaskOutputUsedByLaterPureTask()
     {
-        ValidateSuccess(
+        InvalidProjectFileException exception = ValidateFailure(
             """
             <Project>
               <Target Name="Build">
@@ -1543,6 +1543,9 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
                 ["PureGenerate"] = HardenedTaskClassification.Pure,
                 ["PureConsume"] = HardenedTaskClassification.Pure,
             });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("output 'Result' of task 'PureGenerate'");
     }
 
     [Fact]
@@ -2357,6 +2360,203 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
         exception.Message.ShouldContain("transform of item 'Copy'");
         exception.Message.ShouldContain("Include into item 'Copy'");
         exception.Message.ShouldContain("output 'Result' of task 'Generate'");
+    }
+
+    [Fact]
+    public void AllowsStaticPropertyAsWithMetadataValueKey()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <PropertyGroup>
+                <MetadataKey>Kind</MetadataKey>
+              </PropertyGroup>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>keep</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <PureConsume Input="@(Input->WithMetadataValue('$(MetadataKey)', 'keep'))" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void RejectsDeferredWithMetadataValueKey()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>keep</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="MetadataKey" />
+                </Generate>
+                <Consume Input="@(Input->WithMetadataValue('$(MetadataKey)', 'keep'))" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("metadata key of item function 'WithMetadataValue'");
+        exception.Message.ShouldContain("output 'Result' of task 'Generate'");
+    }
+
+    [Fact]
+    public void WithMetadataValueLimitsMetadataProjectionToSelectedItems()
+    {
+        ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>keep</Kind>
+                  <Payload>static</Payload>
+                </Input>
+                <Input Include="b">
+                  <Kind>skip</Kind>
+                  <Payload>deferred</Payload>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <PureConsume Input="@(Input->WithMetadataValue('Kind', 'keep')->Metadata('Payload'))" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            lookup =>
+            {
+                ProjectItemInstance deferredItem = lookup.GetItems("Input").Single(
+                    item => item.EvaluatedInclude == "b");
+                lookup.EnableHardenedState().SetMetadata(
+                    deferredItem,
+                    "Payload",
+                    ValueState.Deferred(new ValueOrigin("unselected payload")));
+            }).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void HasMetadataLimitsMetadataProjectionToSelectedItems()
+    {
+        ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Marker>present</Marker>
+                  <Payload>static</Payload>
+                </Input>
+                <Input Include="b">
+                  <Payload>deferred</Payload>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <PureConsume Input="@(Input->HasMetadata('Marker')->Metadata('Payload'))" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            lookup =>
+            {
+                ProjectItemInstance deferredItem = lookup.GetItems("Input").Single(
+                    item => item.EvaluatedInclude == "b");
+                lookup.EnableHardenedState().SetMetadata(
+                    deferredItem,
+                    "Payload",
+                    ValueState.Deferred(new ValueOrigin("item without marker")));
+            }).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void AnyHaveMetadataValueStopsBeforeLaterDeferredItems()
+    {
+        ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>match</Kind>
+                </Input>
+                <Input Include="b">
+                  <Kind>unknown</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <PureConsume Result="@(Input->AnyHaveMetadataValue('Kind', 'match'))" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            lookup =>
+            {
+                ProjectItemInstance deferredItem = lookup.GetItems("Input").Single(
+                    item => item.EvaluatedInclude == "b");
+                lookup.EnableHardenedState().SetMetadata(
+                    deferredItem,
+                    "Kind",
+                    ValueState.Deferred(new ValueOrigin("later unknown kind")));
+            }).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void MetadataFunctionReportsTheExactParticipatingItem()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Payload>deferred</Payload>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <PureConsume Input="@(Input->Metadata('Payload'))" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            lookup =>
+            {
+                ProjectItemInstance item = lookup.GetItems("Input").Single();
+                lookup.EnableHardenedState().SetMetadata(
+                    item,
+                    "Payload",
+                    ValueState.Deferred(new ValueOrigin("deferred payload")));
+            });
+        diagnostics.ShouldNotBeEmpty();
+        InvalidProjectFileException exception = diagnostics[0];
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("metadata 'Payload' on item 'a'");
+        exception.Message.ShouldContain("item function 'Metadata'");
+        exception.Message.ShouldContain("deferred payload");
     }
 
     [Fact]

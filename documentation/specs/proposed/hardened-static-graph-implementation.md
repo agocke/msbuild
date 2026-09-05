@@ -286,7 +286,8 @@ Use two kinds of existing node:
    is active. Do not add availability fields to every evaluated node.
 2. Add an optional hardened payload to each active `Lookup.Scope`. The payload
    records only values that differ from the implicit Static evaluated state:
-   - property state by property name;
+   - property abstract value by property name, where `Static` carries the exact
+     concrete string rather than only an availability bit;
    - item-list membership and identity state by item type;
    - metadata state by concrete `ProjectItemInstance` and metadata name;
    - list-level default state for deferred items that have no concrete
@@ -295,6 +296,11 @@ Use two kinds of existing node:
 
 `Lookup` remains the concrete-value store and its optional scope payloads
 remain the availability/origin store. Neither is sufficient by itself.
+The two stores are updated through one facade: a target-time mutation may be
+recorded as `Static` only when it also supplies the new concrete value to
+`Lookup`. Otherwise the result is `Deferred` or `Blocked`. Consumers obtain a
+concrete value only by unwrapping a `Static(value)` result, so a stale value
+remaining in `Lookup` cannot be used as proof of staticness.
 
 Do not put availability fields directly on `ProjectItemInstance` or
 `ProjectPropertyInstance`. Deferred values may have no concrete instance, and
@@ -310,6 +316,9 @@ create a parallel scope hierarchy.
 ##### Required invariants
 
 - No companion state is allocated when hardened validation is disabled.
+- Staticness is constructive: every `Static` property, item identity, metadata
+  value, or transformed item sequence has a concrete value or exact ordered
+  witness. A bare availability transition to `Static` is invalid.
 - Validation never invokes a task in order to create a value or a bucket.
 - Only concrete Static membership, identities, and batch-key metadata may
   participate in bucket construction.

@@ -60,5 +60,24 @@ public sealed class HardenedExpressionDescriptor_Tests
             descriptor.ItemVectors[1].Transforms.Single();
         functionTransform.FunctionName.ShouldBe("WithMetadataValue");
         functionTransform.FunctionArguments.ShouldBe("'Flavor', 'sweet'");
+        functionTransform.MetadataItemFunctionKind.ShouldBe(
+            HardenedMetadataItemFunctionKind.WithMetadataValue);
+    }
+
+    [Theory]
+    [InlineData("Metadata", (int)HardenedMetadataItemFunctionKind.Metadata)]
+    [InlineData("HasMetadata", (int)HardenedMetadataItemFunctionKind.HasMetadata)]
+    [InlineData("WithMetadataValue", (int)HardenedMetadataItemFunctionKind.WithMetadataValue)]
+    [InlineData("AnyHaveMetadataValue", (int)HardenedMetadataItemFunctionKind.AnyHaveMetadataValue)]
+    public void ClassifiesMetadataSensitiveItemFunctions(
+        string functionName,
+        int expectedKind)
+    {
+        HardenedExpressionDescriptor descriptor = HardenedExpressionDescriptor.Create(
+            $"@(Input->{functionName}('Flavor', 'sweet'))",
+            implicitItemType: null);
+
+        descriptor.ItemVectors.Single().Transforms.Single().MetadataItemFunctionKind.ShouldBe(
+            (HardenedMetadataItemFunctionKind)expectedKind);
     }
 }

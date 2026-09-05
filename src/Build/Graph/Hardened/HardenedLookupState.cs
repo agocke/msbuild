@@ -41,47 +41,80 @@ internal sealed class HardenedLookupState
         current.HardenedState?.MergeInto(parent);
     }
 
-    internal ValueState GetProperty(string propertyName)
+    internal HardenedValue<string> GetProperty(string propertyName)
     {
         for (Lookup.Scope? scope = _lookup.CurrentScope; scope is not null; scope = scope.Parent)
         {
             if (scope.HardenedState?.Properties is not null &&
-                scope.HardenedState.Properties.TryGetValue(propertyName, out ValueState state))
+                scope.HardenedState.Properties.TryGetValue(
+                    propertyName,
+                    out HardenedValue<string> value))
             {
-                return state;
+                return value;
             }
         }
 
-        return ValueState.Static;
+        return HardenedValue<string>.Static(
+            _lookup.GetProperty(propertyName)?.EvaluatedValue ?? string.Empty);
     }
 
-    internal void SetProperty(string propertyName, ValueState state, bool overwrite = false)
+    internal void SetProperty(
+        string propertyName,
+        HardenedValue<string> value,
+        bool overwrite = false)
     {
-        ValueState propertyState = state.WithOrigin($"property '{propertyName}'");
-        SetPropertyState(
-            propertyName,
-            overwrite
-                ? propertyState
-                : ValueState.Combine(GetProperty(propertyName), propertyState));
-    }
+        HardenedValue<string> propertyValue = value.WithOrigin($"property '{propertyName}'");
+        if (!overwrite)
+        {
+            HardenedValue<string> current = GetProperty(propertyName);
+            ValueState combinedState = ValueState.Combine(current.State, propertyValue.State);
+            if (!combinedState.IsStatic)
+            {
+                propertyValue = HardenedValue<string>.NonStatic(combinedState);
+            }
+            else if (!string.Equals(
+                         current.GetStaticValue(),
+                         propertyValue.GetStaticValue(),
+                         StringComparison.Ordinal))
+            {
+                propertyValue = HardenedValue<string>.NonStatic(
+                    ValueState.Blocked(
+                        new ValueOrigin($"property '{propertyName}' may have multiple static values")));
+            }
+        }
 
-    internal void SetConcreteProperty(string propertyName)
-    {
-        SetPropertyState(propertyName, ValueState.Static);
+        SetPropertyValue(propertyName, propertyValue);
     }
 
     internal void CopyPropertyFrom(HardenedLookupState source, string propertyName)
     {
-        SetPropertyState(propertyName, source.GetProperty(propertyName));
+        SetPropertyValue(propertyName, source.GetProperty(propertyName));
+    }
+
+    internal void SetConcreteProperty(string propertyName, string value)
+    {
+        SetPropertyValue(
+            propertyName,
+            HardenedValue<string>.Static(value),
+            updateLookup: false);
     }
 
     internal ValueState GetItemMembership(string itemType)
         => FindItemList(itemType)?.Membership ?? ValueState.Static;
 
     internal ValueState GetItemIdentity(ProjectItemInstance item)
-        => FindItemList(item.ItemType)?.Items.TryGetValue(item, out ItemState? itemState) == true
-            ? itemState.Identity
-            : ValueState.Static;
+        => GetItemIdentityValue(item).State;
+
+    internal HardenedValue<string> GetItemIdentityValue(ProjectItemInstance item)
+    {
+        ValueState state =
+            FindItemList(item.ItemType)?.Items.TryGetValue(item, out ItemState? itemState) == true
+                ? itemState.Identity
+                : ValueState.Static;
+        return state.IsStatic
+            ? HardenedValue<string>.Static(item.EvaluatedInclude)
+            : HardenedValue<string>.NonStatic(state);
+    }
 
     internal ValueState GetItemValue(string itemType, bool includeMetadata)
     {
@@ -174,6 +207,16 @@ internal sealed class HardenedLookupState
             : GetItemMetadata(itemList, item, metadataName);
     }
 
+    internal HardenedValue<string> GetItemMetadataValue(
+        ProjectItemInstance item,
+        string metadataName)
+    {
+        ValueState state = GetItemMetadata(item, metadataName);
+        return state.IsStatic
+            ? HardenedValue<string>.Static(((IItem)item).GetMetadataValueEscaped(metadataName))
+            : HardenedValue<string>.NonStatic(state);
+    }
+
     private static ValueState GetItemMetadata(
         ItemListState itemList,
         ProjectItemInstance item,
@@ -236,12 +279,26 @@ internal sealed class HardenedLookupState
 
     internal void SetItemIdentity(ProjectItemInstance item, ValueState state)
     {
+        if (state.IsStatic)
+        {
+            throw new ArgumentException(
+                "A static item identity must be established through the concrete lookup.",
+                nameof(state));
+        }
+
         GetOrCreateItemState(item).Identity = state;
         CurrentScopeState.MarkItemChanged(item.ItemType);
     }
 
     internal void SetMetadata(ProjectItemInstance item, string metadataName, ValueState state)
     {
+        if (state.IsStatic)
+        {
+            throw new ArgumentException(
+                "Static metadata must be established through the concrete lookup.",
+                nameof(state));
+        }
+
         GetOrCreateItemState(item).Metadata[metadataName] = state;
         CurrentScopeState.MarkItemChanged(item.ItemType);
     }
@@ -530,10 +587,18 @@ internal sealed class HardenedLookupState
         }
     }
 
-    private void SetPropertyState(string propertyName, ValueState state)
+    private void SetPropertyValue(
+        string propertyName,
+        HardenedValue<string> value,
+        bool updateLookup = true)
     {
-        CurrentScopeState.Properties ??= new Dictionary<string, ValueState>(MSBuildNameIgnoreCaseComparer.Default);
-        CurrentScopeState.Properties[propertyName] = state;
+        CurrentScopeState.Properties ??=
+            new Dictionary<string, HardenedValue<string>>(MSBuildNameIgnoreCaseComparer.Default);
+        CurrentScopeState.Properties[propertyName] = value;
+        if (updateLookup && value.TryGetStaticValue(out string? staticValue))
+        {
+            _lookup.SetProperty(ProjectPropertyInstance.Create(propertyName, staticValue));
+        }
     }
 
     private ItemState GetOrCreateItemState(ProjectItemInstance item)
@@ -624,7 +689,7 @@ internal sealed class HardenedLookupState
 
     internal sealed class ScopeState
     {
-        internal Dictionary<string, ValueState>? Properties { get; set; }
+        internal Dictionary<string, HardenedValue<string>>? Properties { get; set; }
 
         internal Dictionary<string, ItemListState>? Items { get; set; }
 
@@ -702,7 +767,7 @@ internal sealed class HardenedLookupState
             var clone = new ScopeState();
             if (Properties is not null)
             {
-                clone.Properties = new Dictionary<string, ValueState>(
+                clone.Properties = new Dictionary<string, HardenedValue<string>>(
                     Properties,
                     MSBuildNameIgnoreCaseComparer.Default);
             }
@@ -771,9 +836,9 @@ internal sealed class HardenedLookupState
                 destinationScope.HardenedState ??= new ScopeState();
             if (Properties is not null)
             {
-                destination.Properties ??= new Dictionary<string, ValueState>(
+                destination.Properties ??= new Dictionary<string, HardenedValue<string>>(
                     MSBuildNameIgnoreCaseComparer.Default);
-                foreach (KeyValuePair<string, ValueState> property in Properties)
+                foreach (KeyValuePair<string, HardenedValue<string>> property in Properties)
                 {
                     if (property.Value.IsStatic && destinationScope.Parent is null)
                     {
