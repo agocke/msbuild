@@ -941,6 +941,158 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void AllowsStaticMSBuildRoutingInputs()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <ProjectToBuild Include="child.proj">
+                  <Properties>Configuration=Debug</Properties>
+                  <UndefineProperties>RuntimeIdentifier</UndefineProperties>
+                  <AdditionalProperties>Platform=AnyCPU</AdditionalProperties>
+                  <ToolsVersion>Current</ToolsVersion>
+                  <SkipNonexistentProjects>Build</SkipNonexistentProjects>
+                </ProjectToBuild>
+              </ItemGroup>
+              <Target Name="Build">
+                <MSBuild
+                  Projects="@(ProjectToBuild)"
+                  Targets="Build"
+                  Properties="TargetFramework=net11.0"
+                  RemoveProperties="SelfContained"
+                  ToolsVersion="Current"
+                  SkipNonexistentProjects="Build"
+                  SkipNonexistentTargets="true"
+                  TargetAndPropertyListSeparators=";" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Fact]
+    public void RejectsDeferredMSBuildProjects()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="ProjectsToBuild" />
+                </Generate>
+                <MSBuild Projects="@(ProjectsToBuild)" Targets="Build" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("parameter 'Projects'");
+    }
+
+    [Theory]
+    [InlineData("Targets")]
+    [InlineData("Properties")]
+    [InlineData("RemoveProperties")]
+    [InlineData("ToolsVersion")]
+    [InlineData("SkipNonexistentProjects")]
+    [InlineData("SkipNonexistentTargets")]
+    [InlineData("TargetAndPropertyListSeparators")]
+    public void RejectsDeferredMSBuildRoutingParameter(string parameterName)
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            $"""
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <MSBuild Projects="child.proj" {parameterName}="$(Deferred)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain($"parameter '{parameterName}'");
+    }
+
+    [Theory]
+    [InlineData("Properties")]
+    [InlineData("UndefineProperties")]
+    [InlineData("AdditionalProperties")]
+    [InlineData("ToolsVersion")]
+    [InlineData("SkipNonexistentProjects")]
+    public void RejectsDeferredMSBuildProjectMetadata(string metadataName)
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            $"""
+            <Project>
+              <ItemGroup>
+                <ProjectToBuild Include="child.proj" />
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <ItemGroup>
+                  <ProjectToBuild Update="child.proj">
+                    <{metadataName}>$(Deferred)</{metadataName}>
+                  </ProjectToBuild>
+                </ItemGroup>
+                <MSBuild Projects="@(ProjectToBuild)" Targets="Build" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain($"'{metadataName}' metadata");
+    }
+
+    [Fact]
+    public void AllowsDeferredUnrelatedMSBuildProjectMetadata()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <ProjectToBuild Include="child.proj" />
+                <TargetToBuild Include="Build" />
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <ItemGroup>
+                  <ProjectToBuild Update="child.proj">
+                    <Payload>$(Deferred)</Payload>
+                  </ProjectToBuild>
+                  <TargetToBuild Update="Build">
+                    <Payload>$(Deferred)</Payload>
+                  </TargetToBuild>
+                </ItemGroup>
+                <MSBuild Projects="@(ProjectToBuild)" Targets="@(TargetToBuild)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
     public void ValidatesCallTargetClosure()
     {
         InvalidProjectFileException exception = ValidateFailure(

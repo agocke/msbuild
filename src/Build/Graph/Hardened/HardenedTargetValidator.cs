@@ -50,6 +50,28 @@ internal sealed class HardenedTargetValidator
         "VolumeSeparatorChar",
     };
 
+    private static readonly HashSet<string> s_staticMSBuildParameters = new(
+        [
+            "Projects",
+            "Targets",
+            "Properties",
+            "RemoveProperties",
+            "SkipNonexistentProjects",
+            "SkipNonexistentTargets",
+            "ToolsVersion",
+            "TargetAndPropertyListSeparators",
+        ],
+        MSBuildNameIgnoreCaseComparer.Default);
+
+    private static readonly string[] s_staticMSBuildProjectMetadata =
+    [
+        ItemMetadataNames.PropertiesMetadataName,
+        ItemMetadataNames.UndefinePropertiesMetadataName,
+        ItemMetadataNames.AdditionalPropertiesMetadataName,
+        "ToolsVersion",
+        "SkipNonexistentProjects",
+    ];
+
     private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
     private readonly List<InvalidProjectFileException> _diagnostics = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
@@ -352,11 +374,6 @@ internal sealed class HardenedTargetValidator
             classification = HardenedTaskClassification.Unaudited;
         }
 
-        if (MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild"))
-        {
-            ReportUnsupported(task.Location, $"the {task.Name} task", $"target '{targetName}'");
-        }
-
         List<string> batchableExpressions = [];
         AddIfNotEmpty(batchableExpressions, task.Condition);
         AddIfNotEmpty(batchableExpressions, task.ContinueOnError);
@@ -399,24 +416,33 @@ internal sealed class HardenedTargetValidator
             ValueState.Combine(taskConditionResult.State, continueOnErrorResult.State));
 
         bool isCallTarget = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget");
+        bool isMSBuild = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild");
 
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
+            bool requiresStatic = classification == HardenedTaskClassification.Pure ||
+                isCallTarget ||
+                (isMSBuild && s_staticMSBuildParameters.Contains(parameter.Key));
             ExpressionValidationResult parameterResult = ValidateExpression(
                 parameter.Value.Item1,
                 parameter.Value.Item2,
                 $"parameter '{parameter.Key}' of task '{task.Name}'",
-                requireStatic: classification == HardenedTaskClassification.Pure || isCallTarget,
+                requireStatic: requiresStatic,
                 isCondition: false,
                 metadataBatchingValidated: true,
-                includeItemMetadata: true);
+                includeItemMetadata: classification == HardenedTaskClassification.Pure ||
+                    (!isCallTarget && !isMSBuild));
 
-            if (classification == HardenedTaskClassification.Pure ||
-                isCallTarget ||
+            if (requiresStatic ||
                 parameterResult.State.Availability == ValueAvailability.Blocked)
             {
                 taskControlState = ValueState.Combine(taskControlState, parameterResult.State);
             }
+        }
+
+        if (isMSBuild)
+        {
+            taskControlState = ValidateMSBuildProjectMetadata(task, taskControlState);
         }
 
         if (isCallTarget &&
@@ -529,6 +555,57 @@ internal sealed class HardenedTargetValidator
         callTargetScope?.CallerAssignedProperties.Add(ReservedPropertyNames.lastTaskResult);
         Context.SetProperty(ReservedPropertyNames.lastTaskResult, taskStatus, overwrite: true);
         _propertiesWithoutConcreteValues.Add(ReservedPropertyNames.lastTaskResult);
+    }
+
+    private ValueState ValidateMSBuildProjectMetadata(
+        ProjectTaskInstance task,
+        ValueState taskControlState)
+    {
+        string? projectsExpression = null;
+        IElementLocation projectsLocation = task.Location;
+        foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
+        {
+            if (MSBuildNameIgnoreCaseComparer.Default.Equals(parameter.Key, "Projects"))
+            {
+                projectsExpression = parameter.Value.Item1;
+                projectsLocation = parameter.Value.Item2;
+                break;
+            }
+        }
+
+        if (projectsExpression is not { Length: > 0 } concreteProjectsExpression)
+        {
+            return taskControlState;
+        }
+
+        ItemsAndMetadataPair references =
+            ExpressionShredder.GetReferencedItemNamesAndMetadata([concreteProjectsExpression]);
+        if (references.Items is null)
+        {
+            return taskControlState;
+        }
+
+        ValueState metadataState = ValueState.Static;
+        foreach (string itemType in references.Items)
+        {
+            if (!Context.GetItemMembership(itemType).IsStatic)
+            {
+                continue;
+            }
+
+            foreach (string metadataName in s_staticMSBuildProjectMetadata)
+            {
+                ValueState state = Context.GetMetadata(itemType, metadataName);
+                metadataState = ValueState.Combine(metadataState, state);
+                RequireStatic(
+                    state,
+                    projectsLocation,
+                    $"'{metadataName}' metadata on Projects item '{itemType}' of task '{task.Name}'",
+                    concreteProjectsExpression);
+            }
+        }
+
+        return ValueState.Combine(taskControlState, metadataState);
     }
 
     private void ValidateCallTarget(
