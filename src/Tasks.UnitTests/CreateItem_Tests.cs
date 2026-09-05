@@ -330,7 +330,7 @@ namespace Microsoft.Build.UnitTests
         /// <summary>
         /// Logs warning when encountering wildcard drive enumeration during task item creation on Unix platform.
         /// </summary>
-        [UnixOnlyTheory]
+        [UnixOnlyTheory(Skip = "Recursively enumerates the Unix root and can exhaust system memory.")]
         [InlineData(@"\**")]
         [InlineData(@"\**\*.log")]
         public void LogUnixWarningUponCreateItemExecution(string itemSpec)
@@ -421,7 +421,7 @@ namespace Microsoft.Build.UnitTests
         /// <summary>
         /// Logs warning when encountering wildcard drive enumeration during CreateItem task execution on Unix platform.
         /// </summary>
-        [UnixOnlyTheory]
+        [UnixOnlyTheory(Skip = "Recursively enumerates the Unix root and can exhaust system memory.")]
         [InlineData(
             CreateItemWithInclude,
             @"\**")]

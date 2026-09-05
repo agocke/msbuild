@@ -807,7 +807,7 @@ namespace Microsoft.Build.UnitTests.OM.Definition
             ProjectGetterResultsInDriveEnumerationWarning(unevaluatedInclude);
         }
 
-        [UnixOnlyTheory]
+        [UnixOnlyTheory(Skip = "Recursively enumerates the Unix root and can exhaust system memory.")]
         [InlineData(@"/**/*.log")]
         [InlineData(@"$(empty)/**/*.log")]
         [InlineData(@"/$(empty)**/*.log")]
