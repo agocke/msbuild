@@ -210,31 +210,11 @@ namespace Microsoft.Build.BackEnd
             // The keys in this hashtable are the names of the items that we will batch on.
             // The values are always String.Empty (not used).
             var itemListsToBeBatched = new Dictionary<string, ICollection<ProjectItemInstance>>(MSBuildNameIgnoreCaseComparer.Default);
+            HashSet<string> itemTypesToBeBatched = GetItemTypesToBeBatched(consumedMetadataReferences, consumedItemReferenceNames);
 
-            // Loop through all the metadata references and find the ones that are qualified
-            // with an item name.
-            foreach (MetadataReference consumedMetadataReference in consumedMetadataReferences.Values)
+            foreach (string itemType in itemTypesToBeBatched)
             {
-                if (consumedMetadataReference.ItemName != null)
-                {
-                    // Rule #1.  Qualified metadata reference.
-                    // For metadata references that are qualified with an item name
-                    // (e.g., %(EmbeddedResource.Culture) ), we add that item name to the list of
-                    // consumed item names, even if the item name wasn't otherwise referenced via
-                    // @(...) syntax, and even if every item in the list doesn't necessary contain
-                    // a value for this metadata.  This is the special power that you get by qualifying
-                    // the metadata reference with an item name.
-                    itemListsToBeBatched[consumedMetadataReference.ItemName] = null;
-
-                    // Also add this qualified item to the consumed item references list, because
-                    // %(EmbeddedResource.Culture) effectively means that @(EmbeddedResource) is
-                    // being consumed, even though we may not see literally "@(EmbeddedResource)"
-                    // in the tag anywhere.  Adding it to this list allows us (down below in this
-                    // method) to check that every item in this list has a value for each
-                    // unqualified metadata reference.
-                    consumedItemReferenceNames ??= new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
-                    consumedItemReferenceNames.Add(consumedMetadataReference.ItemName);
-                }
+                itemListsToBeBatched[itemType] = null;
             }
 
             // Loop through all the metadata references and find the ones that are unqualified.
@@ -246,9 +226,9 @@ namespace Microsoft.Build.BackEnd
                     // For metadata references that are unqualified, every single consumed item
                     // must contain a value for that metadata.  If any item doesn't, it's an error
                     // to use unqualified metadata.
-                    if (consumedItemReferenceNames != null)
+                    if (itemTypesToBeBatched.Count > 0)
                     {
-                        foreach (string consumedItemName in consumedItemReferenceNames)
+                        foreach (string consumedItemName in itemTypesToBeBatched)
                         {
                             // Loop through all the items in the item list.
                             ICollection<ProjectItemInstance> items = lookup.GetItems(consumedItemName);
@@ -275,6 +255,33 @@ namespace Microsoft.Build.BackEnd
             }
 
             return itemListsToBeBatched;
+        }
+
+        internal static HashSet<string> GetItemTypesToBeBatched(
+            IReadOnlyDictionary<string, MetadataReference> consumedMetadataReferences,
+            IEnumerable<string> consumedItemReferenceNames)
+        {
+            var itemTypesToBeBatched = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+            bool hasUnqualifiedMetadata = false;
+
+            foreach (MetadataReference consumedMetadataReference in consumedMetadataReferences.Values)
+            {
+                if (consumedMetadataReference.ItemName is null)
+                {
+                    hasUnqualifiedMetadata = true;
+                }
+                else
+                {
+                    itemTypesToBeBatched.Add(consumedMetadataReference.ItemName);
+                }
+            }
+
+            if (hasUnqualifiedMetadata && consumedItemReferenceNames is not null)
+            {
+                itemTypesToBeBatched.UnionWith(consumedItemReferenceNames);
+            }
+
+            return itemTypesToBeBatched;
         }
 
         /// <summary>

@@ -219,9 +219,10 @@ This is the largest direct validator gap: 327 `MSB4286` failures.
    condition, batch partition, item operation, target edge, or Pure-task
    parameter.
 
-Completion requires eliminating the blanket metadata diagnostics. Any
-remaining metadata error must identify the exact deferred item or metadata
-origin.
+Completion requires `_CollectTargetFrameworkForTelemetry` to validate without
+target-name or SDK special-casing and eliminating the blanket metadata
+diagnostics from the pinned hello-world inventory. Any remaining metadata error
+must identify the exact deferred item or metadata origin.
 
 ### Workstream 3 - Support ordinary control and routing
 
@@ -432,7 +433,11 @@ HardenedValidationError
 `HardenedValidationContext` maintains the current availability of properties,
 item-list membership, and metadata.
 
-`ValueAvailability` has only `Static` and `Deferred`.
+`ValueAvailability` has `Static`, `Deferred`, and `Blocked`. `Blocked` is a
+validator-analysis state, not a third MSBuild value kind: it records that a
+prior root diagnostic prevented the validator from determining availability,
+so dependent expressions retain the origin chain without producing misleading
+deferred-value cascades.
 
 `ValueOrigin` identifies the task output or intermediate assignment that made
 a value deferred. Origins form a diagnostic chain; they are not execution

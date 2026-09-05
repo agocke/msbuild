@@ -323,6 +323,329 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             });
     }
 
+    [Fact]
+    public void CollectTargetFrameworkForTelemetryValidatesWithoutSpecialCasing()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="_CollectTargetFrameworkForTelemetry" />
+              <Target Name="_CollectTargetFrameworkForTelemetry">
+                <ItemGroup>
+                  <TFTelemetry Include="TargetFrameworkVersion" Value="$([MSBuild]::Escape('$(TargetFrameworkMoniker)'))" />
+                  <TFTelemetry Include="RuntimeIdentifier" Value="$(RuntimeIdentifier)" />
+                  <TFTelemetry Include="SelfContained" Value="$(SelfContained)" />
+                  <TFTelemetry Include="UseApphost" Value="$(UseApphost)" />
+                  <TFTelemetry Include="OutputType" Value="$(OutputType)" />
+                  <TFTelemetry Include="UseArtifactsOutput" Value="$(UseArtifactsOutput)" />
+                  <TFTelemetry Include="ArtifactsPathLocationType" Value="$(_ArtifactsPathLocationType)" />
+                  <TFTelemetry Include="TargetPlatformIdentifier" Value="$(TargetPlatformIdentifier)" />
+                  <TFTelemetry Include="UseMonoRuntime" Value="$(UseMonoRuntime)" />
+                  <TFTelemetry Include="PublishAot" Value="$(PublishAot)" />
+                  <TFTelemetry Include="PublishTrimmed" Value="$(PublishTrimmed)" />
+                  <TFTelemetry Include="PublishSelfContained" Value="$(PublishSelfContained)" />
+                  <TFTelemetry Include="PublishReadyToRun" Value="$(PublishReadyToRun)" />
+                  <TFTelemetry Include="PublishReadyToRunComposite" Value="$(PublishReadyToRunComposite)" />
+                  <TFTelemetry Include="PublishProtocol" Value="$(PublishProtocol)" />
+                  <TFTelemetry Include="Configuration" Value="$(Configuration)" Hash="true" />
+                </ItemGroup>
+                <AllowEmptyTelemetry EventName="targetframeworkeval" EventData="@(TFTelemetry)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Fact]
+    public void AllowsQualifiedAndUnqualifiedStaticTaskBatching()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>source</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Consume Items="@(Input)" Kind="%(Kind)" QualifiedKind="%(Input.Kind)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void AllowsStaticMetadataInItemAndTaskConditions()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>source</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Selected Include="%(Input.Identity)" Condition="'%(Input.Kind)' == 'source'" />
+                </ItemGroup>
+                <Consume Items="@(Selected)" Condition="'%(Input.Kind)' == 'source'" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void RejectsDeferredMetadataUsedAsBatchKey()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Generated" />
+                </Generate>
+                <Consume Items="@(Generated)" Kind="%(Generated.Kind)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("batching of task 'Consume'");
+        exception.Message.ShouldContain("output 'Result' of task 'Generate'");
+    }
+
+    [Fact]
+    public void AllowsDeferredPayloadMetadataToFlowToDeclaredIOTask()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Input Include="a">
+                    <Payload>$(Generated)</Payload>
+                  </Input>
+                </ItemGroup>
+                <Consume Items="@(Input)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void RejectsDeferredPayloadMetadataPassedToPureTask()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Input Include="a">
+                    <Payload>$(Generated)</Payload>
+                  </Input>
+                </ItemGroup>
+                <PureConsume Items="@(Input)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("metadata 'Payload' on item 'Input'");
+        exception.Message.ShouldContain("output 'Result' of task 'Generate'");
+    }
+
+    [Fact]
+    public void SupportsStaticItemOperationsAndMetadataFilters()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Source Include="a">
+                  <Key>one</Key>
+                  <Keep>value</Keep>
+                  <Drop>value</Drop>
+                </Source>
+                <Removal Include="b">
+                  <Key>two</Key>
+                </Removal>
+              </ItemGroup>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Kept Include="@(Source)" KeepMetadata="Key;Keep" KeepDuplicates="true" />
+                  <RemovedMetadata Include="@(Source)" RemoveMetadata="Drop" />
+                  <Source Remove="@(Removal)" MatchOnMetadata="Key" MatchOnMetadataOptions="CaseInsensitive" />
+                  <Kept RemoveMetadata="Keep">
+                    <Updated>value</Updated>
+                  </Kept>
+                </ItemGroup>
+                <Consume First="@(Kept)" Second="@(RemovedMetadata)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Theory]
+    [InlineData("KeepMetadata=\"Key\"")]
+    [InlineData("RemoveMetadata=\"Payload\"")]
+    public void MetadataFiltersCanRemoveDeferredPayloadFromCopiedItems(string filter)
+    {
+        ValidateSuccess(
+            $"""
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Source Include="a">
+                    <Key>static</Key>
+                    <Payload>$(Generated)</Payload>
+                  </Source>
+                  <Copy Include="@(Source)" {filter} />
+                </ItemGroup>
+                <PureConsume Items="@(Copy)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void RejectsDeferredMetadataUsedByMatchOnMetadata()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <Removal Include="b">
+                  <Key>static</Key>
+                </Removal>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Input Include="a">
+                    <Key>$(Generated)</Key>
+                  </Input>
+                  <Input Remove="@(Removal)" MatchOnMetadata="Key" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("MatchOnMetadata 'Key' on item 'Input'");
+        exception.Message.ShouldContain("output 'Result' of task 'Generate'");
+    }
+
+    [Fact]
+    public void PreservesOriginThroughIncludeAndTransform()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Source Include="a">
+                    <Payload>$(Generated)</Payload>
+                  </Source>
+                  <Copy Include="@(Source)" />
+                </ItemGroup>
+                <PureConsume Input="@(Copy->'%(Payload)')" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("transform of item 'Copy'");
+        exception.Message.ShouldContain("Include into item 'Copy'");
+        exception.Message.ShouldContain("output 'Result' of task 'Generate'");
+    }
+
+    [Fact]
+    public void BlockedMetadataDoesNotCreateDeferredCascade()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Input Include="a">
+                    <Payload>$([System.IO.File]::ReadAllText('input.txt'))</Payload>
+                  </Input>
+                </ItemGroup>
+                <PureConsume Input="@(Input->'%(Payload)')" />
+              </Target>
+            </Project>
+            """);
+
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4287");
+    }
+
     private void ValidateSuccess(
         string projectXml,
         IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)

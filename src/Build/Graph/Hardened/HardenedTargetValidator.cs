@@ -49,10 +49,9 @@ internal sealed class HardenedTargetValidator
     };
 
     private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
-    private readonly Dictionary<string, ValueOrigin> _deferredProperties = new(MSBuildNameIgnoreCaseComparer.Default);
-    private readonly Dictionary<string, ValueOrigin> _deferredItems = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly List<InvalidProjectFileException> _diagnostics = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
+    private HardenedValidationContext? _context;
 
     internal HardenedTargetValidator(IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
     {
@@ -79,10 +78,9 @@ internal sealed class HardenedTargetValidator
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(targetNames);
 
-        _deferredProperties.Clear();
-        _deferredItems.Clear();
         _diagnostics.Clear();
         _diagnosticKeys.Clear();
+        _context = new HardenedValidationContext(project);
 
         HashSet<string> visitedTargets = new(MSBuildNameIgnoreCaseComparer.Default);
         foreach (string targetName in targetNames)
@@ -107,6 +105,7 @@ internal sealed class HardenedTargetValidator
         }
 
         ValidateUnsupportedTargetConstructs(target);
+        RejectTargetMetadata(target.Condition, target.ConditionLocation, $"the condition of target '{target.Name}'");
         ValidateExpression(target.Condition, target.ConditionLocation, $"the condition of target '{target.Name}'", requireStatic: true, isCondition: true);
         ExpressionValidationResult dependenciesResult = ValidateExpression(
             target.DependsOnTargets,
@@ -152,7 +151,15 @@ internal sealed class HardenedTargetValidator
             }
         }
 
-        ValidateExpression(target.Returns, target.ReturnsLocation, $"the Returns attribute of target '{target.Name}'", requireStatic: false, isCondition: false);
+        ValidateBatching([target.Returns], implicitItemType: null, target.ReturnsLocation, $"target '{target.Name}'");
+        ValidateExpression(
+            target.Returns,
+            target.ReturnsLocation,
+            $"the Returns attribute of target '{target.Name}'",
+            requireStatic: false,
+            isCondition: false,
+            metadataBatchingValidated: true,
+            includeItemMetadata: true);
 
         foreach (TargetSpecification afterTarget in project.GetTargetsWhichRunAfter(target.Name))
         {
@@ -182,24 +189,35 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectPropertyGroupTaskPropertyInstance property in propertyGroup.Properties)
         {
-            ValidateExpression(
+            ValidateBatching(
+                [property.Condition, property.Value],
+                implicitItemType: null,
+                property.Location,
+                $"property '{property.Name}'");
+
+            ExpressionValidationResult conditionResult = ValidateExpression(
                 property.Condition,
                 property.ConditionLocation,
                 $"the condition of property '{property.Name}'",
                 requireStatic: true,
-                isCondition: true);
+                isCondition: true,
+                metadataBatchingValidated: true);
 
-            ValueOrigin? origin = ValidateExpression(
+            ExpressionValidationResult valueResult = ValidateExpression(
                 property.Value,
                 property.Location,
                 $"the value of property '{property.Name}'",
                 requireStatic: false,
-                isCondition: false);
+                isCondition: false,
+                metadataBatchingValidated: true);
 
-            if (origin is not null)
+            ValueState propertyState = ValueState.Combine(conditionResult.State, valueResult.State);
+            if (!conditionResult.State.IsStatic)
             {
-                _deferredProperties[property.Name] = new ValueOrigin($"property '{property.Name}'", origin);
+                propertyState = ToBlocked(propertyState, $"property '{property.Name}' has an unavailable condition");
             }
+
+            Context.SetProperty(property.Name, propertyState);
         }
     }
 
@@ -214,25 +232,7 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectItemGroupTaskItemInstance item in itemGroup.Items)
         {
-            if (item.Metadata.Count > 0)
-            {
-                ReportUnsupported(item.Location, "item metadata in an in-target ItemGroup", $"target '{targetName}'");
-            }
-
-            if (_deferredItems.TryGetValue(item.ItemType, out ValueOrigin? existingOrigin))
-            {
-                ReportDeferred(item.Location, $"the '{item.ItemType}' item operation", item.ItemType, existingOrigin);
-            }
-
-            ValidateExpression(item.Condition, item.ConditionLocation, $"the condition of item '{item.ItemType}'", requireStatic: true, isCondition: true);
-            ValidateExpression(item.Include, item.IncludeLocation, $"the Include of item '{item.ItemType}'", requireStatic: true, isCondition: false);
-            ValidateExpression(item.Exclude, item.ExcludeLocation, $"the Exclude of item '{item.ItemType}'", requireStatic: true, isCondition: false);
-            ValidateExpression(item.Remove, item.RemoveLocation, $"the Remove of item '{item.ItemType}'", requireStatic: true, isCondition: false);
-            ValidateExpression(item.MatchOnMetadata, item.MatchOnMetadataLocation, $"MatchOnMetadata on item '{item.ItemType}'", requireStatic: true, isCondition: false);
-            ValidateExpression(item.MatchOnMetadataOptions, item.MatchOnMetadataOptionsLocation, $"MatchOnMetadataOptions on item '{item.ItemType}'", requireStatic: true, isCondition: false);
-            ValidateExpression(item.KeepMetadata, item.KeepMetadataLocation, $"KeepMetadata on item '{item.ItemType}'", requireStatic: true, isCondition: false);
-            ValidateExpression(item.RemoveMetadata, item.RemoveMetadataLocation, $"RemoveMetadata on item '{item.ItemType}'", requireStatic: true, isCondition: false);
-            ValidateExpression(item.KeepDuplicates, item.KeepDuplicatesLocation, $"KeepDuplicates on item '{item.ItemType}'", requireStatic: true, isCondition: false);
+            ValidateItemOperation(item, targetName);
         }
     }
 
@@ -251,12 +251,31 @@ internal sealed class HardenedTargetValidator
             ReportUnsupported(task.Location, $"the {task.Name} task", $"target '{targetName}'");
         }
 
+        List<string> batchableExpressions = [];
+        AddIfNotEmpty(batchableExpressions, task.Condition);
+        foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
+        {
+            AddIfNotEmpty(batchableExpressions, parameter.Value.Item1);
+        }
+
+        foreach (ProjectTaskInstanceChild output in task.Outputs)
+        {
+            AddIfNotEmpty(batchableExpressions, output.Condition);
+        }
+
+        ValidateBatching(
+            batchableExpressions,
+            implicitItemType: null,
+            task.Location,
+            $"task '{task.Name}'");
+
         ValidateExpression(
             task.Condition,
             task.ConditionLocation,
             $"the condition of task '{task.Name}'",
             requireStatic: true,
-            isCondition: true);
+            isCondition: true,
+            metadataBatchingValidated: true);
 
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
@@ -265,7 +284,9 @@ internal sealed class HardenedTargetValidator
                 parameter.Value.Item2,
                 $"parameter '{parameter.Key}' of task '{task.Name}'",
                 requireStatic: classification == HardenedTaskClassification.Pure,
-                isCondition: false);
+                isCondition: false,
+                metadataBatchingValidated: true,
+                includeItemMetadata: true);
         }
 
         bool outputsAreDeferred = classification != HardenedTaskClassification.Pure;
@@ -276,25 +297,19 @@ internal sealed class HardenedTargetValidator
                 output.ConditionLocation,
                 $"the condition of output '{GetTaskParameter(output)}' from task '{task.Name}'",
                 requireStatic: true,
-                isCondition: true);
+                isCondition: true,
+                metadataBatchingValidated: true);
 
             ValueOrigin origin = new($"output '{GetTaskParameter(output)}' of task '{task.Name}'");
+            ValueState outputState = outputsAreDeferred ? ValueState.Deferred(origin) : ValueState.Static;
             switch (output)
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
-                    if (outputsAreDeferred)
-                    {
-                        _deferredProperties[propertyOutput.PropertyName] = origin;
-                    }
-
+                    Context.SetProperty(propertyOutput.PropertyName, outputState);
                     break;
 
                 case ProjectTaskOutputItemInstance itemOutput:
-                    if (outputsAreDeferred)
-                    {
-                        _deferredItems[itemOutput.ItemType] = origin;
-                    }
-
+                    Context.AddTaskOutputItems(itemOutput.ItemType, outputState);
                     break;
 
                 default:
@@ -309,46 +324,60 @@ internal sealed class HardenedTargetValidator
         IElementLocation? location,
         string context,
         bool requireStatic,
-        bool isCondition)
+        bool isCondition,
+        bool metadataBatchingValidated = false,
+        bool includeItemMetadata = false)
     {
         if (expression is null || expression.Length == 0)
         {
-            return new ExpressionValidationResult(null, CanEvaluate: true);
+            return new ExpressionValidationResult(ValueState.Static, CanEvaluate: true);
         }
 
         IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
         bool canEvaluate = ValidateProhibitedFunctions(expression, effectiveLocation, context, isCondition);
+        ValueState state = canEvaluate
+            ? ValueState.Static
+            : ValueState.Blocked(new ValueOrigin($"unsupported expression in {context}"));
 
         ItemsAndMetadataPair references = ExpressionShredder.GetReferencedItemNamesAndMetadata([expression]);
-        if (references.Metadata is not null)
-        {
-            ReportUnsupported(effectiveLocation, $"metadata expressions in {context}", context);
-            canEvaluate = false;
-        }
+        state = ValueState.Combine(state, FindPropertyState(expression));
 
-        ValueOrigin? origin = FindDeferredProperty(expression);
-        if (origin is null && references.Items is not null)
+        if (references.Items is not null)
         {
             foreach (string itemType in references.Items)
             {
-                if (_deferredItems.TryGetValue(itemType, out origin))
-                {
-                    break;
-                }
+                state = ValueState.Combine(state, Context.GetItemMembership(itemType));
             }
         }
 
-        if (requireStatic && origin is not null)
+        state = ValueState.Combine(state, FindTransformMetadataState(expression, includeItemMetadata));
+
+        if (!metadataBatchingValidated && references.Metadata is not null)
         {
-            ReportDeferred(effectiveLocation, context, expression, origin);
+            ValueState metadataState = GetMetadataReferenceState(
+                references,
+                implicitItemType: null,
+                effectiveLocation,
+                context);
+            if (metadataState.Availability == ValueAvailability.Blocked)
+            {
+                canEvaluate = false;
+            }
+
+            state = ValueState.Combine(state, metadataState);
+        }
+
+        if (requireStatic && !RequireStatic(state, effectiveLocation, context, expression))
+        {
             canEvaluate = false;
         }
 
-        return new ExpressionValidationResult(origin, canEvaluate);
+        return new ExpressionValidationResult(state, canEvaluate);
     }
 
-    private ValueOrigin? FindDeferredProperty(string expression)
+    private ValueState FindPropertyState(string expression)
     {
+        ValueState state = ValueState.Static;
         int marker = ExpressionShredder.IndexOfPropertyMarker(expression);
         while (marker >= 0)
         {
@@ -356,7 +385,7 @@ internal sealed class HardenedTargetValidator
             int close = FindClosingParenthesis(expression, bodyStart);
             if (close < 0)
             {
-                return null;
+                return state;
             }
 
             ReadOnlySpan<char> body = expression.AsSpan(bodyStart, close - bodyStart).Trim();
@@ -364,17 +393,499 @@ internal sealed class HardenedTargetValidator
             {
                 int nameEnd = body.IndexOfAny('.', '[');
                 ReadOnlySpan<char> propertyName = (nameEnd < 0 ? body : body[..nameEnd]).Trim();
-                if (!propertyName.IsEmpty &&
-                    _deferredProperties.TryGetValue(propertyName.ToString(), out ValueOrigin? origin))
+                if (!propertyName.IsEmpty)
                 {
-                    return origin;
+                    state = ValueState.Combine(state, Context.GetProperty(propertyName.ToString()));
                 }
             }
 
             marker = ExpressionShredder.IndexOfPropertyMarker(expression, close + 1);
         }
 
-        return null;
+        return state;
+    }
+
+    private void ValidateItemOperation(ProjectItemGroupTaskItemInstance item, string targetName)
+    {
+        List<string> batchableExpressions = [];
+        AddIfNotEmpty(batchableExpressions, item.Include);
+        AddIfNotEmpty(batchableExpressions, item.Exclude);
+        AddIfNotEmpty(batchableExpressions, item.Remove);
+        AddIfNotEmpty(batchableExpressions, item.Condition);
+        foreach (ProjectItemGroupTaskMetadataInstance metadata in item.Metadata)
+        {
+            AddIfNotEmpty(batchableExpressions, metadata.Value);
+            AddIfNotEmpty(batchableExpressions, metadata.Condition);
+        }
+
+        ValueState batchingState = ValidateBatching(
+            batchableExpressions,
+            item.ItemType,
+            item.Location,
+            $"item '{item.ItemType}' in target '{targetName}'");
+
+        ExpressionValidationResult conditionResult = ValidateExpression(
+            item.Condition,
+            item.ConditionLocation,
+            $"the condition of item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: true,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult includeResult = ValidateExpression(
+            item.Include,
+            item.IncludeLocation,
+            $"the Include of item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult excludeResult = ValidateExpression(
+            item.Exclude,
+            item.ExcludeLocation,
+            $"the Exclude of item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult removeResult = ValidateExpression(
+            item.Remove,
+            item.RemoveLocation,
+            $"the Remove of item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult matchOnMetadataResult = ValidateExpression(
+            item.MatchOnMetadata,
+            item.MatchOnMetadataLocation,
+            $"MatchOnMetadata on item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult matchOnMetadataOptionsResult = ValidateExpression(
+            item.MatchOnMetadataOptions,
+            item.MatchOnMetadataOptionsLocation,
+            $"MatchOnMetadataOptions on item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult keepMetadataResult = ValidateExpression(
+            item.KeepMetadata,
+            item.KeepMetadataLocation,
+            $"KeepMetadata on item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult removeMetadataResult = ValidateExpression(
+            item.RemoveMetadata,
+            item.RemoveMetadataLocation,
+            $"RemoveMetadata on item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult keepDuplicatesResult = ValidateExpression(
+            item.KeepDuplicates,
+            item.KeepDuplicatesLocation,
+            $"KeepDuplicates on item '{item.ItemType}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+
+        ValueState destinationMembership = Context.GetItemMembership(item.ItemType);
+        RequireStatic(
+            destinationMembership,
+            item.Location,
+            $"the '{item.ItemType}' item operation",
+            item.ItemType);
+
+        Dictionary<string, ValueState> assignedMetadata = ValidateMetadataAssignments(item);
+        ValueState matchOnMetadataValuesState = GetMatchOnMetadataValuesState(item);
+        ValueState operationState = ValueState.Combine(
+            batchingState,
+            ValueState.Combine(
+                destinationMembership,
+                ValueState.Combine(
+                    conditionResult.State,
+                    ValueState.Combine(
+                        includeResult.State,
+                        ValueState.Combine(
+                            excludeResult.State,
+                            ValueState.Combine(
+                                removeResult.State,
+                                ValueState.Combine(
+                                    matchOnMetadataResult.State,
+                                    ValueState.Combine(
+                                        matchOnMetadataOptionsResult.State,
+                                        ValueState.Combine(
+                                            keepMetadataResult.State,
+                                            ValueState.Combine(
+                                                removeMetadataResult.State,
+                                                ValueState.Combine(
+                                                    keepDuplicatesResult.State,
+                                                    matchOnMetadataValuesState)))))))))));
+
+        bool isInclude = item.Include.Length != 0 || item.Exclude.Length != 0;
+        bool isRemove = !isInclude && item.Remove.Length != 0;
+
+        if (!operationState.IsStatic)
+        {
+            if (isInclude || isRemove)
+            {
+                Context.BlockItemMembership(
+                    item.ItemType,
+                    operationState,
+                    $"item '{item.ItemType}' membership");
+            }
+            else
+            {
+                foreach (string metadataName in assignedMetadata.Keys)
+                {
+                    Context.BlockMetadata(
+                        item.ItemType,
+                        metadataName,
+                        operationState,
+                        $"metadata '{metadataName}' update on item '{item.ItemType}'");
+                }
+            }
+
+            return;
+        }
+
+        if (isInclude)
+        {
+            GetInheritedMetadata(
+                item.Include,
+                out Dictionary<string, ValueState>? inheritedMetadata,
+                out ValueState inheritedDefaultMetadata);
+
+            Context.AddItems(
+                item.ItemType,
+                ValueState.Static,
+                inheritedMetadata,
+                inheritedDefaultMetadata,
+                assignedMetadata,
+                item.KeepMetadata,
+                item.RemoveMetadata,
+                $"Include into item '{item.ItemType}'");
+        }
+        else if (!isRemove)
+        {
+            Context.ApplyMetadataFilters(item.ItemType, item.KeepMetadata, item.RemoveMetadata);
+            Context.UpdateMetadata(item.ItemType, assignedMetadata);
+        }
+    }
+
+    private Dictionary<string, ValueState> ValidateMetadataAssignments(ProjectItemGroupTaskItemInstance item)
+    {
+        var assignedMetadata = new Dictionary<string, ValueState>(MSBuildNameIgnoreCaseComparer.Default);
+        foreach (ProjectItemGroupTaskMetadataInstance metadata in item.Metadata)
+        {
+            ExpressionValidationResult conditionResult = ValidateExpression(
+                metadata.Condition,
+                metadata.ConditionLocation,
+                $"the condition of metadata '{metadata.Name}' on item '{item.ItemType}'",
+                requireStatic: true,
+                isCondition: true,
+                metadataBatchingValidated: true);
+            ExpressionValidationResult valueResult = ValidateExpression(
+                metadata.Value,
+                metadata.Location,
+                $"the value of metadata '{metadata.Name}' on item '{item.ItemType}'",
+                requireStatic: false,
+                isCondition: false,
+                metadataBatchingValidated: true);
+
+            ValueState metadataState = valueResult.State;
+            if (!conditionResult.State.IsStatic)
+            {
+                metadataState = ToBlocked(
+                    ValueState.Combine(conditionResult.State, valueResult.State),
+                    $"metadata '{metadata.Name}' on item '{item.ItemType}' has an unavailable condition");
+            }
+
+            assignedMetadata[metadata.Name] = metadataState;
+        }
+
+        return assignedMetadata;
+    }
+
+    private ValueState GetMatchOnMetadataValuesState(ProjectItemGroupTaskItemInstance item)
+    {
+        if (!TryParseLiteralMetadataNames(item.MatchOnMetadata, out HashSet<string>? metadataNames))
+        {
+            return ValueState.Static;
+        }
+
+        ItemsAndMetadataPair removeReferences = ExpressionShredder.GetReferencedItemNamesAndMetadata([item.Remove]);
+        if (removeReferences.Items is null)
+        {
+            return ValueState.Static;
+        }
+
+        ValueState state = ValueState.Static;
+        foreach (string metadataName in metadataNames!)
+        {
+            ValueState destinationMetadata = Context.GetMetadata(item.ItemType, metadataName);
+            state = ValueState.Combine(state, destinationMetadata);
+            RequireStatic(
+                destinationMetadata,
+                item.MatchOnMetadataLocation,
+                $"MatchOnMetadata '{metadataName}' on item '{item.ItemType}'",
+                item.Remove);
+
+            foreach (string sourceItemType in removeReferences.Items)
+            {
+                ValueState sourceMetadata = Context.GetMetadata(sourceItemType, metadataName);
+                state = ValueState.Combine(state, sourceMetadata);
+                RequireStatic(
+                    sourceMetadata,
+                    item.MatchOnMetadataLocation,
+                    $"MatchOnMetadata '{metadataName}' from item '{sourceItemType}'",
+                    item.Remove);
+            }
+        }
+
+        return state;
+    }
+
+    private void GetInheritedMetadata(
+        string include,
+        out Dictionary<string, ValueState>? inheritedMetadata,
+        out ValueState inheritedDefaultMetadata)
+    {
+        inheritedMetadata = null;
+        inheritedDefaultMetadata = ValueState.Static;
+        int startIndex = 0;
+        while (ExpressionShredder.TryGetNextItemVectorExpression(
+            include,
+            startIndex,
+            out ExpressionShredder.ItemExpressionCapture itemVector))
+        {
+            inheritedMetadata ??= new Dictionary<string, ValueState>(MSBuildNameIgnoreCaseComparer.Default);
+            inheritedDefaultMetadata = ValueState.Combine(
+                inheritedDefaultMetadata,
+                Context.GetDefaultMetadata(itemVector.ItemType));
+
+            foreach (KeyValuePair<string, ValueState> metadata in Context.GetMetadata(itemVector.ItemType))
+            {
+                ValueState existing = inheritedMetadata.TryGetValue(metadata.Key, out ValueState state)
+                    ? state
+                    : ValueState.Static;
+                inheritedMetadata[metadata.Key] = ValueState.Combine(existing, metadata.Value);
+            }
+
+            startIndex = itemVector.Index + itemVector.Length;
+        }
+    }
+
+    private ValueState ValidateBatching(
+        IReadOnlyList<string?> expressions,
+        string? implicitItemType,
+        IElementLocation? location,
+        string context)
+    {
+        List<string> nonEmptyExpressions = [];
+        for (int i = 0; i < expressions.Count; i++)
+        {
+            AddIfNotEmpty(nonEmptyExpressions, expressions[i]);
+        }
+
+        if (nonEmptyExpressions.Count == 0)
+        {
+            return ValueState.Static;
+        }
+
+        ItemsAndMetadataPair references = ExpressionShredder.GetReferencedItemNamesAndMetadata(nonEmptyExpressions);
+        if (references.Metadata is null)
+        {
+            return ValueState.Static;
+        }
+
+        var consumedItemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        if (references.Items is not null)
+        {
+            consumedItemTypes.UnionWith(references.Items);
+        }
+
+        if (implicitItemType is not null)
+        {
+            consumedItemTypes.Add(implicitItemType);
+        }
+
+        HashSet<string> batchedItemTypes = BatchingEngine.GetItemTypesToBeBatched(
+            references.Metadata,
+            consumedItemTypes);
+
+        IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
+        if (batchedItemTypes.Count == 0)
+        {
+            ReportUnsupported(
+                effectiveLocation,
+                $"unqualified metadata in {context} without an associated item list",
+                context);
+            return ValueState.Blocked(new ValueOrigin($"unresolved batching metadata in {context}"));
+        }
+
+        ValueState state = ValueState.Static;
+        foreach (string itemType in batchedItemTypes)
+        {
+            state = ValueState.Combine(state, Context.GetItemMembership(itemType));
+            foreach (MetadataReference metadataReference in references.Metadata.Values)
+            {
+                if (metadataReference.ItemName is null ||
+                    MSBuildNameIgnoreCaseComparer.Default.Equals(metadataReference.ItemName, itemType))
+                {
+                    state = ValueState.Combine(
+                        state,
+                        Context.GetMetadata(itemType, metadataReference.MetadataName));
+                }
+            }
+        }
+
+        RequireStatic(
+            state,
+            effectiveLocation,
+            $"batching of {context}",
+            string.Join(";", nonEmptyExpressions));
+        return state;
+    }
+
+    private ValueState GetMetadataReferenceState(
+        ItemsAndMetadataPair references,
+        string? implicitItemType,
+        IElementLocation location,
+        string context)
+    {
+        var consumedItemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        if (references.Items is not null)
+        {
+            consumedItemTypes.UnionWith(references.Items);
+        }
+
+        if (implicitItemType is not null)
+        {
+            consumedItemTypes.Add(implicitItemType);
+        }
+
+        HashSet<string> itemTypes = BatchingEngine.GetItemTypesToBeBatched(
+            references.Metadata!,
+            consumedItemTypes);
+        if (itemTypes.Count == 0)
+        {
+            ReportUnsupported(
+                location,
+                $"unqualified metadata in {context} without an associated item list",
+                context);
+            return ValueState.Blocked(new ValueOrigin($"unresolved metadata in {context}"));
+        }
+
+        ValueState state = ValueState.Static;
+        foreach (string itemType in itemTypes)
+        {
+            foreach (MetadataReference metadataReference in references.Metadata!.Values)
+            {
+                if (metadataReference.ItemName is null ||
+                    MSBuildNameIgnoreCaseComparer.Default.Equals(metadataReference.ItemName, itemType))
+                {
+                    state = ValueState.Combine(
+                        state,
+                        Context.GetMetadata(itemType, metadataReference.MetadataName));
+                }
+            }
+        }
+
+        return state;
+    }
+
+    private ValueState FindTransformMetadataState(string expression, bool includeItemMetadata)
+    {
+        ValueState state = ValueState.Static;
+        int startIndex = 0;
+        while (ExpressionShredder.TryGetNextItemVectorExpression(
+            expression,
+            startIndex,
+            out ExpressionShredder.ItemExpressionCapture itemVector))
+        {
+            if (includeItemMetadata && itemVector.Captures is null)
+            {
+                state = ValueState.Combine(state, Context.GetItemValue(itemVector.ItemType, includeMetadata: true));
+            }
+
+            if (itemVector.Captures is not null)
+            {
+                foreach (ExpressionShredder.ItemExpressionCapture transform in itemVector.Captures)
+                {
+                    ItemsAndMetadataPair transformReferences =
+                        ExpressionShredder.GetReferencedItemNamesAndMetadata([transform.Value]);
+                    if (transformReferences.Metadata is not null)
+                    {
+                        foreach (MetadataReference metadataReference in transformReferences.Metadata.Values)
+                        {
+                            string itemType = metadataReference.ItemName ?? itemVector.ItemType;
+                            ValueState metadataState = Context.GetMetadata(itemType, metadataReference.MetadataName);
+                            state = ValueState.Combine(
+                                state,
+                                metadataState.WithOrigin($"transform of item '{itemVector.ItemType}'"));
+                        }
+                    }
+                }
+            }
+
+            startIndex = itemVector.Index + itemVector.Length;
+        }
+
+        return state;
+    }
+
+    private bool RequireStatic(
+        ValueState state,
+        IElementLocation location,
+        string context,
+        string expression)
+    {
+        if (state.Availability == ValueAvailability.Deferred)
+        {
+            ReportDeferred(location, context, expression, state.Origin!);
+            return false;
+        }
+
+        return state.Availability == ValueAvailability.Static;
+    }
+
+    private static ValueState ToBlocked(ValueState state, string description)
+        => state.Availability == ValueAvailability.Blocked
+            ? state.WithOrigin(description)
+            : ValueState.Blocked(new ValueOrigin(description, state.Origin));
+
+    private void RejectTargetMetadata(string expression, IElementLocation? location, string context)
+    {
+        if (ExpressionShredder.ContainsMetadataExpressionOutsideTransform(expression))
+        {
+            ReportUnsupported(
+                location ?? ElementLocation.EmptyLocation,
+                $"metadata expressions in {context}",
+                context);
+        }
+    }
+
+    private static bool TryParseLiteralMetadataNames(string expression, out HashSet<string>? metadataNames)
+    {
+        metadataNames = null;
+        if (string.IsNullOrEmpty(expression) ||
+            expression.AsSpan().IndexOfAny('$', '@', '%') >= 0)
+        {
+            return false;
+        }
+
+        metadataNames = new HashSet<string>(
+            ExpressionShredder.SplitSemiColonSeparatedList(expression),
+            MSBuildNameIgnoreCaseComparer.Default);
+        return true;
+    }
+
+    private static void AddIfNotEmpty(List<string> expressions, string? expression)
+    {
+        if (!string.IsNullOrEmpty(expression))
+        {
+            expressions.Add(expression!);
+        }
     }
 
     private bool ValidateProhibitedFunctions(
@@ -630,14 +1141,8 @@ internal sealed class HardenedTargetValidator
         }
     }
 
-    private readonly record struct ExpressionValidationResult(ValueOrigin? Origin, bool CanEvaluate)
-    {
-        public static implicit operator ValueOrigin?(ExpressionValidationResult result) => result.Origin;
-    }
+    private HardenedValidationContext Context
+        => _context ?? throw new InvalidOperationException("Validation context has not been initialized.");
 
-    private sealed class ValueOrigin(string description, ValueOrigin? previous = null)
-    {
-        public override string ToString()
-            => previous is null ? description : $"{description} from {previous}";
-    }
+    private readonly record struct ExpressionValidationResult(ValueState State, bool CanEvaluate);
 }
