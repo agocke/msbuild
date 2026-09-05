@@ -1369,6 +1369,64 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             });
     }
 
+    [Theory]
+    [InlineData("Returns")]
+    [InlineData("Outputs")]
+    public void StaticCallTargetReturnsRemainStatic(string returnAttribute)
+    {
+        ValidateSuccess(
+            $"""
+            <Project>
+              <ItemGroup>
+                <Returned Include="static">
+                  <Payload>value</Payload>
+                </Returned>
+              </ItemGroup>
+              <Target Name="Build">
+                <CallTarget Targets="Called">
+                  <Output TaskParameter="TargetOutputs" ItemName="Result" />
+                </CallTarget>
+                <PureConsume Input="@(Result)" />
+              </Target>
+              <Target Name="Called" {returnAttribute}="@(Returned)" />
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void DeferredCallTargetReturnsPreserveProducerOrigin()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <CallTarget Targets="Called">
+                  <Output TaskParameter="TargetOutputs" ItemName="Result" />
+                </CallTarget>
+                <PureConsume Input="@(Result)" />
+              </Target>
+              <Target Name="Called" Returns="@(Returned)">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Returned" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("task 'CallTarget'");
+        exception.Message.ShouldContain("task 'Generate'");
+    }
+
     [Fact]
     public void RejectsDeferredOutputPassedToPureTask()
     {

@@ -168,14 +168,15 @@ environment reads, SDK resolution, and evaluation-time globs are not yet
 represented and will add a separate failure inventory.
 
 After the metadata, expression, target-closure, target input/output, ordinary
-control-flow, intrinsic routing-input, and statically false task-pruning
-quanta, the same pinned build produces 68 diagnostics:
+control-flow, intrinsic routing-input, statically false task-pruning, and
+target-return propagation quanta, the same pinned build produces 56
+diagnostics:
 
 | Code | Count |
 | --- | ---: |
 | `MSB4286` | 0 |
 | `MSB4287` | 22 |
-| `MSB4288` | 46 |
+| `MSB4288` | 34 |
 
 The blanket metadata diagnostics are gone. Static target conditions are now
 evaluated against sequential target-time property assignments, so unreachable
@@ -199,6 +200,9 @@ cross-project target traversal remains part of the later project-edge work.
 Task batching is validated before condition evaluation, but a task whose
 condition is statically false no longer contributes parameter diagnostics,
 outputs, `MSBuildLastTaskResult`, or intrinsic target edges.
+`CallTarget` `TargetOutputs` now preserve the availability and origin of the
+called targets' `Returns`, or legacy `Outputs` when `Returns` is absent,
+instead of becoming Deferred solely because they crossed the intrinsic task.
 
 ### Burn-down rules
 

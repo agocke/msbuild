@@ -75,6 +75,8 @@ internal sealed class HardenedTargetValidator
     private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
     private readonly List<InvalidProjectFileException> _diagnostics = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ValueState> _targetResults =
+        new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _propertiesWithoutConcreteValues = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _targetAssignedItemTypes = new(MSBuildNameIgnoreCaseComparer.Default);
     private HardenedValidationContext? _context;
@@ -108,6 +110,7 @@ internal sealed class HardenedTargetValidator
 
         _diagnostics.Clear();
         _diagnosticKeys.Clear();
+        _targetResults.Clear();
         _propertiesWithoutConcreteValues.Clear();
         _targetAssignedItemTypes.Clear();
         _context = new HardenedValidationContext();
@@ -128,7 +131,7 @@ internal sealed class HardenedTargetValidator
         return _diagnostics;
     }
 
-    private void ValidateTarget(
+    private ValueState ValidateTarget(
         ProjectInstance project,
         string targetName,
         IElementLocation referenceLocation,
@@ -136,15 +139,21 @@ internal sealed class HardenedTargetValidator
     {
         if (!visitedTargets.Add(targetName))
         {
-            return;
+            return _targetResults.TryGetValue(targetName, out ValueState result)
+                ? result
+                : ValueState.Blocked(new ValueOrigin($"result of target '{targetName}' while it is still being validated"));
         }
 
         if (!project.Targets.TryGetValue(targetName, out ProjectTargetInstance? target))
         {
             ReportMissingTarget(referenceLocation, targetName);
-            return;
+            ValueState missingResult =
+                ValueState.Blocked(new ValueOrigin($"result of missing target '{targetName}'"));
+            _targetResults[targetName] = missingResult;
+            return missingResult;
         }
 
+        ValueState targetResult = ValueState.Static;
         bool targetConditionMetadataValidated = RejectTargetMetadata(
             target.Condition,
             target.ConditionLocation,
@@ -232,7 +241,7 @@ internal sealed class HardenedTargetValidator
                 ? target.OutputsLocation
                 : target.ReturnsLocation;
             string returnAttribute = string.IsNullOrEmpty(target.Returns) ? "Outputs" : "Returns";
-            ValidateExpression(
+            ExpressionValidationResult returnResult = ValidateExpression(
                 returnExpression,
                 returnLocation,
                 $"the {returnAttribute} attribute of target '{target.Name}'",
@@ -240,6 +249,9 @@ internal sealed class HardenedTargetValidator
                 isCondition: false,
                 metadataBatchingValidated: true,
                 includeItemMetadata: true);
+            targetResult = returnResult.CanEvaluate
+                ? returnResult.State
+                : ToBlocked(returnResult.State, $"return value of target '{target.Name}' is unavailable");
 
             ValidateOnErrorTargets(project, target, visitedTargets);
             if (callTargetScope is not null)
@@ -248,10 +260,13 @@ internal sealed class HardenedTargetValidator
             }
         }
 
+        _targetResults[targetName] = targetResult;
         foreach (TargetSpecification afterTarget in project.GetTargetsWhichRunAfter(target.Name))
         {
             ValidateTarget(project, afterTarget.TargetName, afterTarget.ReferenceLocation, visitedTargets);
         }
+
+        return targetResult;
     }
 
     private void ValidatePropertyGroup(
@@ -455,9 +470,10 @@ internal sealed class HardenedTargetValidator
             taskControlState = ValidateMSBuildProjectMetadata(task, taskControlState);
         }
 
+        ValueState? intrinsicTaskOutputState = null;
         if (isCallTarget)
         {
-            ValidateCallTarget(
+            intrinsicTaskOutputState = ValidateCallTarget(
                 project,
                 task,
                 taskControlState,
@@ -536,9 +552,22 @@ internal sealed class HardenedTargetValidator
                 ValueState.Combine(
                     outputTaskParameterResult.State,
                     ValueState.Combine(outputConditionResult.State, outputConditionBatchingState)));
-            ValueState outputState = outputMappingState.IsStatic
-                ? outputsAreDeferred ? ValueState.Deferred(origin) : ValueState.Static
-                : ToBlocked(outputMappingState, $"output '{GetTaskParameter(output)}' of task '{task.Name}' is unavailable");
+            ValueState outputState;
+            if (!outputMappingState.IsStatic)
+            {
+                outputState = ToBlocked(
+                    outputMappingState,
+                    $"output '{GetTaskParameter(output)}' of task '{task.Name}' is unavailable");
+            }
+            else if (intrinsicTaskOutputState is ValueState intrinsicState &&
+                     MSBuildNameIgnoreCaseComparer.Default.Equals(outputTaskParameter, "TargetOutputs"))
+            {
+                outputState = intrinsicState.WithOrigin($"output '{outputTaskParameter}' of task '{task.Name}'");
+            }
+            else
+            {
+                outputState = outputsAreDeferred ? ValueState.Deferred(origin) : ValueState.Static;
+            }
             switch (output)
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
@@ -612,7 +641,7 @@ internal sealed class HardenedTargetValidator
         return ValueState.Combine(taskControlState, metadataState);
     }
 
-    private void ValidateCallTarget(
+    private ValueState ValidateCallTarget(
         ProjectInstance project,
         ProjectTaskInstance task,
         ValueState taskControlState,
@@ -639,10 +668,13 @@ internal sealed class HardenedTargetValidator
                 reportUnmodeled: true,
                 out string expandedTargets))
         {
-            return;
+            return taskControlState.IsStatic
+                ? ValueState.Static
+                : ToBlocked(taskControlState, $"target outputs of task '{task.Name}' are unavailable");
         }
 
         ValidatorState callerState = CaptureState();
+        ValueState targetOutputs = ValueState.Static;
 
         try
         {
@@ -650,7 +682,9 @@ internal sealed class HardenedTargetValidator
             RestoreState(callTargetScope.CalledState);
             foreach (string calledTarget in ExpressionShredder.SplitSemiColonSeparatedList(expandedTargets))
             {
-                ValidateTarget(project, calledTarget, targetsLocation, visitedTargets);
+                targetOutputs = ValueState.Combine(
+                    targetOutputs,
+                    ValidateTarget(project, calledTarget, targetsLocation, visitedTargets));
             }
         }
         finally
@@ -658,6 +692,8 @@ internal sealed class HardenedTargetValidator
             callTargetScope.CalledState = CaptureState();
             RestoreState(callerState);
         }
+
+        return targetOutputs;
     }
 
     private void CompleteLegacyCallTargetScope(LegacyCallTargetScope callTargetScope)
