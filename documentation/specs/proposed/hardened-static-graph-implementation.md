@@ -264,6 +264,137 @@ target-name or SDK special-casing and eliminating the blanket metadata
 diagnostics from the pinned hello-world inventory. Any remaining metadata error
 must identify the exact deferred item or metadata origin.
 
+#### Bucket-sensitive value-state plan
+
+The initial metadata slice shares MSBuild's rules for associating metadata
+references with item types, but its changing state remains coarser than
+ordinary batching. It stores one state for an item type and metadata name,
+rather than preserving the state of each selected item and evaluating the
+operation in the corresponding batch. Complete Workstream 2 using existing
+MSBuild nodes and scopes; do not add a validation executor.
+
+##### Attachment points
+
+Use two kinds of existing node:
+
+1. Key immutable expression descriptors by the evaluated target-body nodes:
+   `ProjectTargetInstance`, `ProjectPropertyGroupTaskPropertyInstance`,
+   `ProjectItemGroupTaskItemInstance`, `ProjectTaskInstance`, and
+   `ProjectTaskInstanceChild`. A descriptor records referenced properties,
+   item vectors, transforms, metadata, the implicit item type, and which
+   references form batch keys. Cache descriptors only when hardened validation
+   is active. Do not add availability fields to every evaluated node.
+2. Add an optional companion state to `Lookup`. The companion mirrors the
+   existing `Lookup.Scope` chain and records only values that differ from the
+   implicit Static evaluated state:
+   - property state by property name;
+   - item-list membership and identity state by item type;
+   - metadata state by concrete `ProjectItemInstance` and metadata name;
+   - list-level default state for deferred items that have no concrete
+     `ProjectItemInstance`;
+   - the `ValueOrigin` chain for every non-Static entry.
+
+`Lookup` remains the concrete-value store and the companion remains the
+availability/origin store. Neither is sufficient by itself.
+
+Do not put availability fields directly on `ProjectItemInstance` or
+`ProjectPropertyInstance`. Deferred values may have no concrete instance, and
+per-instance fields would add feature-off memory to every ordinary build.
+
+`ItemBucket` remains the bucket boundary rather than becoming a second state
+owner. Its existing cloned `Lookup`, entered scope, truncated item types,
+metadata table, sequence number, and `Expander` already define the concrete
+MSBuild batch. Extend `Lookup.Clone`, `EnterScope`, and scope leave/merge
+operations so the optional companion state follows the same boundaries.
+
+##### Required invariants
+
+- No companion state is allocated when hardened validation is disabled.
+- Validation never invokes a task in order to create a value or a bucket.
+- Only concrete Static membership, identities, and batch-key metadata may
+  participate in bucket construction.
+- Deferred membership or a deferred batch key reports a stall before
+  `ItemBucket` construction.
+- Deferred metadata that is only task payload remains deferred and may flow to
+  Declared-IO or Unaudited tasks.
+- Bucket-local property and item changes are invisible to sibling buckets
+  until their scopes are merged through the ordinary `Lookup` rules.
+- Caller, `CallTarget`, target, and task scopes preserve the same precedence as
+  ordinary execution.
+- Origins survive bucket partitioning, transforms, metadata filters, item
+  operations, and scope merges.
+- The implementation may reuse source-expression and batch-descriptor ideas
+  from the interpretation prototype, but not its action graph, executor, task
+  binding, or fallback workflow.
+
+##### Implementation quanta
+
+Each quantum is independently tested and committed.
+
+1. **Expression descriptors**
+   - Add a hardened descriptor cache keyed by immutable target-body nodes.
+   - Factor dependency extraction through `ExpressionShredder` and the useful
+     source-expression representation from the interpretation prototype.
+   - Record qualified and unqualified metadata, transform metadata,
+     metadata-sensitive item-function arguments, and implicit item types.
+   - Preserve current validator behavior in this quantum.
+
+2. **Lookup companion state**
+   - Introduce the optional `HardenedLookupState`.
+   - Mirror `Lookup` clone, scope entry, truncation, property set, item add,
+     item remove, metadata modification, and scope-leave operations.
+   - Lazily materialize per-item state only for item types touched by target
+     operations or batching.
+   - Move the current global property/item availability overlay onto this
+     scope-aware representation without changing diagnostics.
+
+3. **Ordinary bucket construction**
+   - Factor the reusable analysis and partitioning seams from
+     `BatchingEngine.PrepareBatchingBuckets`; do not duplicate its association,
+     comparison, ordering, or cross-product rules.
+   - Validate participating item membership, identities, and metadata before
+     partitioning.
+   - Construct the ordinary `ItemBucket` objects when all keys are concrete
+     and Static.
+   - Preserve default-bucket behavior and bucket sequence ordering.
+
+4. **Per-bucket validation**
+   - Validate target, property, item, task, and output conditions using the
+     bucket's existing `Expander`.
+   - Resolve metadata-computed property names, item names, output
+     destinations, and target return expressions in each bucket.
+   - Apply abstract property, item, and metadata mutations to the bucket's
+     companion scope without invoking tasks.
+   - Merge bucket scopes using the ordinary `Lookup` precedence rules.
+
+5. **Expression completion and differential gates**
+   - Cover metadata named by item functions such as `WithMetadataValue`,
+     `AnyHaveMetadataValue`, `HasMetadata`, and `Metadata`.
+   - Compare validator bucket count, order, selected items, condition results,
+     expanded destinations, and merged state against ordinary MSBuild.
+   - Measure feature-off allocations and hardened-mode cost before broadening
+     the inventory.
+
+##### Completion gates
+
+- A static `PropertyName="Result_%(Input.Kind)"` or
+  `ItemName="Result_%(Input.Kind)"` produces the same destinations and order as
+  ordinary MSBuild.
+- A statically false per-bucket condition contributes no state changes in that
+  bucket, while other buckets still apply.
+- One item with deferred payload metadata does not make the same metadata on
+  unrelated static items deferred.
+- Deferred membership, identity, or batch-key metadata reports the exact item,
+  metadata, producer, and consuming construct.
+- Qualified metadata, unqualified metadata, implicit item types, empty lists,
+  transforms, and cross-product batching match ordinary MSBuild.
+- Target batching and task, property-group, item-group, and output batching
+  use the same partitioning rules.
+- Repeated validation produces identical diagnostics and origin chains.
+- Ordinary builds have no new allocations attributable to hardened companion
+  state and retain unchanged behavior.
+- No SDK or NuGet targets are modified to satisfy these gates.
+
 ### Workstream 3 - Support ordinary control and routing
 
 These constructs account for 35 direct `MSB4286` failures and also create
