@@ -77,6 +77,7 @@ internal sealed class HardenedTargetValidator
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ValueState> _targetResults =
         new(MSBuildNameIgnoreCaseComparer.Default);
+    private readonly HashSet<string> _activeTargets = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _propertiesWithoutConcreteValues = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _targetAssignedItemTypes = new(MSBuildNameIgnoreCaseComparer.Default);
     private HardenedValidationContext? _context;
@@ -111,6 +112,7 @@ internal sealed class HardenedTargetValidator
         _diagnostics.Clear();
         _diagnosticKeys.Clear();
         _targetResults.Clear();
+        _activeTargets.Clear();
         _propertiesWithoutConcreteValues.Clear();
         _targetAssignedItemTypes.Clear();
         _context = new HardenedValidationContext();
@@ -135,8 +137,21 @@ internal sealed class HardenedTargetValidator
         ProjectInstance project,
         string targetName,
         IElementLocation referenceLocation,
-        HashSet<string> visitedTargets)
+        HashSet<string> visitedTargets,
+        bool isAfterTarget = false)
     {
+        if (_activeTargets.Contains(targetName))
+        {
+            if (!isAfterTarget)
+            {
+                ReportCircularTarget(referenceLocation, targetName);
+            }
+
+            return _targetResults.TryGetValue(targetName, out ValueState activeResult)
+                ? activeResult
+                : ValueState.Blocked(new ValueOrigin($"result of circular target '{targetName}'"));
+        }
+
         if (!visitedTargets.Add(targetName))
         {
             return _targetResults.TryGetValue(targetName, out ValueState result)
@@ -153,6 +168,7 @@ internal sealed class HardenedTargetValidator
             return missingResult;
         }
 
+        _activeTargets.Add(targetName);
         ValueState targetResult = ValueState.Static;
         bool targetConditionMetadataValidated = RejectTargetMetadata(
             target.Condition,
@@ -263,9 +279,15 @@ internal sealed class HardenedTargetValidator
         _targetResults[targetName] = targetResult;
         foreach (TargetSpecification afterTarget in project.GetTargetsWhichRunAfter(target.Name))
         {
-            ValidateTarget(project, afterTarget.TargetName, afterTarget.ReferenceLocation, visitedTargets);
+            ValidateTarget(
+                project,
+                afterTarget.TargetName,
+                afterTarget.ReferenceLocation,
+                visitedTargets,
+                isAfterTarget: true);
         }
 
+        _activeTargets.Remove(targetName);
         return targetResult;
     }
 
@@ -1848,6 +1870,13 @@ internal sealed class HardenedTargetValidator
             () => ProjectErrorUtilities.ThrowInvalidProject(
                 location,
                 "TargetDoesNotExist",
+                targetName));
+
+    private void ReportCircularTarget(IElementLocation location, string targetName)
+        => AddDiagnostic(
+            () => ProjectErrorUtilities.ThrowInvalidProject(
+                location,
+                "CircularDependency",
                 targetName));
 
     private void AddDiagnostic(Action throwDiagnostic)

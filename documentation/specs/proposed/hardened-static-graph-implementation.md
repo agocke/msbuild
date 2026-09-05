@@ -203,6 +203,9 @@ outputs, `MSBuildLastTaskResult`, or intrinsic target edges.
 `CallTarget` `TargetOutputs` now preserve the availability and origin of the
 called targets' `Returns`, or legacy `Outputs` when `Returns` is absent,
 instead of becoming Deferred solely because they crossed the intrinsic task.
+Active dependency, `BeforeTargets`, `CallTarget`, and failure-path revisits
+produce the scheduler's existing `MSB4006` circular-dependency error;
+`AfterTargets` revisits retain the ordinary scheduler's cycle suppression.
 
 ### Burn-down rules
 

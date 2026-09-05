@@ -200,6 +200,52 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void CollectsCircularTargetDependency()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="Prepare" />
+              <Target Name="Prepare" DependsOnTargets="Build" />
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4006");
+        exception.Message.ShouldContain("Build");
+    }
+
+    [Fact]
+    public void CollectsCircularCallTargetDependency()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <CallTarget Targets="Build" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4006");
+        exception.Message.ShouldContain("Build");
+    }
+
+    [Fact]
+    public void AfterTargetCycleDoesNotCreateCircularDependency()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build" AfterTargets="AfterBuild" />
+              <Target Name="AfterBuild" AfterTargets="Build" />
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Fact]
     public void TargetAssignedPropertyCanDetermineLaterTargetDependency()
     {
         InvalidProjectFileException exception = ValidateFailure(
