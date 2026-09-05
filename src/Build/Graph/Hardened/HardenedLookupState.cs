@@ -17,42 +17,39 @@ internal sealed class HardenedLookupState
     private static readonly IReadOnlyDictionary<string, ValueState> s_emptyMetadata =
         new Dictionary<string, ValueState>();
 
-    private Scope _scope;
+    private readonly Lookup _lookup;
 
-    private HardenedLookupState(Scope scope)
+    private HardenedLookupState(Lookup lookup)
     {
-        _scope = scope;
+        _lookup = lookup;
     }
 
-    internal static HardenedLookupState Create()
-        => new(new Scope(parent: null));
-
-    internal HardenedLookupState Fork()
-        => new(_scope);
+    internal static HardenedLookupState Create(Lookup lookup)
+        => new(lookup);
 
     internal HardenedLookupState Snapshot()
-        => new(_scope.CloneChain());
+        => _lookup.SnapshotHardenedState();
 
-    internal void EnterScope()
+    internal void InitializeCurrentScope()
     {
-        _scope = new Scope(_scope);
+        _lookup.CurrentScope.HardenedState ??= new ScopeState();
     }
 
-    internal void LeaveScope()
+    internal void MergeCurrentScopeIntoParent()
     {
-        Scope parent = _scope.Parent ??
+        Lookup.Scope current = _lookup.CurrentScope;
+        Lookup.Scope parent = current.Parent ??
             throw new InvalidOperationException("The outer hardened lookup scope cannot be left.");
 
-        _scope.MergeInto(parent);
-        _scope = parent;
+        current.HardenedState?.MergeInto(parent);
     }
 
     internal ValueState GetProperty(string propertyName)
     {
-        for (Scope? scope = _scope; scope is not null; scope = scope.Parent)
+        for (Lookup.Scope? scope = _lookup.CurrentScope; scope is not null; scope = scope.Parent)
         {
-            if (scope.Properties is not null &&
-                scope.Properties.TryGetValue(propertyName, out ValueState state))
+            if (scope.HardenedState?.Properties is not null &&
+                scope.HardenedState.Properties.TryGetValue(propertyName, out ValueState state))
             {
                 return state;
             }
@@ -225,13 +222,13 @@ internal sealed class HardenedLookupState
     internal void SetItemIdentity(ProjectItemInstance item, ValueState state)
     {
         GetOrCreateItemState(item).Identity = state;
-        _scope.MarkItemChanged(item.ItemType);
+        CurrentScopeState.MarkItemChanged(item.ItemType);
     }
 
     internal void SetMetadata(ProjectItemInstance item, string metadataName, ValueState state)
     {
         GetOrCreateItemState(item).Metadata[metadataName] = state;
-        _scope.MarkItemChanged(item.ItemType);
+        CurrentScopeState.MarkItemChanged(item.ItemType);
     }
 
     internal void AddItems(
@@ -245,7 +242,7 @@ internal sealed class HardenedLookupState
         string description)
     {
         ItemListState destination = GetOrCreateItemList(itemType);
-        _scope.MarkItemListChanged(itemType);
+        CurrentScopeState.MarkItemListChanged(itemType);
         destination.Membership = ValueState.Combine(destination.Membership, membership.WithOrigin(description));
         bool hasKeepFilter = TryParseLiteralMetadataNames(keepMetadata, out HashSet<string>? metadataToKeep);
         bool hasRemoveFilter = TryParseLiteralMetadataNames(removeMetadata, out HashSet<string>? metadataToRemove);
@@ -285,7 +282,7 @@ internal sealed class HardenedLookupState
         IReadOnlyDictionary<string, ValueState> assignedMetadata)
     {
         ItemListState itemList = GetOrCreateItemList(itemType);
-        _scope.MarkItemListChanged(itemType);
+        CurrentScopeState.MarkItemListChanged(itemType);
         foreach (KeyValuePair<string, ValueState> metadata in assignedMetadata)
         {
             MergeMetadata(
@@ -298,7 +295,7 @@ internal sealed class HardenedLookupState
     internal void ApplyMetadataFilters(string itemType, string? keepMetadata, string? removeMetadata)
     {
         ItemListState itemList = GetOrCreateItemList(itemType);
-        _scope.MarkItemListChanged(itemType);
+        CurrentScopeState.MarkItemListChanged(itemType);
 
         if (TryParseLiteralMetadataNames(keepMetadata, out HashSet<string>? metadataToKeep))
         {
@@ -331,7 +328,7 @@ internal sealed class HardenedLookupState
     internal void AddTaskOutputItems(string itemType, ValueState outputState)
     {
         ItemListState itemList = GetOrCreateItemList(itemType);
-        _scope.MarkItemListChanged(itemType);
+        CurrentScopeState.MarkItemListChanged(itemType);
         ValueState state = outputState.WithOrigin($"item '{itemType}'");
         itemList.Membership = ValueState.Combine(itemList.Membership, state);
         itemList.DefaultMetadata = ValueState.Combine(itemList.DefaultMetadata, state);
@@ -340,7 +337,7 @@ internal sealed class HardenedLookupState
     internal void BlockItemMembership(string itemType, ValueState cause, string description)
     {
         ItemListState itemList = GetOrCreateItemList(itemType);
-        _scope.MarkItemListChanged(itemType);
+        CurrentScopeState.MarkItemListChanged(itemType);
         ValueState blocked = cause.Availability == ValueAvailability.Blocked
             ? cause.WithOrigin(description)
             : ValueState.Blocked(new ValueOrigin(description, cause.Origin));
@@ -352,7 +349,7 @@ internal sealed class HardenedLookupState
     internal void BlockMetadata(string itemType, string metadataName, ValueState cause, string description)
     {
         ItemListState itemList = GetOrCreateItemList(itemType);
-        _scope.MarkItemListChanged(itemType);
+        CurrentScopeState.MarkItemListChanged(itemType);
         ValueState blocked = cause.Availability == ValueAvailability.Blocked
             ? cause.WithOrigin(description)
             : ValueState.Blocked(new ValueOrigin(description, cause.Origin));
@@ -363,16 +360,7 @@ internal sealed class HardenedLookupState
     {
         ItemListState? sourceItem = source.FindItemList(itemType);
         SetItemList(itemType, sourceItem is null ? new ItemListState() : new ItemListState(sourceItem));
-        _scope.MarkItemListChanged(itemType);
-    }
-
-    internal void TruncateLookupsForItemTypes(ICollection<string> itemTypes)
-    {
-        _scope.TruncatedItemTypes ??= new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
-        foreach (string itemType in itemTypes)
-        {
-            _scope.TruncatedItemTypes.Add(itemType);
-        }
+        CurrentScopeState.MarkItemListChanged(itemType);
     }
 
     internal void PopulateWithItems(
@@ -380,36 +368,36 @@ internal sealed class HardenedLookupState
         ICollection<ProjectItemInstance> items,
         Func<ProjectItemInstance, ProjectItemInstance> getSourceItem)
     {
-        ItemListState? source = FindItemList(_scope.Parent, itemType);
+        ItemListState? source = FindItemList(_lookup.CurrentScope.Parent, itemType);
         ItemListState selection = source is null
             ? new ItemListState()
             : new ItemListState(source, items, getSourceItem);
         SetItemList(itemType, selection);
-        _scope.MarkPopulated(itemType);
+        CurrentScopeState.MarkPopulated(itemType);
         foreach (ProjectItemInstance item in items)
         {
-            _scope.MapPopulatedItem(itemType, item, getSourceItem(item));
+            CurrentScopeState.MapPopulatedItem(itemType, item, getSourceItem(item));
         }
     }
 
     internal void PopulateWithItem(ProjectItemInstance item, ProjectItemInstance sourceItem)
     {
-        ItemListState? source = FindItemList(_scope.Parent, item.ItemType);
+        ItemListState? source = FindItemList(_lookup.CurrentScope.Parent, item.ItemType);
         ItemListState selection;
-        if (!_scope.IsPopulated(item.ItemType))
+        if (!CurrentScopeState.IsPopulated(item.ItemType))
         {
             selection = source is null
                 ? new ItemListState()
                 : new ItemListState(source, [], static selectedItem => selectedItem);
             SetItemList(item.ItemType, selection);
-            _scope.MarkPopulated(item.ItemType);
+            CurrentScopeState.MarkPopulated(item.ItemType);
         }
         else
         {
             selection = GetOrCreateItemList(item.ItemType);
         }
 
-        _scope.MapPopulatedItem(item.ItemType, item, sourceItem);
+        CurrentScopeState.MapPopulatedItem(item.ItemType, item, sourceItem);
         selection.Items.Remove(item);
         if (source?.Items.TryGetValue(sourceItem, out ItemState? itemState) == true)
         {
@@ -425,7 +413,7 @@ internal sealed class HardenedLookupState
             itemList.Items[item] = new ItemState { IgnoreListMetadata = true };
         }
 
-        _scope.MarkItemChanged(itemType);
+        CurrentScopeState.MarkItemChanged(itemType);
     }
 
     internal void RemoveItems(
@@ -438,7 +426,7 @@ internal sealed class HardenedLookupState
             itemList.Items.Remove(item);
             ProjectItemInstance sourceItem = getSourceItem(item);
             itemList.Items.Remove(sourceItem);
-            _scope.MarkItemRemoved(item.ItemType, sourceItem);
+            CurrentScopeState.MarkItemRemoved(item.ItemType, sourceItem);
         }
     }
 
@@ -464,15 +452,15 @@ internal sealed class HardenedLookupState
                 }
             }
 
-            _scope.MarkItemChanged(item.ItemType);
-            _scope.MapPopulatedItem(item.ItemType, item, getSourceItem(item));
+            CurrentScopeState.MarkItemChanged(item.ItemType);
+            CurrentScopeState.MapPopulatedItem(item.ItemType, item, getSourceItem(item));
         }
     }
 
     private void SetPropertyState(string propertyName, ValueState state)
     {
-        _scope.Properties ??= new Dictionary<string, ValueState>(MSBuildNameIgnoreCaseComparer.Default);
-        _scope.Properties[propertyName] = state;
+        CurrentScopeState.Properties ??= new Dictionary<string, ValueState>(MSBuildNameIgnoreCaseComparer.Default);
+        CurrentScopeState.Properties[propertyName] = state;
     }
 
     private ItemState GetOrCreateItemState(ProjectItemInstance item)
@@ -489,8 +477,8 @@ internal sealed class HardenedLookupState
 
     private ItemListState GetOrCreateItemList(string itemType)
     {
-        if (_scope.Items is not null &&
-            _scope.Items.TryGetValue(itemType, out ItemListState? itemList))
+        if (CurrentScopeState.Items is not null &&
+            CurrentScopeState.Items.TryGetValue(itemType, out ItemListState? itemList))
         {
             return itemList;
         }
@@ -503,30 +491,39 @@ internal sealed class HardenedLookupState
 
     private void SetItemList(string itemType, ItemListState itemList)
     {
-        _scope.Items ??= new Dictionary<string, ItemListState>(MSBuildNameIgnoreCaseComparer.Default);
-        _scope.Items[itemType] = itemList;
+        CurrentScopeState.Items ??= new Dictionary<string, ItemListState>(MSBuildNameIgnoreCaseComparer.Default);
+        CurrentScopeState.Items[itemType] = itemList;
     }
 
     private ItemListState? FindItemList(string itemType)
-        => FindItemList(_scope, itemType);
+        => FindItemList(_lookup.CurrentScope, itemType);
 
-    private static ItemListState? FindItemList(Scope? startingScope, string itemType)
+    private static ItemListState? FindItemList(Lookup.Scope? startingScope, string itemType)
     {
-        for (Scope? scope = startingScope; scope is not null; scope = scope.Parent)
+        for (Lookup.Scope? scope = startingScope; scope is not null; scope = scope.Parent)
         {
-            if (scope.Items is not null &&
-                scope.Items.TryGetValue(itemType, out ItemListState? itemList))
+            if (scope.HardenedState?.Items is not null &&
+                scope.HardenedState.Items.TryGetValue(itemType, out ItemListState? itemList))
             {
                 return itemList;
             }
 
-            if (scope.TruncatedItemTypes?.Contains(itemType) == true)
+            if (scope.ItemTypesToTruncateAtThisScope?.Contains(itemType) == true)
             {
                 return null;
             }
         }
 
         return null;
+    }
+
+    private ScopeState CurrentScopeState
+    {
+        get
+        {
+            InitializeCurrentScope();
+            return _lookup.CurrentScope.HardenedState;
+        }
     }
 
     private static void MergeMetadata(ItemListState itemList, string metadataName, ValueState state)
@@ -552,15 +549,11 @@ internal sealed class HardenedLookupState
         return true;
     }
 
-    private sealed class Scope(Scope? parent)
+    internal sealed class ScopeState
     {
-        internal Scope? Parent { get; } = parent;
-
         internal Dictionary<string, ValueState>? Properties { get; set; }
 
         internal Dictionary<string, ItemListState>? Items { get; set; }
-
-        internal HashSet<string>? TruncatedItemTypes { get; set; }
 
         private HashSet<string>? PopulatedItemTypes { get; set; }
 
@@ -631,9 +624,9 @@ internal sealed class HardenedLookupState
             itemSources[item] = sourceItem;
         }
 
-        internal Scope CloneChain()
+        internal ScopeState Clone()
         {
-            Scope clone = new(Parent?.CloneChain());
+            var clone = new ScopeState();
             if (Properties is not null)
             {
                 clone.Properties = new Dictionary<string, ValueState>(
@@ -650,13 +643,6 @@ internal sealed class HardenedLookupState
                 {
                     clone.Items.Add(item.Key, new ItemListState(item.Value));
                 }
-            }
-
-            if (TruncatedItemTypes is not null)
-            {
-                clone.TruncatedItemTypes = new HashSet<string>(
-                    TruncatedItemTypes,
-                    MSBuildNameIgnoreCaseComparer.Default);
             }
 
             if (PopulatedItemTypes is not null)
@@ -706,15 +692,17 @@ internal sealed class HardenedLookupState
             return clone;
         }
 
-        internal void MergeInto(Scope destination)
+        internal void MergeInto(Lookup.Scope destinationScope)
         {
+            ScopeState destination =
+                destinationScope.HardenedState ??= new ScopeState();
             if (Properties is not null)
             {
                 destination.Properties ??= new Dictionary<string, ValueState>(
                     MSBuildNameIgnoreCaseComparer.Default);
                 foreach (KeyValuePair<string, ValueState> property in Properties)
                 {
-                    if (property.Value.IsStatic && destination.Parent is null)
+                    if (property.Value.IsStatic && destinationScope.Parent is null)
                     {
                         destination.Properties.Remove(property.Key);
                     }
@@ -733,12 +721,12 @@ internal sealed class HardenedLookupState
                 {
                     if (IsPopulated(item.Key))
                     {
-                        MergePopulatedItemState(destination, item.Key, item.Value);
+                        MergePopulatedItemState(destinationScope, item.Key, item.Value);
                     }
                     else if (ChangedItemTypes?.Contains(item.Key) == true ||
                              ChangedItemListTypes?.Contains(item.Key) == true)
                     {
-                        if (item.Value.IsStatic && destination.Parent is null)
+                        if (item.Value.IsStatic && destinationScope.Parent is null)
                         {
                             destination.Items.Remove(item.Key);
                         }
@@ -754,7 +742,7 @@ internal sealed class HardenedLookupState
         }
 
         private void MergePopulatedItemState(
-            Scope destination,
+            Lookup.Scope destinationScope,
             string itemType,
             ItemListState source)
         {
@@ -765,7 +753,9 @@ internal sealed class HardenedLookupState
                 return;
             }
 
-            ItemListState? inherited = FindItemList(destination, itemType);
+            ScopeState destination =
+                destinationScope.HardenedState ??= new ScopeState();
+            ItemListState? inherited = FindItemList(destinationScope, itemType);
             ItemListState merged = inherited is null
                 ? new ItemListState()
                 : new ItemListState(inherited);
@@ -804,7 +794,7 @@ internal sealed class HardenedLookupState
                 }
             }
 
-            if (merged.IsStatic && destination.Parent is null)
+            if (merged.IsStatic && destinationScope.Parent is null)
             {
                 destination.Items!.Remove(itemType);
             }
@@ -814,7 +804,7 @@ internal sealed class HardenedLookupState
             }
         }
 
-        private void PropagateChangeTracking(Scope destination)
+        private void PropagateChangeTracking(ScopeState destination)
         {
             if (ChangedItemTypes is not null)
             {
@@ -845,7 +835,7 @@ internal sealed class HardenedLookupState
         }
     }
 
-    private sealed class ItemListState
+    internal sealed class ItemListState
     {
         internal ItemListState()
         {
@@ -927,7 +917,7 @@ internal sealed class HardenedLookupState
         }
     }
 
-    private sealed class ItemState
+    internal sealed class ItemState
     {
         internal ItemState()
         {

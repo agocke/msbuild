@@ -1300,6 +1300,7 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Lookup clone = lookup.Clone();
             Lookup.Scope cloneScope = clone.EnterScope("clone");
+            cloneScope.HardenedState.ShouldNotBeNull();
             clone.HardenedState.SetProperty(
                 "p",
                 ValueState.Blocked(new ValueOrigin("bucket-local blocked value")),
@@ -1312,6 +1313,25 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             state.GetProperty("p").Availability.ShouldBe(ValueAvailability.Blocked);
             state.GetProperty("p").Origin.ToString().ShouldContain("bucket-local blocked value");
+        }
+
+        [Fact]
+        public void EnablingHardenedStateOnCloneDoesNotAttachStateToSourceLookup()
+        {
+            Lookup source = LookupHelpers.CreateEmptyLookup();
+            Lookup clone = source.Clone();
+
+            HardenedLookupState cloneState = clone.EnableHardenedState();
+            cloneState.SetProperty(
+                "p",
+                ValueState.Deferred(new ValueOrigin("clone value")),
+                overwrite: true);
+
+            source.HardenedState.ShouldBeNull();
+
+            HardenedLookupState sourceState = source.EnableHardenedState();
+            sourceState.GetProperty("p").ShouldBe(ValueState.Static);
+            cloneState.GetProperty("p").Availability.ShouldBe(ValueAvailability.Deferred);
         }
 
         [Fact]

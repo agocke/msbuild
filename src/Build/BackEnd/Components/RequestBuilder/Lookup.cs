@@ -126,7 +126,19 @@ namespace Microsoft.Build.BackEnd
             // Clones need to share an (item)clone table; the batching engine asks for items from the lookup,
             // then populates buckets with them, which have clone lookups.
             _cloneTable = that._cloneTable;
-            _hardenedState = that._hardenedState?.Fork();
+            _hardenedState = that._hardenedState is null
+                ? null
+                : HardenedLookupState.Create(this);
+        }
+
+        private Lookup(Lookup that, bool snapshotHardenedState)
+        {
+            Assumed.True(snapshotHardenedState);
+
+            _baseItems = that._baseItems;
+            _lookupScopes = Scope.CloneChain(this, that._lookupScopes);
+            _cloneTable = that._cloneTable;
+            _hardenedState = HardenedLookupState.Create(this);
         }
 
         #endregion
@@ -253,9 +265,30 @@ namespace Microsoft.Build.BackEnd
 
         internal HardenedLookupState EnableHardenedState()
         {
-            _hardenedState ??= HardenedLookupState.Create();
+            if (_hardenedState is null)
+            {
+                Assumed.Null(
+                    _lookupScopes.Parent,
+                    "Hardened state must be enabled before entering lookup scopes.");
+
+                // Lookup clones normally share their scope chain. Hardened validation is opt-in,
+                // so detach the existing scopes before attaching state to avoid mutating a
+                // feature-disabled lookup that shares them.
+                _lookupScopes = Scope.CloneChain(this, _lookupScopes, cloneHardenedState: false);
+                _hardenedState = HardenedLookupState.Create(this);
+            }
+
+            _hardenedState.InitializeCurrentScope();
             return _hardenedState;
         }
+
+        internal HardenedLookupState SnapshotHardenedState()
+        {
+            Assumed.NotNull(_hardenedState);
+            return new Lookup(this, snapshotHardenedState: true)._hardenedState;
+        }
+
+        internal Scope CurrentScope => _lookupScopes;
 
         /// <summary>
         /// Enters the scope using the specified description.
@@ -266,7 +299,7 @@ namespace Microsoft.Build.BackEnd
             // We don't create the tables unless we need them
             Scope scope = new Scope(this, description, null);
             _lookupScopes = scope;
-            _hardenedState?.EnterScope();
+            _hardenedState?.InitializeCurrentScope();
             return scope;
         }
 
@@ -296,7 +329,7 @@ namespace Microsoft.Build.BackEnd
                 MergeScopeIntoNotLastScope();
             }
 
-            _hardenedState?.LeaveScope();
+            _hardenedState?.MergeCurrentScopeIntoParent();
 
             // Let go of our pointer into the clone table; we assume we won't need it after leaving scope and want to save memory.
             // This is an assumption on IntrinsicTask, that it won't ask to remove or modify a clone in a higher scope than it was handed out in.
@@ -732,7 +765,6 @@ namespace Microsoft.Build.BackEnd
             _lookupScopes.ItemTypesToTruncateAtThisScope =
                 itemTypes?.ToFrozenSet(MSBuildNameIgnoreCaseComparer.Default)
                 ?? FrozenSet<string>.Empty;
-            _hardenedState?.TruncateLookupsForItemTypes(itemTypes ?? Array.Empty<string>());
         }
 
         /// <summary>
@@ -1490,10 +1522,36 @@ namespace Microsoft.Build.BackEnd
                 Parent = lookup._lookupScopes;
             }
 
+            private Scope(
+                Lookup lookup,
+                Scope source,
+                Scope parent,
+                bool cloneHardenedState)
+            {
+                _owningLookup = lookup;
+                _description = source._description;
+                _items = source._items;
+                _adds = source._adds;
+                _removes = source._removes;
+                _modifies = source._modifies;
+                _properties = source._properties;
+                _propertySets = source._propertySets;
+                _itemTypesToTruncateAtThisScope = source._itemTypesToTruncateAtThisScope;
+                HardenedState = cloneHardenedState
+                    ? source.HardenedState?.Clone()
+                    : null;
+                Parent = parent;
+            }
+
             /// <summary>
             /// The parent scope in the stack, if any.
             /// </summary>
             internal Scope Parent { get; }
+
+            /// <summary>
+            /// Optional availability and origin payload for this concrete lookup scope.
+            /// </summary>
+            internal HardenedLookupState.ScopeState HardenedState { get; set; }
 
             /// <summary>
             /// The total number of scopes in the chain.
@@ -1591,6 +1649,17 @@ namespace Microsoft.Build.BackEnd
             internal void LeaveScope()
             {
                 _owningLookup.LeaveScope(this);
+            }
+
+            internal static Scope CloneChain(
+                Lookup lookup,
+                Scope scope,
+                bool cloneHardenedState = true)
+            {
+                Scope parent = scope.Parent is null
+                    ? null
+                    : CloneChain(lookup, scope.Parent, cloneHardenedState);
+                return new Scope(lookup, scope, parent, cloneHardenedState);
             }
         }
     }

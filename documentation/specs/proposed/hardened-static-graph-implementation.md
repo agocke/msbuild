@@ -284,9 +284,8 @@ Use two kinds of existing node:
    item vectors, transforms, metadata, the implicit item type, and which
    references form batch keys. Cache descriptors only when hardened validation
    is active. Do not add availability fields to every evaluated node.
-2. Add an optional companion state to `Lookup`. The companion mirrors the
-   existing `Lookup.Scope` chain and records only values that differ from the
-   implicit Static evaluated state:
+2. Add an optional hardened payload to each active `Lookup.Scope`. The payload
+   records only values that differ from the implicit Static evaluated state:
    - property state by property name;
    - item-list membership and identity state by item type;
    - metadata state by concrete `ProjectItemInstance` and metadata name;
@@ -294,8 +293,8 @@ Use two kinds of existing node:
      `ProjectItemInstance`;
    - the `ValueOrigin` chain for every non-Static entry.
 
-`Lookup` remains the concrete-value store and the companion remains the
-availability/origin store. Neither is sufficient by itself.
+`Lookup` remains the concrete-value store and its optional scope payloads
+remain the availability/origin store. Neither is sufficient by itself.
 
 Do not put availability fields directly on `ProjectItemInstance` or
 `ProjectPropertyInstance`. Deferred values may have no concrete instance, and
@@ -304,8 +303,9 @@ per-instance fields would add feature-off memory to every ordinary build.
 `ItemBucket` remains the bucket boundary rather than becoming a second state
 owner. Its existing cloned `Lookup`, entered scope, truncated item types,
 metadata table, sequence number, and `Expander` already define the concrete
-MSBuild batch. Extend `Lookup.Clone`, `EnterScope`, and scope leave/merge
-operations so the optional companion state follows the same boundaries.
+MSBuild batch. `Lookup.Clone`, `EnterScope`, and scope leave/merge operations
+carry and merge the optional payload through those existing boundaries; do not
+create a parallel scope hierarchy.
 
 ##### Required invariants
 
@@ -340,9 +340,11 @@ Each quantum is independently tested and committed.
    - Preserve current validator behavior in this quantum.
 
 2. **Lookup companion state**
-   - Introduce the optional `HardenedLookupState`.
-   - Mirror `Lookup` clone, scope entry, truncation, property set, item add,
-     item remove, metadata modification, and scope-leave operations.
+   - Introduce the optional `HardenedLookupState` facade and sparse
+     `Lookup.Scope` payload.
+   - Follow `Lookup` clone, scope entry, truncation, property set, item add,
+     item remove, metadata modification, and scope-leave operations without
+     constructing a second scope chain.
    - Lazily materialize per-item state only for item types touched by target
      operations or batching.
    - Move the current global property/item availability overlay onto this
