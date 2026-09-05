@@ -140,7 +140,7 @@ namespace Microsoft.Build.BackEnd
         internal static List<ItemBucket> PrepareBatchingBuckets(
             BatchingInfo batchingInfo,
             Lookup lookup,
-            ElementLocation elementLocation,
+            IElementLocation elementLocation,
             LoggingContext loggingContext)
         {
             Assumed.NotNull(lookup, "Need to specify the lookup.");
@@ -212,7 +212,7 @@ namespace Microsoft.Build.BackEnd
             Dictionary<string, MetadataReference> consumedMetadataReferences,
             IEnumerable<string> consumedItemReferenceNames,
             Lookup lookup,
-            ElementLocation elementLocation)
+            IElementLocation elementLocation)
         {
             if (consumedMetadataReferences?.Count is not > 0)
             {
@@ -265,13 +265,13 @@ namespace Microsoft.Build.BackEnd
                                                                                 // Value is [struct MetadataReference]
             IEnumerable<string> consumedItemReferenceNames,
             Lookup lookup,
-            ElementLocation elementLocation)
+            IElementLocation elementLocation)
         {
             // The keys are the item types that participate in batching. Cache their items
             // while adding the keys so bucket construction does not repeat the lookup.
             var itemListsToBeBatched = new Dictionary<string, ICollection<ProjectItemInstance>>(MSBuildNameIgnoreCaseComparer.Default);
             var sink = new ItemListSink(itemListsToBeBatched, lookup);
-            AddItemTypesToBeBatched(consumedMetadataReferences, consumedItemReferenceNames, ref sink);
+            AddItemTypesToBeBatched(consumedMetadataReferences.Values, consumedItemReferenceNames, ref sink);
 
             // Loop through all the metadata references and find the ones that are unqualified.
             foreach (MetadataReference consumedMetadataReference in consumedMetadataReferences.Values)
@@ -314,18 +314,28 @@ namespace Microsoft.Build.BackEnd
             HashSet<string> itemTypesToBeBatched)
         {
             var sink = new ItemTypeSetSink(itemTypesToBeBatched);
+            AddItemTypesToBeBatched(consumedMetadataReferences.Values, consumedItemReferenceNames, ref sink);
+        }
+
+        internal static void AddItemTypesToBeBatched(
+            IEnumerable<MetadataReference> consumedMetadataReferences,
+            IEnumerable<string> consumedItemReferenceNames,
+            List<string> itemTypesToBeBatched,
+            HashSet<string> seenItemTypes)
+        {
+            var sink = new OrderedItemTypeSink(itemTypesToBeBatched, seenItemTypes);
             AddItemTypesToBeBatched(consumedMetadataReferences, consumedItemReferenceNames, ref sink);
         }
 
         private static void AddItemTypesToBeBatched<TSink>(
-            IReadOnlyDictionary<string, MetadataReference> consumedMetadataReferences,
+            IEnumerable<MetadataReference> consumedMetadataReferences,
             IEnumerable<string> consumedItemReferenceNames,
             ref TSink sink)
             where TSink : struct, IItemTypeSink
         {
             bool hasUnqualifiedMetadata = false;
 
-            foreach (MetadataReference consumedMetadataReference in consumedMetadataReferences.Values)
+            foreach (MetadataReference consumedMetadataReference in consumedMetadataReferences)
             {
                 if (consumedMetadataReference.ItemName is null)
                 {
@@ -363,6 +373,26 @@ namespace Microsoft.Build.BackEnd
             public void Add(string itemType)
             {
                 _itemTypes.Add(itemType);
+            }
+        }
+
+        private readonly struct OrderedItemTypeSink : IItemTypeSink
+        {
+            private readonly List<string> _itemTypes;
+            private readonly HashSet<string> _seenItemTypes;
+
+            internal OrderedItemTypeSink(List<string> itemTypes, HashSet<string> seenItemTypes)
+            {
+                _itemTypes = itemTypes;
+                _seenItemTypes = seenItemTypes;
+            }
+
+            public void Add(string itemType)
+            {
+                if (_seenItemTypes.Add(itemType))
+                {
+                    _itemTypes.Add(itemType);
+                }
             }
         }
 
@@ -409,7 +439,7 @@ namespace Microsoft.Build.BackEnd
             Lookup lookup,
             Dictionary<string, ICollection<ProjectItemInstance>> itemListsToBeBatched,
             Dictionary<string, MetadataReference> consumedMetadataReferences,
-            ElementLocation elementLocation,
+            IElementLocation elementLocation,
             LoggingContext loggingContext)
         {
             Assumed.Positive(itemListsToBeBatched.Count, "Need item types consumed by the batchable object.");
@@ -505,7 +535,7 @@ namespace Microsoft.Build.BackEnd
         private static Dictionary<string, string> GetItemMetadataValues(
             ProjectItemInstance item,
             Dictionary<string, MetadataReference> consumedMetadataReferences,
-            ElementLocation elementLocation)
+            IElementLocation elementLocation)
         {
             var itemMetadataValues = new Dictionary<string, string>(consumedMetadataReferences.Count, MSBuildNameIgnoreCaseComparer.Default);
 

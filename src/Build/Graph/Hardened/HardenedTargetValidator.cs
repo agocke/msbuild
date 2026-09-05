@@ -81,7 +81,7 @@ internal sealed class HardenedTargetValidator
     private readonly HashSet<string> _propertiesWithoutConcreteValues = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _targetAssignedItemTypes = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HardenedExpressionDescriptorCache _expressionDescriptors = new();
-    private HardenedLookupState? _context;
+    private Lookup? _validationLookup;
     private HardenedConcreteState? _concreteState;
     private Expander<ProjectPropertyInstance, ProjectItemInstance>? _concreteExpander;
 
@@ -127,7 +127,8 @@ internal sealed class HardenedTargetValidator
         _propertiesWithoutConcreteValues.Clear();
         _targetAssignedItemTypes.Clear();
         _expressionDescriptors.Clear();
-        _context = lookup.Clone().EnableHardenedState();
+        _validationLookup = lookup.Clone();
+        _validationLookup.EnableHardenedState();
         _concreteState = new HardenedConcreteState(project);
         _concreteExpander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
             _concreteState,
@@ -793,7 +794,7 @@ internal sealed class HardenedTargetValidator
 
     private ValidatorState CaptureState()
         => new(
-            Context.Snapshot(),
+            ValidationLookup.SnapshotHardenedLookup(),
             ConcreteState.Clone(),
             new HashSet<string>(
                 _propertiesWithoutConcreteValues,
@@ -804,7 +805,7 @@ internal sealed class HardenedTargetValidator
 
     private void RestoreState(ValidatorState state)
     {
-        _context = state.Context;
+        _validationLookup = state.Lookup;
         _concreteState = state.ConcreteState;
         _concreteExpander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
             _concreteState,
@@ -1407,9 +1408,11 @@ internal sealed class HardenedTargetValidator
         string context,
         bool reportDiagnostics = true)
     {
-        List<string> nonEmptyExpressions = [];
-        var consumedItemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        bool hasExpression = false;
+        List<string> consumedItemTypes = [];
+        var seenConsumedItemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
         var metadataReferences = new Dictionary<string, MetadataReference>(MSBuildNameIgnoreCaseComparer.Default);
+        List<MetadataReference> orderedMetadataReferences = [];
         for (int i = 0; i < expressions.Count; i++)
         {
             string? expression = expressions[i];
@@ -1418,24 +1421,31 @@ internal sealed class HardenedTargetValidator
                 continue;
             }
 
-            nonEmptyExpressions.Add(expression!);
+            hasExpression = true;
             HardenedExpressionDescriptor descriptor =
                 _expressionDescriptors.GetOrCreate(owner, expression, implicitItemType);
-            if (!descriptor.ItemTypes.IsEmpty)
+            foreach (string itemType in descriptor.ItemTypes)
             {
-                consumedItemTypes.UnionWith(descriptor.ItemTypes);
+                if (seenConsumedItemTypes.Add(itemType))
+                {
+                    consumedItemTypes.Add(itemType);
+                }
             }
 
             if (descriptor.BatchMetadata is not null)
             {
                 foreach (KeyValuePair<string, MetadataReference> metadata in descriptor.BatchMetadata)
                 {
-                    metadataReferences[metadata.Key] = metadata.Value;
+                    if (!metadataReferences.ContainsKey(metadata.Key))
+                    {
+                        metadataReferences.Add(metadata.Key, metadata.Value);
+                        orderedMetadataReferences.Add(metadata.Value);
+                    }
                 }
             }
         }
 
-        if (nonEmptyExpressions.Count == 0)
+        if (!hasExpression)
         {
             return ValueState.Static;
         }
@@ -1447,14 +1457,19 @@ internal sealed class HardenedTargetValidator
 
         if (implicitItemType is not null)
         {
-            consumedItemTypes.Add(implicitItemType);
+            if (seenConsumedItemTypes.Add(implicitItemType))
+            {
+                consumedItemTypes.Add(implicitItemType);
+            }
         }
 
-        var batchedItemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        List<string> batchedItemTypes = [];
+        var seenBatchedItemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
         BatchingEngine.AddItemTypesToBeBatched(
-            metadataReferences,
+            orderedMetadataReferences,
             consumedItemTypes,
-            batchedItemTypes);
+            batchedItemTypes,
+            seenBatchedItemTypes);
 
         IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
         if (batchedItemTypes.Count == 0)
@@ -1471,28 +1486,81 @@ internal sealed class HardenedTargetValidator
         }
 
         ValueState state = ValueState.Static;
+        bool keysAreStatic = true;
+        string batchingContext = $"batching of {context}";
         foreach (string itemType in batchedItemTypes)
         {
-            state = ValueState.Combine(state, Context.GetItemMembership(itemType));
-            foreach (MetadataReference metadataReference in metadataReferences.Values)
+            ValueState membership = Context.GetItemMembership(itemType);
+            state = ValueState.Combine(state, membership);
+            keysAreStatic &= !reportDiagnostics
+                ? membership.IsStatic
+                : RequireStatic(
+                    membership,
+                    effectiveLocation,
+                    batchingContext,
+                    $"membership of item list '@({itemType})'");
+
+            ICollection<ProjectItemInstance> items = ValidationLookup.GetItems(itemType);
+            foreach (ProjectItemInstance item in items)
             {
-                if (metadataReference.ItemName is null ||
-                    MSBuildNameIgnoreCaseComparer.Default.Equals(metadataReference.ItemName, itemType))
+                ValueState identity = Context.GetItemIdentity(item);
+                state = ValueState.Combine(state, identity);
+                keysAreStatic &= !reportDiagnostics
+                    ? identity.IsStatic
+                    : RequireStatic(
+                        identity,
+                        effectiveLocation,
+                        batchingContext,
+                        $"identity '{item.EvaluatedInclude}' of item '{itemType}'");
+
+                foreach (MetadataReference metadataReference in orderedMetadataReferences)
                 {
-                    state = ValueState.Combine(
-                        state,
-                        Context.GetMetadata(itemType, metadataReference.MetadataName));
+                    if (MSBuildNameIgnoreCaseComparer.Default.Equals(
+                            metadataReference.MetadataName,
+                            "Identity") ||
+                        (metadataReference.ItemName is not null &&
+                         !MSBuildNameIgnoreCaseComparer.Default.Equals(
+                             metadataReference.ItemName,
+                             itemType)))
+                    {
+                        continue;
+                    }
+
+                    ValueState metadata = Context.GetItemMetadata(item, metadataReference.MetadataName);
+                    state = ValueState.Combine(state, metadata);
+                    keysAreStatic &= !reportDiagnostics
+                        ? metadata.IsStatic
+                        : RequireStatic(
+                            metadata,
+                            effectiveLocation,
+                            batchingContext,
+                            $"metadata '{metadataReference.MetadataName}' on item '{item.EvaluatedInclude}' in '@({itemType})'");
                 }
             }
         }
 
-        if (reportDiagnostics)
+        if (!keysAreStatic || !reportDiagnostics)
         {
-            RequireStatic(
-                state,
+            return state;
+        }
+
+        try
+        {
+            BatchingEngine.BatchingInfo batchingInfo = BatchingEngine.AnalyzeBatching(
+                metadataReferences,
+                consumedItemTypes,
+                ValidationLookup,
+                effectiveLocation);
+            BatchingEngine.PrepareBatchingBuckets(
+                batchingInfo,
+                ValidationLookup,
                 effectiveLocation,
-                $"batching of {context}",
-                string.Join(";", nonEmptyExpressions));
+                loggingContext: null);
+        }
+        catch (InvalidProjectFileException exception)
+        {
+            AddDiagnostic(exception);
+            return ValueState.Blocked(new ValueOrigin($"invalid batching in {context}"));
         }
 
         return state;
@@ -1882,7 +1950,10 @@ internal sealed class HardenedTargetValidator
     }
 
     private HardenedLookupState Context
-        => _context ?? throw new InvalidOperationException("Validation context has not been initialized.");
+        => ValidationLookup.HardenedState;
+
+    private Lookup ValidationLookup
+        => _validationLookup ?? throw new InvalidOperationException("Validation lookup has not been initialized.");
 
     private HardenedConcreteState ConcreteState
         => _concreteState ?? throw new InvalidOperationException("Concrete state has not been initialized.");
@@ -1904,10 +1975,13 @@ internal sealed class HardenedTargetValidator
     }
 
     private sealed record ValidatorState(
-        HardenedLookupState Context,
+        Lookup Lookup,
         HardenedConcreteState ConcreteState,
         HashSet<string> PropertiesWithoutConcreteValues,
-        HashSet<string> TargetAssignedItemTypes);
+        HashSet<string> TargetAssignedItemTypes)
+    {
+        internal HardenedLookupState Context => Lookup.HardenedState;
+    }
 
     private readonly record struct ExpressionValidationResult(ValueState State, bool CanEvaluate);
 }

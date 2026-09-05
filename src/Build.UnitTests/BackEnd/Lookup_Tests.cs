@@ -1353,6 +1353,26 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
+        public void HardenedStateDeferredOutputDefaultsDoNotTaintExistingItems()
+        {
+            ProjectInstance project = ProjectHelpers.CreateEmptyProjectInstance();
+            ProjectItemInstance item = new(project, "i", "existing", project.FullPath);
+            ItemDictionary<ProjectItemInstance> items = new();
+            items.Add(item);
+            Lookup lookup = LookupHelpers.CreateLookup(items);
+            HardenedLookupState state = lookup.EnableHardenedState();
+
+            state.AddTaskOutputItems(
+                "i",
+                ValueState.Deferred(new ValueOrigin("task output")));
+
+            state.GetItemMembership("i").Availability.ShouldBe(ValueAvailability.Deferred);
+            state.GetDefaultMetadata("i").Availability.ShouldBe(ValueAvailability.Deferred);
+            state.GetItemIdentity(item).ShouldBe(ValueState.Static);
+            state.GetItemMetadata(item, "M").ShouldBe(ValueState.Static);
+        }
+
+        [Fact]
         public void HardenedStatePopulatesAndMergesOnlySelectedItemState()
         {
             ProjectInstance project = ProjectHelpers.CreateEmptyProjectInstance();

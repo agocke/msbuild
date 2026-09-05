@@ -282,10 +282,10 @@ namespace Microsoft.Build.BackEnd
             return _hardenedState;
         }
 
-        internal HardenedLookupState SnapshotHardenedState()
+        internal Lookup SnapshotHardenedLookup()
         {
             Assumed.NotNull(_hardenedState);
-            return new Lookup(this, snapshotHardenedState: true)._hardenedState;
+            return new Lookup(this, snapshotHardenedState: true);
         }
 
         internal Scope CurrentScope => _lookupScopes;

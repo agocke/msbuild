@@ -56,6 +56,27 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
+        public void OrderedItemTypeAssociationPreservesReferenceOrder()
+        {
+            var metadata = new Dictionary<string, MetadataReference>
+            {
+                ["Second.Key"] = new MetadataReference("Second", "Key"),
+                ["Common"] = new MetadataReference(null, "Common"),
+                ["First.Key"] = new MetadataReference("First", "Key"),
+            };
+            List<string> itemTypes = [];
+            var seenItemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+
+            BatchingEngine.AddItemTypesToBeBatched(
+                metadata.Values,
+                ["Third", "first"],
+                itemTypes,
+                seenItemTypes);
+
+            itemTypes.ShouldBe(["Second", "First", "Third"]);
+        }
+
+        [Fact]
         public void AnalyzedPathMatchesDirectPathForQualifiedAndUnqualifiedMetadata()
         {
             ProjectInstance project = ProjectHelpers.CreateEmptyProjectInstance();

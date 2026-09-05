@@ -1,8 +1,10 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.Build.BackEnd;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Graph.Hardened;
@@ -1649,6 +1651,179 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void RejectsDeferredConcreteItemIdentityUsedForBatching()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>source</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Consume Items="@(Input)" Kind="%(Input.Kind)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            },
+            lookup =>
+            {
+                ProjectItemInstance item = lookup.GetItems("Input").Single();
+                lookup.EnableHardenedState().SetItemIdentity(
+                    item,
+                    ValueState.Deferred(new ValueOrigin("deferred input identity")));
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4288");
+        diagnostics[0].Message.ShouldContain("identity 'a' of item 'Input'");
+        diagnostics[0].Message.ShouldContain("deferred input identity");
+    }
+
+    [Theory]
+    [InlineData("%(Input.Kind)")]
+    [InlineData("%(Kind)")]
+    public void RejectsDeferredConcreteMetadataUsedAsBatchKey(string metadataExpression)
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            $"""
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>source</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Consume Items="@(Input)" Kind="{metadataExpression}" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            },
+            lookup =>
+            {
+                ProjectItemInstance item = lookup.GetItems("Input").Single();
+                lookup.EnableHardenedState().SetMetadata(
+                    item,
+                    "Kind",
+                    ValueState.Deferred(new ValueOrigin("deferred input kind")));
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4288");
+        diagnostics[0].Message.ShouldContain("metadata 'Kind' on item 'a' in '@(Input)'");
+        diagnostics[0].Message.ShouldContain("deferred input kind");
+    }
+
+    [Fact]
+    public void ReportsEveryIndependentDeferredBatchKeyInItemOrder()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>source</Kind>
+                  <Flavor>first</Flavor>
+                </Input>
+                <Input Include="b">
+                  <Kind>source</Kind>
+                  <Flavor>second</Flavor>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Consume Items="@(Input)"
+                         Kind="%(Input.Kind)"
+                         Flavor="%(Input.Flavor)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            },
+            lookup =>
+            {
+                ProjectItemInstance[] items = [.. lookup.GetItems("Input")];
+                items.Length.ShouldBe(2);
+                HardenedLookupState state = lookup.EnableHardenedState();
+                state.SetMetadata(
+                    items[0],
+                    "Kind",
+                    ValueState.Deferred(new ValueOrigin("first deferred key")));
+                state.SetMetadata(
+                    items[1],
+                    "Flavor",
+                    ValueState.Deferred(new ValueOrigin("second deferred key")));
+            });
+
+        diagnostics.Count.ShouldBe(2);
+        diagnostics[0].Message.ShouldContain("metadata 'Kind' on item 'a'");
+        diagnostics[0].Message.ShouldContain("first deferred key");
+        diagnostics[1].Message.ShouldContain("metadata 'Flavor' on item 'b'");
+        diagnostics[1].Message.ShouldContain("second deferred key");
+    }
+
+    [Fact]
+    public void DeferredMembershipStopsBeforeOrdinaryBatchAnalysis()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a" />
+              </ItemGroup>
+              <Target Name="Build">
+                <Consume Items="@(Input)" Kind="%(Kind)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            },
+            lookup =>
+            {
+                lookup.EnableHardenedState().AddTaskOutputItems(
+                    "Input",
+                    ValueState.Deferred(new ValueOrigin("deferred input membership")));
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4288");
+        diagnostics[0].Message.ShouldContain("membership of item list '@(Input)'");
+        diagnostics[0].Message.ShouldContain("deferred input membership");
+    }
+
+    [Fact]
+    public void ReportsOrdinaryUnqualifiedMetadataErrorAfterStaticKeyValidation()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a" />
+              </ItemGroup>
+              <Target Name="Build">
+                <Consume Items="@(Input)" Kind="%(Kind)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Consume"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4096");
+    }
+
+    [Fact]
     public void AllowsDeferredPayloadMetadataToFlowToDeclaredIOTask()
     {
         ValidateSuccess(
@@ -1888,13 +2063,22 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
 
     private IReadOnlyList<InvalidProjectFileException> ValidateDiagnostics(
         string projectXml,
-        IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
+        IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications,
+        Action<Lookup>? configureLookup = null)
     {
         using TestEnvironment environment = TestEnvironment.Create(_output);
         ProjectInstance project = CreateProjectInstance(environment, projectXml);
         HardenedTargetValidator validator = new(taskClassifications);
 
-        return validator.Validate(project, "Build");
+        if (configureLookup is null)
+        {
+            return validator.Validate(project, "Build");
+        }
+
+        var lookup = new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith);
+        configureLookup(lookup);
+
+        return validator.Validate(project, lookup, ["Build"]);
     }
 
     private static ProjectInstance CreateProjectInstance(TestEnvironment environment, string projectXml)

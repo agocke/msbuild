@@ -27,9 +27,6 @@ internal sealed class HardenedLookupState
     internal static HardenedLookupState Create(Lookup lookup)
         => new(lookup);
 
-    internal HardenedLookupState Snapshot()
-        => _lookup.SnapshotHardenedState();
-
     internal void InitializeCurrentScope()
     {
         _lookup.CurrentScope.HardenedState ??= new ScopeState();
@@ -80,6 +77,11 @@ internal sealed class HardenedLookupState
 
     internal ValueState GetItemMembership(string itemType)
         => FindItemList(itemType)?.Membership ?? ValueState.Static;
+
+    internal ValueState GetItemIdentity(ProjectItemInstance item)
+        => FindItemList(item.ItemType)?.Items.TryGetValue(item, out ItemState? itemState) == true
+            ? itemState.Identity
+            : ValueState.Static;
 
     internal ValueState GetItemValue(string itemType, bool includeMetadata)
     {
@@ -157,22 +159,35 @@ internal sealed class HardenedLookupState
             return ValueState.Static;
         }
 
+        ValueState metadataState = MSBuildNameIgnoreCaseComparer.Default.Equals(metadataName, "Identity")
+            ? GetItemIdentity(item)
+            : GetItemMetadata(itemList, item, metadataName);
+
+        return ValueState.Combine(itemList.Membership, metadataState);
+    }
+
+    internal ValueState GetItemMetadata(ProjectItemInstance item, string metadataName)
+    {
+        ItemListState? itemList = FindItemList(item.ItemType);
+        return itemList is null
+            ? ValueState.Static
+            : GetItemMetadata(itemList, item, metadataName);
+    }
+
+    private static ValueState GetItemMetadata(
+        ItemListState itemList,
+        ProjectItemInstance item,
+        string metadataName)
+    {
         if (!itemList.Items.TryGetValue(item, out ItemState? itemState))
         {
-            ValueState listMetadataState = MSBuildNameIgnoreCaseComparer.Default.Equals(metadataName, "Identity")
-                ? itemList.Membership
-                : itemList.Metadata.TryGetValue(metadataName, out ValueState state)
-                    ? state
-                    : itemList.DefaultMetadata;
-            return ValueState.Combine(itemList.Membership, listMetadataState);
+            return itemList.Metadata.TryGetValue(metadataName, out ValueState listState)
+                ? listState
+                : ValueState.Static;
         }
 
         ValueState metadataState;
-        if (MSBuildNameIgnoreCaseComparer.Default.Equals(metadataName, "Identity"))
-        {
-            metadataState = itemState.Identity;
-        }
-        else if (itemState.Metadata.TryGetValue(metadataName, out ValueState state))
+        if (itemState.Metadata.TryGetValue(metadataName, out ValueState state))
         {
             metadataState = state;
         }
@@ -184,10 +199,10 @@ internal sealed class HardenedLookupState
         {
             metadataState = itemList.Metadata.TryGetValue(metadataName, out state)
                 ? state
-                : itemList.DefaultMetadata;
+                : ValueState.Static;
         }
 
-        return ValueState.Combine(itemList.Membership, metadataState);
+        return metadataState;
     }
 
     internal IReadOnlyDictionary<string, ValueState> GetMetadata(string itemType)
