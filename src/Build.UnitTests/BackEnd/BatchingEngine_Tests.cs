@@ -23,6 +23,38 @@ namespace Microsoft.Build.UnitTests.BackEnd
     public class BatchingEngine_Tests
     {
         [Fact]
+        public void QualifiedMetadataAddsOnlyItsItemType()
+        {
+            var metadata = new Dictionary<string, MetadataReference>
+            {
+                ["File.Culture"] = new MetadataReference("File", "Culture"),
+            };
+            var itemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+
+            BatchingEngine.AddItemTypesToBeBatched(metadata, ["Other"], itemTypes);
+
+            Assert.Single(itemTypes);
+            Assert.Contains("File", itemTypes);
+        }
+
+        [Fact]
+        public void UnqualifiedMetadataAddsAllConsumedItemTypes()
+        {
+            var metadata = new Dictionary<string, MetadataReference>
+            {
+                ["Culture"] = new MetadataReference(null, "Culture"),
+                ["Resource.Culture"] = new MetadataReference("Resource", "Culture"),
+            };
+            var itemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+
+            BatchingEngine.AddItemTypesToBeBatched(metadata, ["File", "resource"], itemTypes);
+
+            Assert.Equal(2, itemTypes.Count);
+            Assert.Contains("File", itemTypes);
+            Assert.Contains("Resource", itemTypes);
+        }
+
+        [Fact]
         public void GetBuckets()
         {
             ProjectInstance project = ProjectHelpers.CreateEmptyProjectInstance();

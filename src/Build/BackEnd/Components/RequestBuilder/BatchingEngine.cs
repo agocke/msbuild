@@ -196,10 +196,7 @@ namespace Microsoft.Build.BackEnd
         ///
         /// All other item lists will not be batched, and instead will be passed in wholesale to all buckets.
         /// </summary>
-        /// <returns>Dictionary containing the item names that should be batched.  If the items match unqualified metadata,
-        /// the entire list of items will be returned in the Value.  Otherwise, the Value will be empty, indicating only the
-        /// qualified item set (in the Key) should be batched.
-        /// </returns>
+        /// <returns>Dictionary containing the item names that should be batched and their current items.</returns>
         private static Dictionary<string, ICollection<ProjectItemInstance>> GetItemListsToBeBatched(
             Dictionary<string, MetadataReference> consumedMetadataReferences,   // Key is [string] potentially qualified metadata name
                                                                                 // Value is [struct MetadataReference]
@@ -207,15 +204,11 @@ namespace Microsoft.Build.BackEnd
             Lookup lookup,
             ElementLocation elementLocation)
         {
-            // The keys in this hashtable are the names of the items that we will batch on.
-            // The values are always String.Empty (not used).
+            // The keys are the item types that participate in batching. Cache their items
+            // while adding the keys so bucket construction does not repeat the lookup.
             var itemListsToBeBatched = new Dictionary<string, ICollection<ProjectItemInstance>>(MSBuildNameIgnoreCaseComparer.Default);
-            HashSet<string> itemTypesToBeBatched = GetItemTypesToBeBatched(consumedMetadataReferences, consumedItemReferenceNames);
-
-            foreach (string itemType in itemTypesToBeBatched)
-            {
-                itemListsToBeBatched[itemType] = null;
-            }
+            var sink = new ItemListSink(itemListsToBeBatched, lookup);
+            AddItemTypesToBeBatched(consumedMetadataReferences, consumedItemReferenceNames, ref sink);
 
             // Loop through all the metadata references and find the ones that are unqualified.
             foreach (MetadataReference consumedMetadataReference in consumedMetadataReferences.Values)
@@ -226,12 +219,12 @@ namespace Microsoft.Build.BackEnd
                     // For metadata references that are unqualified, every single consumed item
                     // must contain a value for that metadata.  If any item doesn't, it's an error
                     // to use unqualified metadata.
-                    if (itemTypesToBeBatched.Count > 0)
+                    if (itemListsToBeBatched.Count > 0)
                     {
-                        foreach (string consumedItemName in itemTypesToBeBatched)
+                        foreach (KeyValuePair<string, ICollection<ProjectItemInstance>> itemList in itemListsToBeBatched)
                         {
-                            // Loop through all the items in the item list.
-                            ICollection<ProjectItemInstance> items = lookup.GetItems(consumedItemName);
+                            string consumedItemName = itemList.Key;
+                            ICollection<ProjectItemInstance> items = itemList.Value;
 
                             if (items != null)
                             {
@@ -244,11 +237,6 @@ namespace Microsoft.Build.BackEnd
                                         item.EvaluatedInclude, consumedItemName, consumedMetadataReference.MetadataName);
                                 }
                             }
-
-                            // This item list passes the test of having every single item containing
-                            // a value for this metadata.  Therefore, add this item list to the batching list.
-                            // Also, to save doing lookup.GetItems again, put the items in the table as the value.
-                            itemListsToBeBatched[consumedItemName] = items;
                         }
                     }
                 }
@@ -257,11 +245,21 @@ namespace Microsoft.Build.BackEnd
             return itemListsToBeBatched;
         }
 
-        internal static HashSet<string> GetItemTypesToBeBatched(
+        internal static void AddItemTypesToBeBatched(
             IReadOnlyDictionary<string, MetadataReference> consumedMetadataReferences,
-            IEnumerable<string> consumedItemReferenceNames)
+            IEnumerable<string> consumedItemReferenceNames,
+            HashSet<string> itemTypesToBeBatched)
         {
-            var itemTypesToBeBatched = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+            var sink = new ItemTypeSetSink(itemTypesToBeBatched);
+            AddItemTypesToBeBatched(consumedMetadataReferences, consumedItemReferenceNames, ref sink);
+        }
+
+        private static void AddItemTypesToBeBatched<TSink>(
+            IReadOnlyDictionary<string, MetadataReference> consumedMetadataReferences,
+            IEnumerable<string> consumedItemReferenceNames,
+            ref TSink sink)
+            where TSink : struct, IItemTypeSink
+        {
             bool hasUnqualifiedMetadata = false;
 
             foreach (MetadataReference consumedMetadataReference in consumedMetadataReferences.Values)
@@ -272,16 +270,59 @@ namespace Microsoft.Build.BackEnd
                 }
                 else
                 {
-                    itemTypesToBeBatched.Add(consumedMetadataReference.ItemName);
+                    sink.Add(consumedMetadataReference.ItemName);
                 }
             }
 
             if (hasUnqualifiedMetadata && consumedItemReferenceNames is not null)
             {
-                itemTypesToBeBatched.UnionWith(consumedItemReferenceNames);
+                foreach (string itemType in consumedItemReferenceNames)
+                {
+                    sink.Add(itemType);
+                }
+            }
+        }
+
+        private interface IItemTypeSink
+        {
+            void Add(string itemType);
+        }
+
+        private readonly struct ItemTypeSetSink : IItemTypeSink
+        {
+            private readonly HashSet<string> _itemTypes;
+
+            internal ItemTypeSetSink(HashSet<string> itemTypes)
+            {
+                _itemTypes = itemTypes;
             }
 
-            return itemTypesToBeBatched;
+            public void Add(string itemType)
+            {
+                _itemTypes.Add(itemType);
+            }
+        }
+
+        private readonly struct ItemListSink : IItemTypeSink
+        {
+            private readonly Dictionary<string, ICollection<ProjectItemInstance>> _itemLists;
+            private readonly Lookup _lookup;
+
+            internal ItemListSink(
+                Dictionary<string, ICollection<ProjectItemInstance>> itemLists,
+                Lookup lookup)
+            {
+                _itemLists = itemLists;
+                _lookup = lookup;
+            }
+
+            public void Add(string itemType)
+            {
+                if (!_itemLists.ContainsKey(itemType))
+                {
+                    _itemLists.Add(itemType, _lookup.GetItems(itemType));
+                }
+            }
         }
 
         /// <summary>

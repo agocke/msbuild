@@ -445,7 +445,9 @@ HardenedValidationError
 ```
 
 `HardenedValidationContext` maintains the current availability of properties,
-item-list membership, and metadata.
+item-list membership, and metadata. Static evaluated state is implicit; the
+context stores only target-time state that can differ from that default rather
+than copying every evaluated property, item, and metadata value.
 
 `ValueAvailability` has `Static`, `Deferred`, and `Blocked`. `Blocked` is a
 validator-analysis state, not a third MSBuild value kind: it records that a
@@ -468,9 +470,10 @@ loading is a later milestone.
 2. Traverse the requested target closure in ordinary dependency, `BeforeTargets`,
    body, and `AfterTargets` order. Missing requested or nested targets are
    collected as ordinary `MSB4057` diagnostics rather than escaping validation.
-3. Maintain a mutable deep copy of the evaluated `ProjectInstance` as a
-   concrete expansion overlay for statically evaluable intrinsic property
-   assignments. Availability and origin state remain in
+3. Maintain a property overlay over the evaluated `ProjectInstance` for
+   concrete expansion of statically evaluable intrinsic property assignments.
+   Unchanged properties and items delegate to the evaluated instance without
+   copying or mutation. Availability and origin state remain in
    `HardenedValidationContext`; the concrete overlay never substitutes for it.
 4. Locate each selected `ProjectTargetInstance`.
 5. Reject unsupported target attributes and child element types at their

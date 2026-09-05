@@ -55,7 +55,7 @@ internal sealed class HardenedTargetValidator
     private readonly HashSet<string> _propertiesWithoutConcreteValues = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _targetAssignedItemTypes = new(MSBuildNameIgnoreCaseComparer.Default);
     private HardenedValidationContext? _context;
-    private ProjectInstance? _concreteProject;
+    private HardenedConcreteState? _concreteState;
     private Expander<ProjectPropertyInstance, ProjectItemInstance>? _concreteExpander;
 
     internal HardenedTargetValidator(IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
@@ -87,11 +87,11 @@ internal sealed class HardenedTargetValidator
         _diagnosticKeys.Clear();
         _propertiesWithoutConcreteValues.Clear();
         _targetAssignedItemTypes.Clear();
-        _context = new HardenedValidationContext(project);
-        _concreteProject = project.DeepCopy(isImmutable: false);
+        _context = new HardenedValidationContext();
+        _concreteState = new HardenedConcreteState(project);
         _concreteExpander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
-            _concreteProject,
-            _concreteProject,
+            _concreteState,
+            _concreteState,
             FileSystems.Default,
             loggingContext: null);
 
@@ -299,7 +299,7 @@ internal sealed class HardenedTargetValidator
                     reportUnmodeled: false,
                     out string expandedValue))
             {
-                ConcreteProject.SetProperty(property.Name, expandedValue);
+                ConcreteState.SetProperty(property.Name, expandedValue);
                 _propertiesWithoutConcreteValues.Remove(property.Name);
             }
             else
@@ -588,7 +588,7 @@ internal sealed class HardenedTargetValidator
                 ParserOptions.AllowPropertiesAndItemLists,
                 ConcreteExpander,
                 ExpanderOptions.ExpandPropertiesAndItems,
-                ConcreteProject.Directory,
+                ConcreteState.ProjectDirectory,
                 conditionLocation,
                 FileSystems.Default,
                 loggingContext: null);
@@ -1074,9 +1074,11 @@ internal sealed class HardenedTargetValidator
             consumedItemTypes.Add(implicitItemType);
         }
 
-        HashSet<string> batchedItemTypes = BatchingEngine.GetItemTypesToBeBatched(
+        var batchedItemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        BatchingEngine.AddItemTypesToBeBatched(
             references.Metadata,
-            consumedItemTypes);
+            consumedItemTypes,
+            batchedItemTypes);
 
         IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
         if (batchedItemTypes.Count == 0)
@@ -1137,9 +1139,11 @@ internal sealed class HardenedTargetValidator
             consumedItemTypes.Add(implicitItemType);
         }
 
-        HashSet<string> itemTypes = BatchingEngine.GetItemTypesToBeBatched(
+        var itemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        BatchingEngine.AddItemTypesToBeBatched(
             references.Metadata!,
-            consumedItemTypes);
+            consumedItemTypes,
+            itemTypes);
         if (itemTypes.Count == 0)
         {
             ReportUnsupported(
@@ -1532,8 +1536,8 @@ internal sealed class HardenedTargetValidator
     private HardenedValidationContext Context
         => _context ?? throw new InvalidOperationException("Validation context has not been initialized.");
 
-    private ProjectInstance ConcreteProject
-        => _concreteProject ?? throw new InvalidOperationException("Concrete project has not been initialized.");
+    private HardenedConcreteState ConcreteState
+        => _concreteState ?? throw new InvalidOperationException("Concrete state has not been initialized.");
 
     private Expander<ProjectPropertyInstance, ProjectItemInstance> ConcreteExpander
         => _concreteExpander ?? throw new InvalidOperationException("Concrete expander has not been initialized.");

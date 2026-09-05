@@ -446,6 +446,31 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ConcretePropertyOverlayDoesNotMutateProjectInstance()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <PropertyGroup>
+                <Value>Old</Value>
+              </PropertyGroup>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Value>New</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """);
+
+        HardenedTargetValidator validator = new();
+
+        validator.Validate(project, "Build").ShouldBeEmpty();
+        project.GetPropertyValue("Value").ShouldBe("Old");
+    }
+
+    [Fact]
     public void RejectsDeferredMetadataInOutputDestination()
     {
         IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(

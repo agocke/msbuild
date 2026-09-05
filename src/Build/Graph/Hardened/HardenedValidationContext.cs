@@ -41,27 +41,40 @@ internal sealed class ValueOrigin(string description, ValueOrigin? previous = nu
         => previous is null ? description : $"{description} from {previous}";
 }
 
+internal sealed class HardenedConcreteState :
+    IPropertyProvider<ProjectPropertyInstance>,
+    IItemProvider<ProjectItemInstance>
+{
+    private readonly ProjectInstance _project;
+    private readonly PropertyDictionary<ProjectPropertyInstance> _properties = new();
+
+    internal HardenedConcreteState(ProjectInstance project)
+    {
+        _project = project;
+    }
+
+    internal string ProjectDirectory => _project.Directory;
+
+    internal void SetProperty(string name, string value)
+    {
+        _properties.Set(ProjectPropertyInstance.Create(name, value));
+    }
+
+    public ProjectPropertyInstance GetProperty(string name)
+        => (_properties.GetProperty(name) ?? _project.GetProperty(name))!;
+
+    public ProjectPropertyInstance GetProperty(string name, int startIndex, int endIndex)
+        => (_properties.GetProperty(name, startIndex, endIndex) ??
+            ((IPropertyProvider<ProjectPropertyInstance>)_project).GetProperty(name, startIndex, endIndex))!;
+
+    public ICollection<ProjectItemInstance> GetItems(string itemType)
+        => _project.GetItems(itemType);
+}
+
 internal sealed class HardenedValidationContext
 {
     private readonly Dictionary<string, ValueState> _properties = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly Dictionary<string, ItemListState> _items = new(MSBuildNameIgnoreCaseComparer.Default);
-
-    internal HardenedValidationContext(ProjectInstance project)
-    {
-        foreach (ProjectPropertyInstance property in project.Properties)
-        {
-            _properties[property.Name] = ValueState.Static;
-        }
-
-        foreach (ProjectItemInstance item in project.Items)
-        {
-            ItemListState itemList = GetOrCreateItemList(item.ItemType);
-            foreach (ProjectMetadataInstance metadata in item.Metadata)
-            {
-                itemList.Metadata[metadata.Name] = ValueState.Static;
-            }
-        }
-    }
 
     internal ValueState GetProperty(string propertyName)
         => _properties.TryGetValue(propertyName, out ValueState state) ? state : ValueState.Static;
