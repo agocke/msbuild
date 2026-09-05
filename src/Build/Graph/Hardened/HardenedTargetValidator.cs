@@ -51,6 +51,7 @@ internal sealed class HardenedTargetValidator
     private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
     private readonly List<InvalidProjectFileException> _diagnostics = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _targetAssignedProperties = new(MSBuildNameIgnoreCaseComparer.Default);
     private HardenedValidationContext? _context;
 
     internal HardenedTargetValidator(IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
@@ -80,6 +81,7 @@ internal sealed class HardenedTargetValidator
 
         _diagnostics.Clear();
         _diagnosticKeys.Clear();
+        _targetAssignedProperties.Clear();
         _context = new HardenedValidationContext(project);
 
         HashSet<string> visitedTargets = new(MSBuildNameIgnoreCaseComparer.Default);
@@ -105,8 +107,17 @@ internal sealed class HardenedTargetValidator
         }
 
         ValidateUnsupportedTargetConstructs(target);
-        RejectTargetMetadata(target.Condition, target.ConditionLocation, $"the condition of target '{target.Name}'");
-        ValidateExpression(target.Condition, target.ConditionLocation, $"the condition of target '{target.Name}'", requireStatic: true, isCondition: true);
+        bool targetConditionMetadataValidated = RejectTargetMetadata(
+            target.Condition,
+            target.ConditionLocation,
+            $"the condition of target '{target.Name}'");
+        ValidateExpression(
+            target.Condition,
+            target.ConditionLocation,
+            $"the condition of target '{target.Name}'",
+            requireStatic: true,
+            isCondition: true,
+            metadataBatchingValidated: targetConditionMetadataValidated);
         ExpressionValidationResult dependenciesResult = ValidateExpression(
             target.DependsOnTargets,
             target.DependsOnTargetsLocation,
@@ -129,6 +140,8 @@ internal sealed class HardenedTargetValidator
             ValidateTarget(project, beforeTarget.TargetName, visitedTargets);
         }
 
+        ValidateBatching([target.Returns], implicitItemType: null, target.ReturnsLocation, $"target '{target.Name}'");
+
         foreach (ProjectTargetInstanceChild child in target.Children)
         {
             switch (child)
@@ -142,7 +155,7 @@ internal sealed class HardenedTargetValidator
                     break;
 
                 case ProjectTaskInstance task:
-                    ValidateTask(task, target.Name);
+                    ValidateTask(project, task, target.Name);
                     break;
 
                 default:
@@ -151,7 +164,6 @@ internal sealed class HardenedTargetValidator
             }
         }
 
-        ValidateBatching([target.Returns], implicitItemType: null, target.ReturnsLocation, $"target '{target.Name}'");
         ValidateExpression(
             target.Returns,
             target.ReturnsLocation,
@@ -189,7 +201,7 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectPropertyGroupTaskPropertyInstance property in propertyGroup.Properties)
         {
-            ValidateBatching(
+            ValueState batchingState = ValidateBatching(
                 [property.Condition, property.Value],
                 implicitItemType: null,
                 property.Location,
@@ -211,12 +223,15 @@ internal sealed class HardenedTargetValidator
                 isCondition: false,
                 metadataBatchingValidated: true);
 
-            ValueState propertyState = ValueState.Combine(conditionResult.State, valueResult.State);
+            ValueState propertyState = ValueState.Combine(
+                batchingState,
+                ValueState.Combine(conditionResult.State, valueResult.State));
             if (!conditionResult.State.IsStatic)
             {
                 propertyState = ToBlocked(propertyState, $"property '{property.Name}' has an unavailable condition");
             }
 
+            _targetAssignedProperties.Add(property.Name);
             Context.SetProperty(property.Name, propertyState);
         }
     }
@@ -236,7 +251,7 @@ internal sealed class HardenedTargetValidator
         }
     }
 
-    private void ValidateTask(ProjectTaskInstance task, string targetName)
+    private void ValidateTask(ProjectInstance project, ProjectTaskInstance task, string targetName)
     {
         if (!_taskClassifications.TryGetValue(task.Name, out HardenedTaskClassification classification))
         {
@@ -260,16 +275,18 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectTaskInstanceChild output in task.Outputs)
         {
+            AddIfNotEmpty(batchableExpressions, GetOutputDestination(output));
+            AddIfNotEmpty(batchableExpressions, GetTaskParameter(output));
             AddIfNotEmpty(batchableExpressions, output.Condition);
         }
 
-        ValidateBatching(
+        ValueState taskBatchingState = ValidateBatching(
             batchableExpressions,
             implicitItemType: null,
             task.Location,
             $"task '{task.Name}'");
 
-        ValidateExpression(
+        ExpressionValidationResult taskConditionResult = ValidateExpression(
             task.Condition,
             task.ConditionLocation,
             $"the condition of task '{task.Name}'",
@@ -277,9 +294,10 @@ internal sealed class HardenedTargetValidator
             isCondition: true,
             metadataBatchingValidated: true);
 
+        ValueState taskControlState = ValueState.Combine(taskBatchingState, taskConditionResult.State);
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
-            ValidateExpression(
+            ExpressionValidationResult parameterResult = ValidateExpression(
                 parameter.Value.Item1,
                 parameter.Value.Item2,
                 $"parameter '{parameter.Key}' of task '{task.Name}'",
@@ -287,12 +305,36 @@ internal sealed class HardenedTargetValidator
                 isCondition: false,
                 metadataBatchingValidated: true,
                 includeItemMetadata: true);
+
+            if (classification == HardenedTaskClassification.Pure ||
+                parameterResult.State.Availability == ValueAvailability.Blocked)
+            {
+                taskControlState = ValueState.Combine(taskControlState, parameterResult.State);
+            }
         }
 
         bool outputsAreDeferred = classification != HardenedTaskClassification.Pure;
         foreach (ProjectTaskInstanceChild output in task.Outputs)
         {
-            ValidateExpression(
+            string outputTaskParameter = GetTaskParameter(output);
+            string? outputDestinationExpression = GetOutputDestination(output);
+            ValueState outputConditionBatchingState = ValidateBatching(
+                [output.Condition],
+                implicitItemType: null,
+                output.ConditionLocation,
+                $"condition of output '{outputTaskParameter}' from task '{task.Name}'",
+                reportDiagnostics: false);
+
+            ExpressionValidationResult outputTaskParameterResult = ValidateExpression(
+                outputTaskParameter,
+                output.TaskParameterLocation,
+                $"TaskParameter '{outputTaskParameter}' of output from task '{task.Name}'",
+                requireStatic: true,
+                isCondition: false,
+                metadataBatchingValidated: true,
+                includeItemMetadata: true);
+
+            ExpressionValidationResult outputConditionResult = ValidateExpression(
                 output.Condition,
                 output.ConditionLocation,
                 $"the condition of output '{GetTaskParameter(output)}' from task '{task.Name}'",
@@ -300,24 +342,158 @@ internal sealed class HardenedTargetValidator
                 isCondition: true,
                 metadataBatchingValidated: true);
 
-            ValueOrigin origin = new($"output '{GetTaskParameter(output)}' of task '{task.Name}'");
-            ValueState outputState = outputsAreDeferred ? ValueState.Deferred(origin) : ValueState.Static;
+            ValueState outputDestinationBatchingState = ValidateBatching(
+                [outputDestinationExpression],
+                implicitItemType: null,
+                output.Location,
+                $"output destination of task '{task.Name}'",
+                reportDiagnostics: false);
+
+            string? destination;
             switch (output)
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
-                    Context.SetProperty(propertyOutput.PropertyName, outputState);
+                    destination = ValidateOutputDestination(
+                        project,
+                        propertyOutput.PropertyName,
+                        propertyOutput.PropertyNameLocation,
+                        $"PropertyName of output from task '{task.Name}'",
+                        outputDestinationBatchingState);
                     break;
 
                 case ProjectTaskOutputItemInstance itemOutput:
-                    Context.AddTaskOutputItems(itemOutput.ItemType, outputState);
+                    destination = ValidateOutputDestination(
+                        project,
+                        itemOutput.ItemType,
+                        itemOutput.ItemTypeLocation,
+                        $"ItemName of output from task '{task.Name}'",
+                        outputDestinationBatchingState);
                     break;
 
                 default:
                     ReportUnsupported(output.Location, output.GetType().Name, $"target '{targetName}'");
+                    continue;
+            }
+
+            if (destination is null)
+            {
+                continue;
+            }
+
+            ValueOrigin origin = new($"output '{GetTaskParameter(output)}' of task '{task.Name}'");
+            ValueState outputMappingState = ValueState.Combine(
+                taskControlState,
+                ValueState.Combine(
+                    outputTaskParameterResult.State,
+                    ValueState.Combine(outputConditionResult.State, outputConditionBatchingState)));
+            ValueState outputState = outputMappingState.IsStatic
+                ? outputsAreDeferred ? ValueState.Deferred(origin) : ValueState.Static
+                : ToBlocked(outputMappingState, $"output '{GetTaskParameter(output)}' of task '{task.Name}' is unavailable");
+            switch (output)
+            {
+                case ProjectTaskOutputPropertyInstance propertyOutput:
+                    Context.SetProperty(destination, outputState);
+                    break;
+
+                case ProjectTaskOutputItemInstance itemOutput:
+                    Context.AddTaskOutputItems(destination, outputState);
                     break;
             }
         }
     }
+
+    private string? ValidateOutputDestination(
+        ProjectInstance project,
+        string destination,
+        IElementLocation location,
+        string context,
+        ValueState batchingState)
+    {
+        ExpressionValidationResult result = ValidateExpression(
+            destination,
+            location,
+            context,
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+
+        if (!ValueState.Combine(result.State, batchingState).IsStatic)
+        {
+            return null;
+        }
+
+        if (ReferencesTargetAssignedProperty(destination))
+        {
+            ReportUnsupported(
+                location,
+                "an output destination computed from a target-assigned property",
+                context);
+            return null;
+        }
+
+        string expandedDestination = project.ExpandString(destination);
+        if (string.IsNullOrEmpty(expandedDestination) ||
+            ExpressionShredder.ContainsPropertyMarker(expandedDestination) ||
+            ExpressionShredder.ContainsItemVectorMarker(expandedDestination) ||
+            ExpressionShredder.ContainsMetadataMarker(expandedDestination))
+        {
+            ReportUnsupported(location, "a statically resolvable output destination", context);
+            return null;
+        }
+
+        return expandedDestination;
+    }
+
+    private bool ReferencesTargetAssignedProperty(string expression)
+        => ReferencesTargetAssignedProperty(expression, 0, expression.Length);
+
+    private bool ReferencesTargetAssignedProperty(string expression, int startIndex, int endIndex)
+    {
+        int marker = ExpressionShredder.IndexOfPropertyMarker(
+            expression,
+            startIndex,
+            endIndex - startIndex);
+        while (marker >= 0 && marker < endIndex)
+        {
+            int bodyStart = marker + 2;
+            int close = FindClosingParenthesis(expression, bodyStart);
+            if (close < 0 || close >= endIndex)
+            {
+                return false;
+            }
+
+            ReadOnlySpan<char> body = expression.AsSpan(bodyStart, close - bodyStart).Trim();
+            if (!body.IsEmpty && body[0] != '[' && !body.StartsWith("registry:", StringComparison.OrdinalIgnoreCase))
+            {
+                int nameEnd = body.IndexOfAny('.', '[');
+                ReadOnlySpan<char> propertyName = (nameEnd < 0 ? body : body[..nameEnd]).Trim();
+                if (!propertyName.IsEmpty && _targetAssignedProperties.Contains(propertyName.ToString()))
+                {
+                    return true;
+                }
+            }
+
+            if (ReferencesTargetAssignedProperty(expression, bodyStart, close))
+            {
+                return true;
+            }
+
+            marker = ExpressionShredder.IndexOfPropertyMarker(
+                expression,
+                close + 1,
+                endIndex - close - 1);
+        }
+
+        return false;
+    }
+
+    private static string? GetOutputDestination(ProjectTaskInstanceChild output)
+        => output switch
+        {
+            ProjectTaskOutputPropertyInstance property => property.PropertyName,
+            ProjectTaskOutputItemInstance item => item.ItemType,
+            _ => null,
+        };
 
     private ExpressionValidationResult ValidateExpression(
         string? expression,
@@ -376,14 +552,20 @@ internal sealed class HardenedTargetValidator
     }
 
     private ValueState FindPropertyState(string expression)
+        => FindPropertyState(expression, 0, expression.Length);
+
+    private ValueState FindPropertyState(string expression, int startIndex, int endIndex)
     {
         ValueState state = ValueState.Static;
-        int marker = ExpressionShredder.IndexOfPropertyMarker(expression);
-        while (marker >= 0)
+        int marker = ExpressionShredder.IndexOfPropertyMarker(
+            expression,
+            startIndex,
+            endIndex - startIndex);
+        while (marker >= 0 && marker < endIndex)
         {
             int bodyStart = marker + 2;
             int close = FindClosingParenthesis(expression, bodyStart);
-            if (close < 0)
+            if (close < 0 || close >= endIndex)
             {
                 return state;
             }
@@ -399,7 +581,11 @@ internal sealed class HardenedTargetValidator
                 }
             }
 
-            marker = ExpressionShredder.IndexOfPropertyMarker(expression, close + 1);
+            state = ValueState.Combine(state, FindPropertyState(expression, bodyStart, close));
+            marker = ExpressionShredder.IndexOfPropertyMarker(
+                expression,
+                close + 1,
+                endIndex - close - 1);
         }
 
         return state;
@@ -679,7 +865,8 @@ internal sealed class HardenedTargetValidator
         IReadOnlyList<string?> expressions,
         string? implicitItemType,
         IElementLocation? location,
-        string context)
+        string context,
+        bool reportDiagnostics = true)
     {
         List<string> nonEmptyExpressions = [];
         for (int i = 0; i < expressions.Count; i++)
@@ -716,10 +903,14 @@ internal sealed class HardenedTargetValidator
         IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
         if (batchedItemTypes.Count == 0)
         {
-            ReportUnsupported(
-                effectiveLocation,
-                $"unqualified metadata in {context} without an associated item list",
-                context);
+            if (reportDiagnostics)
+            {
+                ReportUnsupported(
+                    effectiveLocation,
+                    $"unqualified metadata in {context} without an associated item list",
+                    context);
+            }
+
             return ValueState.Blocked(new ValueOrigin($"unresolved batching metadata in {context}"));
         }
 
@@ -739,11 +930,15 @@ internal sealed class HardenedTargetValidator
             }
         }
 
-        RequireStatic(
-            state,
-            effectiveLocation,
-            $"batching of {context}",
-            string.Join(";", nonEmptyExpressions));
+        if (reportDiagnostics)
+        {
+            RequireStatic(
+                state,
+                effectiveLocation,
+                $"batching of {context}",
+                string.Join(";", nonEmptyExpressions));
+        }
+
         return state;
     }
 
@@ -854,15 +1049,18 @@ internal sealed class HardenedTargetValidator
             ? state.WithOrigin(description)
             : ValueState.Blocked(new ValueOrigin(description, state.Origin));
 
-    private void RejectTargetMetadata(string expression, IElementLocation? location, string context)
+    private bool RejectTargetMetadata(string expression, IElementLocation? location, string context)
     {
         if (ExpressionShredder.ContainsMetadataExpressionOutsideTransform(expression))
         {
             ReportUnsupported(
                 location ?? ElementLocation.EmptyLocation,
-                $"metadata expressions in {context}",
+                "metadata expressions",
                 context);
+            return true;
         }
+
+        return false;
     }
 
     private static bool TryParseLiteralMetadataNames(string expression, out HashSet<string>? metadataNames)

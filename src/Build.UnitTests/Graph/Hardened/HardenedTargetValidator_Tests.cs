@@ -129,6 +129,321 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             });
     }
 
+    [Fact]
+    public void ExpandsComputedPropertyOutputDestination()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <PropertyGroup>
+                <OutputName>Generated</OutputName>
+              </PropertyGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="$(OutputName)" />
+                </Generate>
+                <PureConsume Input="$(Generated)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("Generated");
+    }
+
+    [Fact]
+    public void ExpandsComputedItemOutputDestination()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <PropertyGroup>
+                <Suffix>Files</Suffix>
+              </PropertyGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Discovered$(Suffix)" />
+                </Generate>
+                <PureConsume Items="@(DiscoveredFiles)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("item 'DiscoveredFiles'");
+        exception.Message.ShouldNotContain("Discovered$(Suffix)");
+    }
+
+    [Fact]
+    public void RejectsDeferredOutputDestinationWithoutUpdatingRawName()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="$(Deferred)" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4288");
+        diagnostics[0].Message.ShouldContain("PropertyName of output from task 'Generate'");
+    }
+
+    [Fact]
+    public void OutputTaskParameterContributesToBatching()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>source</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="%(Input.Kind)" ItemName="Output" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void RejectsDeferredMetadataInOutputTaskParameter()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Generated" />
+                </Generate>
+                <Generate>
+                  <Output TaskParameter="%(Generated.Kind)" ItemName="Output" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("batching of task 'Generate'");
+    }
+
+    [Fact]
+    public void RejectsDeferredPropertyInOutputTaskParameter()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <Generate>
+                  <Output TaskParameter="$(Deferred)" ItemName="Output" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4288");
+        diagnostics[0].Message.ShouldContain("TaskParameter");
+    }
+
+    [Fact]
+    public void DoesNotResolveOutputDestinationAgainstStaleEvaluationProperty()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <PropertyGroup>
+                <Suffix>Old</Suffix>
+              </PropertyGroup>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Suffix>New</Suffix>
+                </PropertyGroup>
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Discovered$(Suffix)" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4286");
+        diagnostics[0].Message.ShouldContain("target-assigned property");
+    }
+
+    [Fact]
+    public void RejectsDeferredMetadataInOutputDestination()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Generated" />
+                </Generate>
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="%(Generated.Kind)" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4288");
+        diagnostics[0].Message.ShouldContain("batching of task 'Generate'");
+    }
+
+    [Theory]
+    [InlineData("$([MSBuild]::Escape($(Deferred)))")]
+    [InlineData("$(SomeProp.Replace('a', $(Deferred)))")]
+    public void RejectsNestedDeferredPropertyReferences(string expression)
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            $"""
+            <Project>
+              <PropertyGroup>
+                <SomeProp>abc</SomeProp>
+              </PropertyGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <PropertyGroup>
+                  <Value>{expression}</Value>
+                </PropertyGroup>
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("Deferred");
+    }
+
+    [Fact]
+    public void ValidatesReturnsBatchingBeforeTargetBody()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>static</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build" Returns="%(Input.Kind)">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <ItemGroup>
+                  <Input>
+                    <Kind>$(Deferred)</Kind>
+                  </Input>
+                </ItemGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void PropertyBatchingStatePropagatesToAssignedProperty()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Generated" />
+                </Generate>
+                <PropertyGroup>
+                  <Value>%(Generated.Kind)</Value>
+                </PropertyGroup>
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("output 'Result' of task 'Generate'");
+    }
+
+    [Fact]
+    public void ReportsTargetConditionMetadataOnce()
+    {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(
+            """
+            <Project>
+              <Target Name="Build" Condition="'%(Kind)' != ''" />
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4286");
+        diagnostics[0].Message.ShouldContain("metadata expressions in the condition of target 'Build'");
+    }
+
     [Theory]
     [InlineData("$([System.IO.Path]::Combine('a', 'b'))")]
     [InlineData("$([System.IO.Path]::GetFileName('a/b.txt'))")]
@@ -661,13 +976,20 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
         string projectXml,
         IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
     {
+        IReadOnlyList<InvalidProjectFileException> diagnostics = ValidateDiagnostics(projectXml, taskClassifications);
+        diagnostics.ShouldNotBeEmpty();
+        return diagnostics[0];
+    }
+
+    private IReadOnlyList<InvalidProjectFileException> ValidateDiagnostics(
+        string projectXml,
+        IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
+    {
         using TestEnvironment environment = TestEnvironment.Create(_output);
         ProjectInstance project = CreateProjectInstance(environment, projectXml);
         HardenedTargetValidator validator = new(taskClassifications);
 
-        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
-        diagnostics.ShouldNotBeEmpty();
-        return diagnostics[0];
+        return validator.Validate(project, "Build");
     }
 
     private static ProjectInstance CreateProjectInstance(TestEnvironment environment, string projectXml)
