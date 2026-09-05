@@ -81,7 +81,7 @@ internal sealed class HardenedTargetValidator
     private readonly HashSet<string> _propertiesWithoutConcreteValues = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HashSet<string> _targetAssignedItemTypes = new(MSBuildNameIgnoreCaseComparer.Default);
     private readonly HardenedExpressionDescriptorCache _expressionDescriptors = new();
-    private HardenedValidationContext? _context;
+    private HardenedLookupState? _context;
     private HardenedConcreteState? _concreteState;
     private Expander<ProjectPropertyInstance, ProjectItemInstance>? _concreteExpander;
 
@@ -106,8 +106,18 @@ internal sealed class HardenedTargetValidator
         => Validate(project, [targetName]);
 
     internal IReadOnlyList<InvalidProjectFileException> Validate(ProjectInstance project, IEnumerable<string> targetNames)
+        => Validate(
+            project,
+            new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith),
+            targetNames);
+
+    internal IReadOnlyList<InvalidProjectFileException> Validate(
+        ProjectInstance project,
+        Lookup lookup,
+        IEnumerable<string> targetNames)
     {
         ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(lookup);
         ArgumentNullException.ThrowIfNull(targetNames);
 
         _diagnostics.Clear();
@@ -117,7 +127,7 @@ internal sealed class HardenedTargetValidator
         _propertiesWithoutConcreteValues.Clear();
         _targetAssignedItemTypes.Clear();
         _expressionDescriptors.Clear();
-        _context = new HardenedValidationContext();
+        _context = lookup.Clone().EnableHardenedState();
         _concreteState = new HardenedConcreteState(project);
         _concreteExpander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
             _concreteState,
@@ -783,7 +793,7 @@ internal sealed class HardenedTargetValidator
 
     private ValidatorState CaptureState()
         => new(
-            Context.Clone(),
+            Context.Snapshot(),
             ConcreteState.Clone(),
             new HashSet<string>(
                 _propertiesWithoutConcreteValues,
@@ -1871,7 +1881,7 @@ internal sealed class HardenedTargetValidator
         }
     }
 
-    private HardenedValidationContext Context
+    private HardenedLookupState Context
         => _context ?? throw new InvalidOperationException("Validation context has not been initialized.");
 
     private HardenedConcreteState ConcreteState
@@ -1894,7 +1904,7 @@ internal sealed class HardenedTargetValidator
     }
 
     private sealed record ValidatorState(
-        HardenedValidationContext Context,
+        HardenedLookupState Context,
         HardenedConcreteState ConcreteState,
         HashSet<string> PropertiesWithoutConcreteValues,
         HashSet<string> TargetAssignedItemTypes);

@@ -10,6 +10,7 @@ using Microsoft.Build.Collections;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Graph.Hardened;
 using Microsoft.Build.Shared;
 using ReservedPropertyNames = Microsoft.Build.Internal.ReservedPropertyNames;
 
@@ -92,6 +93,11 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private Dictionary<ProjectItemInstance, ProjectItemInstance> _cloneTable;
 
+        /// <summary>
+        /// Optional availability and origin state used only by hardened validation.
+        /// </summary>
+        private HardenedLookupState _hardenedState;
+
         #endregion
 
         #region Constructors
@@ -120,6 +126,7 @@ namespace Microsoft.Build.BackEnd
             // Clones need to share an (item)clone table; the batching engine asks for items from the lookup,
             // then populates buckets with them, which have clone lookups.
             _cloneTable = that._cloneTable;
+            _hardenedState = that._hardenedState?.Fork();
         }
 
         #endregion
@@ -242,6 +249,14 @@ namespace Microsoft.Build.BackEnd
             return new Lookup(this);
         }
 
+        internal HardenedLookupState HardenedState => _hardenedState;
+
+        internal HardenedLookupState EnableHardenedState()
+        {
+            _hardenedState ??= HardenedLookupState.Create();
+            return _hardenedState;
+        }
+
         /// <summary>
         /// Enters the scope using the specified description.
         /// Callers keep the scope in order to pass it to <see cref="LeaveScope">LeaveScope</see>.
@@ -251,6 +266,7 @@ namespace Microsoft.Build.BackEnd
             // We don't create the tables unless we need them
             Scope scope = new Scope(this, description, null);
             _lookupScopes = scope;
+            _hardenedState?.EnterScope();
             return scope;
         }
 
@@ -279,6 +295,8 @@ namespace Microsoft.Build.BackEnd
             {
                 MergeScopeIntoNotLastScope();
             }
+
+            _hardenedState?.LeaveScope();
 
             // Let go of our pointer into the clone table; we assume we won't need it after leaving scope and want to save memory.
             // This is an assumption on IntrinsicTask, that it won't ask to remove or modify a clone in a higher scope than it was handed out in.
@@ -682,6 +700,7 @@ namespace Microsoft.Build.BackEnd
             Assumed.Null(existing, "Cannot add an itemgroup of this type.");
 
             PrimaryTable.ImportItemsOfType(itemType, group);
+            _hardenedState?.PopulateWithItems(itemType, group, RetrieveOriginalFromCloneTable);
         }
 
         /// <summary>
@@ -696,6 +715,7 @@ namespace Microsoft.Build.BackEnd
 
             PrimaryTable ??= new ItemDictionarySlim();
             PrimaryTable.Add(item);
+            _hardenedState?.PopulateWithItem(item, RetrieveOriginalFromCloneTable(item));
         }
 
         /// <summary>
@@ -712,6 +732,7 @@ namespace Microsoft.Build.BackEnd
             _lookupScopes.ItemTypesToTruncateAtThisScope =
                 itemTypes?.ToFrozenSet(MSBuildNameIgnoreCaseComparer.Default)
                 ?? FrozenSet<string>.Empty;
+            _hardenedState?.TruncateLookupsForItemTypes(itemTypes ?? Array.Empty<string>());
         }
 
         /// <summary>
@@ -725,6 +746,7 @@ namespace Microsoft.Build.BackEnd
             // Put in the set table
             PrimaryPropertySets ??= new PropertyDictionary<ProjectPropertyInstance>();
             PrimaryPropertySets.Set(property);
+            _hardenedState?.SetConcreteProperty(property.Name);
         }
 
         /// <summary>
@@ -782,6 +804,7 @@ namespace Microsoft.Build.BackEnd
             }
 
             PrimaryAddTable.ImportItemsOfType(itemType, itemsToAdd);
+            _hardenedState?.AddConcreteItems(itemType, itemsToAdd);
         }
 
         /// <summary>
@@ -801,6 +824,7 @@ namespace Microsoft.Build.BackEnd
             // Put in the add table
             PrimaryAddTable ??= new ItemDictionarySlim();
             PrimaryAddTable.Add(item);
+            _hardenedState?.AddConcreteItems(item.ItemType, [item]);
         }
 
         /// <summary>
@@ -821,6 +845,7 @@ namespace Microsoft.Build.BackEnd
 
             IEnumerable<ProjectItemInstance> itemsToRemove = items.Select(RetrieveOriginalFromCloneTable);
             PrimaryRemoveTable.ImportItemsOfType(itemType, itemsToRemove);
+            _hardenedState?.RemoveItems(items, RetrieveOriginalFromCloneTable);
 
             // No need to remove these items from the primary add table if it's
             // already there -- we always apply removes after adds, so that add
@@ -882,6 +907,11 @@ namespace Microsoft.Build.BackEnd
                 var modify = new KeyValuePair<ProjectItemInstance, MetadataModifications>(actualItem, metadataChangeCopy);
                 MergeModificationsIntoModificationTable(modifiesOfType, modify, ModifyMergeType.SecondWins);
             }
+
+            _hardenedState?.ApplyConcreteMetadataModifications(
+                group,
+                metadataChanges,
+                RetrieveOriginalFromCloneTable);
         }
 
         #endregion

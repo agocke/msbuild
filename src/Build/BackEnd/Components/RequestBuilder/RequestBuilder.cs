@@ -1241,7 +1241,10 @@ namespace Microsoft.Build.BackEnd
                 {
                     HardenedTargetValidator validator = new();
                     IReadOnlyList<InvalidProjectFileException> diagnostics =
-                        validator.Validate(_requestEntry.RequestConfiguration.Project, allTargets.Select(target => target.name));
+                        validator.Validate(
+                            _requestEntry.RequestConfiguration.Project,
+                            _requestEntry.RequestConfiguration.BaseLookup,
+                            allTargets.Select(target => target.name));
 
                     if (diagnostics.Count > 0)
                     {

@@ -8,6 +8,7 @@ using Microsoft.Build.BackEnd;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Graph.Hardened;
 using Shouldly;
 using Xunit;
 
@@ -1282,6 +1283,126 @@ namespace Microsoft.Build.UnitTests.BackEnd
             // Now the lookup and original group are updated
             Assert.Equal("v4", lookup.GetProperty("p1").EvaluatedValue);
             Assert.Equal("v4", group["p1"].EvaluatedValue);
+        }
+
+        [Fact]
+        public void HardenedStateIsOptionalAndCloneScopeIsIsolatedUntilMerge()
+        {
+            Lookup lookup = LookupHelpers.CreateEmptyLookup();
+
+            lookup.HardenedState.ShouldBeNull();
+
+            HardenedLookupState state = lookup.EnableHardenedState();
+            state.SetProperty(
+                "p",
+                ValueState.Deferred(new ValueOrigin("initial deferred value")),
+                overwrite: true);
+
+            Lookup clone = lookup.Clone();
+            Lookup.Scope cloneScope = clone.EnterScope("clone");
+            clone.HardenedState.SetProperty(
+                "p",
+                ValueState.Blocked(new ValueOrigin("bucket-local blocked value")),
+                overwrite: true);
+
+            state.GetProperty("p").Availability.ShouldBe(ValueAvailability.Deferred);
+            clone.HardenedState.GetProperty("p").Availability.ShouldBe(ValueAvailability.Blocked);
+
+            cloneScope.LeaveScope();
+
+            state.GetProperty("p").Availability.ShouldBe(ValueAvailability.Blocked);
+            state.GetProperty("p").Origin.ToString().ShouldContain("bucket-local blocked value");
+        }
+
+        [Fact]
+        public void HardenedStateTruncationHidesParentItemState()
+        {
+            Lookup lookup = LookupHelpers.CreateEmptyLookup();
+            HardenedLookupState state = lookup.EnableHardenedState();
+            state.AddTaskOutputItems(
+                "i",
+                ValueState.Deferred(new ValueOrigin("task output")));
+
+            Lookup bucket = lookup.Clone();
+            bucket.EnterScope("bucket");
+            bucket.TruncateLookupsForItemTypes(["i"]);
+
+            bucket.HardenedState.GetItemMembership("i").ShouldBe(ValueState.Static);
+            bucket.HardenedState.GetMetadata("i", "M").ShouldBe(ValueState.Static);
+            state.GetItemMembership("i").Availability.ShouldBe(ValueAvailability.Deferred);
+        }
+
+        [Fact]
+        public void HardenedStatePopulatesAndMergesOnlySelectedItemState()
+        {
+            ProjectInstance project = ProjectHelpers.CreateEmptyProjectInstance();
+            ProjectItemInstance item1 = new(project, "i", "one", project.FullPath);
+            ProjectItemInstance item2 = new(project, "i", "two", project.FullPath);
+            ItemDictionary<ProjectItemInstance> items = new();
+            items.Add(item1);
+            items.Add(item2);
+            Lookup lookup = LookupHelpers.CreateLookup(items);
+            HardenedLookupState state = lookup.EnableHardenedState();
+            state.SetMetadata(
+                item1,
+                "M",
+                ValueState.Deferred(new ValueOrigin("first item metadata")));
+            state.SetMetadata(
+                item2,
+                "M",
+                ValueState.Blocked(new ValueOrigin("second item metadata")));
+
+            Lookup bucket = lookup.Clone();
+            Lookup.Scope bucketScope = bucket.EnterScope("bucket");
+            bucket.TruncateLookupsForItemTypes(["i"]);
+            bucket.PopulateWithItem(item1);
+
+            bucket.HardenedState.GetMetadata(item1, "M").Availability
+                .ShouldBe(ValueAvailability.Deferred);
+            bucket.HardenedState.GetMetadata(item2, "M").ShouldBe(ValueState.Static);
+
+            Lookup.Scope taskScope = bucket.EnterScope("task");
+            Lookup.MetadataModifications modifications = new(keepOnlySpecified: false);
+            modifications.Add("M", "concrete");
+            bucket.ModifyItems("i", [item1], modifications);
+            taskScope.LeaveScope();
+
+            bucket.HardenedState.GetMetadata(item1, "M").ShouldBe(ValueState.Static);
+            state.GetMetadata(item1, "M").Availability.ShouldBe(ValueAvailability.Deferred);
+            state.GetMetadata(item2, "M").Availability.ShouldBe(ValueAvailability.Blocked);
+
+            bucketScope.LeaveScope();
+
+            state.GetMetadata(item1, "M").ShouldBe(ValueState.Static);
+            state.GetMetadata(item2, "M").Availability.ShouldBe(ValueAvailability.Blocked);
+        }
+
+        [Fact]
+        public void HardenedStateConcreteAddDoesNotInheritDeferredListMetadata()
+        {
+            Lookup lookup = LookupHelpers.CreateEmptyLookup();
+            HardenedLookupState state = lookup.EnableHardenedState();
+            state.AddItems(
+                "i",
+                ValueState.Static,
+                inheritedMetadata: null,
+                ValueState.Deferred(new ValueOrigin("deferred list metadata")),
+                new Dictionary<string, ValueState>(),
+                keepMetadata: null,
+                removeMetadata: null,
+                "deferred include");
+
+            ProjectInstance project = ProjectHelpers.CreateEmptyProjectInstance();
+            ProjectItemInstance item = new(project, "i", "concrete", project.FullPath);
+            Lookup.Scope scope = lookup.EnterScope("target");
+            lookup.AddNewItem(item);
+
+            state.GetMetadata("i", "M").Availability.ShouldBe(ValueAvailability.Deferred);
+            state.GetMetadata(item, "M").ShouldBe(ValueState.Static);
+
+            scope.LeaveScope();
+
+            state.GetMetadata(item, "M").ShouldBe(ValueState.Static);
         }
 
         /// <summary>
