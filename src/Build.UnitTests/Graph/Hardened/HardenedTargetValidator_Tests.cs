@@ -853,6 +853,94 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ValidatesOnErrorTargetClosure()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate />
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4287");
+    }
+
+    [Fact]
+    public void CollectsMissingOnErrorTarget()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate />
+                <OnError ExecuteTargets="Missing" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4057");
+    }
+
+    [Fact]
+    public void AllowsTaskStatusToSelectOnErrorPath()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate />
+                <OnError ExecuteTargets="Cleanup"
+                         Condition="'$(MSBuildLastTaskResult)' == 'false'" />
+              </Target>
+              <Target Name="Cleanup" />
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void RejectsTaskStatusInOrdinaryStaticCondition()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate />
+                <PropertyGroup Condition="'$(MSBuildLastTaskResult)' == 'true'">
+                  <Observed>true</Observed>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("MSBuildLastTaskResult");
+    }
+
+    [Fact]
     public void RejectsDeferredOutputPassedToPureTask()
     {
         InvalidProjectFileException exception = ValidateFailure(

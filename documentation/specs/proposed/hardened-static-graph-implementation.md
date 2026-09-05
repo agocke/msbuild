@@ -168,11 +168,11 @@ environment reads, SDK resolution, and evaluation-time globs are not yet
 represented and will add a separate failure inventory.
 
 After the metadata, expression, target-closure, and target input/output
-validation quanta, the same pinned build produces 85 diagnostics:
+validation quanta, the same pinned build produces 84 diagnostics:
 
 | Code | Count |
 | --- | ---: |
-| `MSB4286` | 9 |
+| `MSB4286` | 8 |
 | `MSB4287` | 23 |
 | `MSB4288` | 53 |
 
@@ -182,7 +182,9 @@ dependencies and target bodies no longer contribute ambient-read or deferred
 value cascades. Target `Inputs` and `Outputs` retain batching semantics without
 timestamp skipping, and `Outputs` retains its legacy return role when
 `Returns` is absent. `ContinueOnError` is validated as a static, batchable task
-control expression rather than rejected by its presence.
+control expression rather than rejected by its presence. Statically named
+`OnError` targets are included in the validated failure closure, and
+`MSBuildLastTaskResult` is treated as task status rather than a static value.
 
 ### Burn-down rules
 

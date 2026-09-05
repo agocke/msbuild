@@ -11,6 +11,7 @@ using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
+using ReservedPropertyNames = Microsoft.Build.Internal.ReservedPropertyNames;
 
 #nullable enable
 
@@ -122,7 +123,6 @@ internal sealed class HardenedTargetValidator
             return;
         }
 
-        ValidateUnsupportedTargetConstructs(target);
         bool targetConditionMetadataValidated = RejectTargetMetadata(
             target.Condition,
             target.ConditionLocation,
@@ -215,19 +215,13 @@ internal sealed class HardenedTargetValidator
                 isCondition: false,
                 metadataBatchingValidated: true,
                 includeItemMetadata: true);
+
+            ValidateOnErrorTargets(project, target, visitedTargets);
         }
 
         foreach (TargetSpecification afterTarget in project.GetTargetsWhichRunAfter(target.Name))
         {
             ValidateTarget(project, afterTarget.TargetName, afterTarget.ReferenceLocation, visitedTargets);
-        }
-    }
-
-    private void ValidateUnsupportedTargetConstructs(ProjectTargetInstance target)
-    {
-        if (target.OnErrorChildren.Count > 0)
-        {
-            ReportUnsupported(target.OnErrorChildren[0].Location, "OnError", $"target '{target.Name}'");
         }
     }
 
@@ -489,6 +483,48 @@ internal sealed class HardenedTargetValidator
                     break;
             }
         }
+
+        ValueState taskStatus = ValueState.Deferred(new ValueOrigin($"result of task '{task.Name}'"));
+        Context.SetProperty(ReservedPropertyNames.lastTaskResult, taskStatus, overwrite: true);
+        _propertiesWithoutConcreteValues.Add(ReservedPropertyNames.lastTaskResult);
+    }
+
+    private void ValidateOnErrorTargets(
+        ProjectInstance project,
+        ProjectTargetInstance target,
+        HashSet<string> visitedTargets)
+    {
+        foreach (ProjectOnErrorInstance onError in target.OnErrorChildren)
+        {
+            ValidateExpression(
+                onError.Condition,
+                onError.ConditionLocation,
+                $"the condition of OnError in target '{target.Name}'",
+                requireStatic: true,
+                isCondition: true,
+                allowTaskStatus: true);
+
+            ExpressionValidationResult targetsResult = ValidateExpression(
+                onError.ExecuteTargets,
+                onError.ExecuteTargetsLocation,
+                $"the ExecuteTargets attribute of OnError in target '{target.Name}'",
+                requireStatic: true,
+                isCondition: false);
+
+            if (targetsResult.CanEvaluate &&
+                TryExpandConcreteExpression(
+                    onError.ExecuteTargets,
+                    onError.ExecuteTargetsLocation,
+                    $"the ExecuteTargets attribute of OnError in target '{target.Name}'",
+                    reportUnmodeled: true,
+                    out string expandedTargets))
+            {
+                foreach (string errorTarget in ExpressionShredder.SplitSemiColonSeparatedList(expandedTargets))
+                {
+                    ValidateTarget(project, errorTarget, onError.ExecuteTargetsLocation, visitedTargets);
+                }
+            }
+        }
     }
 
     private string? ValidateOutputDestination(
@@ -695,7 +731,8 @@ internal sealed class HardenedTargetValidator
         bool requireStatic,
         bool isCondition,
         bool metadataBatchingValidated = false,
-        bool includeItemMetadata = false)
+        bool includeItemMetadata = false,
+        bool allowTaskStatus = false)
     {
         if (expression is null || expression.Length == 0)
         {
@@ -709,7 +746,7 @@ internal sealed class HardenedTargetValidator
             : ValueState.Blocked(new ValueOrigin($"unsupported expression in {context}"));
 
         ItemsAndMetadataPair references = ExpressionShredder.GetReferencedItemNamesAndMetadata([expression]);
-        state = ValueState.Combine(state, FindPropertyState(expression));
+        state = ValueState.Combine(state, FindPropertyState(expression, allowTaskStatus));
 
         if (references.Items is not null)
         {
@@ -744,10 +781,14 @@ internal sealed class HardenedTargetValidator
         return new ExpressionValidationResult(state, canEvaluate);
     }
 
-    private ValueState FindPropertyState(string expression)
-        => FindPropertyState(expression, 0, expression.Length);
+    private ValueState FindPropertyState(string expression, bool allowTaskStatus)
+        => FindPropertyState(expression, 0, expression.Length, allowTaskStatus);
 
-    private ValueState FindPropertyState(string expression, int startIndex, int endIndex)
+    private ValueState FindPropertyState(
+        string expression,
+        int startIndex,
+        int endIndex,
+        bool allowTaskStatus)
     {
         ValueState state = ValueState.Static;
         int marker = ExpressionShredder.IndexOfPropertyMarker(
@@ -768,13 +809,17 @@ internal sealed class HardenedTargetValidator
             {
                 int nameEnd = body.IndexOfAny('.', '[');
                 ReadOnlySpan<char> propertyName = (nameEnd < 0 ? body : body[..nameEnd]).Trim();
-                if (!propertyName.IsEmpty)
+                if (!propertyName.IsEmpty &&
+                    (!allowTaskStatus ||
+                     !propertyName.Equals(ReservedPropertyNames.lastTaskResult, StringComparison.OrdinalIgnoreCase)))
                 {
                     state = ValueState.Combine(state, Context.GetProperty(propertyName.ToString()));
                 }
             }
 
-            state = ValueState.Combine(state, FindPropertyState(expression, bodyStart, close));
+            state = ValueState.Combine(
+                state,
+                FindPropertyState(expression, bodyStart, close, allowTaskStatus));
             marker = ExpressionShredder.IndexOfPropertyMarker(
                 expression,
                 close + 1,
