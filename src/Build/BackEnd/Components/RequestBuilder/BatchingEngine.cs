@@ -75,6 +75,21 @@ namespace Microsoft.Build.BackEnd
     /// </remarks>
     internal static class BatchingEngine
     {
+        internal readonly struct BatchingInfo
+        {
+            internal BatchingInfo(
+                Dictionary<string, ICollection<ProjectItemInstance>> itemListsToBeBatched,
+                Dictionary<string, MetadataReference> consumedMetadataReferences)
+            {
+                ItemListsToBeBatched = itemListsToBeBatched;
+                ConsumedMetadataReferences = consumedMetadataReferences;
+            }
+
+            internal Dictionary<string, ICollection<ProjectItemInstance>> ItemListsToBeBatched { get; }
+
+            internal Dictionary<string, MetadataReference> ConsumedMetadataReferences { get; }
+        }
+
         #region Methods
 
         /// <summary>
@@ -109,60 +124,38 @@ namespace Microsoft.Build.BackEnd
             ElementLocation elementLocation,
             LoggingContext loggingContext)
         {
-            Assumed.NotNull(batchableObjectParameters, "Need the parameters of the batchable object to determine if it can be batched.");
+            BatchingInfo batchingInfo = AnalyzeBatching(
+                batchableObjectParameters,
+                lookup,
+                implicitBatchableItemType,
+                elementLocation);
+
+            return PrepareBatchingBuckets(
+                batchingInfo,
+                lookup,
+                elementLocation,
+                loggingContext);
+        }
+
+        internal static List<ItemBucket> PrepareBatchingBuckets(
+            BatchingInfo batchingInfo,
+            Lookup lookup,
+            ElementLocation elementLocation,
+            LoggingContext loggingContext)
+        {
             Assumed.NotNull(lookup, "Need to specify the lookup.");
 
-            ItemsAndMetadataPair pair = ExpressionShredder.GetReferencedItemNamesAndMetadata(batchableObjectParameters);
-
-            // All the @(itemname) item list references in the tag, including transforms, etc.
-            HashSet<string> consumedItemReferences = pair.Items;
-
-            // All the %(itemname.metadataname) references in the tag (not counting those embedded
-            // inside item transforms), and note that the itemname portion is optional.
-            // The keys in the returned hash table are the qualified metadata names (e.g. "EmbeddedResource.Culture"
-            // or just "Culture").  The values are MetadataReference structs, which simply split out the item
-            // name (possibly null) and the actual metadata name.
-            Dictionary<string, MetadataReference> consumedMetadataReferences = pair.Metadata;
-
             List<ItemBucket> buckets = null;
-            if (consumedMetadataReferences?.Count > 0)
+            if (batchingInfo.ConsumedMetadataReferences?.Count > 0)
             {
-                // Add any item types that we were explicitly told to assume.
-                if (implicitBatchableItemType != null)
-                {
-                    consumedItemReferences ??= new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
-                    consumedItemReferences.Add(implicitBatchableItemType);
-                }
-
-                // This method goes through all the item list references and figures out which ones
-                // will be participating in batching, and which ones won't.  We get back a hashtable
-                // where the key is the item name that will be participating in batching.  The values
-                // are all String.Empty (not used).  This method may return additional item names
-                // that weren't represented in "consumedItemReferences"... this would happen if there
-                // were qualified metadata references in the consumedMetadataReferences table, such as
-                // %(EmbeddedResource.Culture).
-                Dictionary<string, ICollection<ProjectItemInstance>> itemListsToBeBatched = GetItemListsToBeBatched(consumedMetadataReferences, consumedItemReferences, lookup, elementLocation);
-
-                // At this point, if there were any metadata references in the tag, but no item
-                // references to batch on, we've got a problem because we can't figure out which
-                // item lists the user wants us to batch.
-                if (itemListsToBeBatched.Count == 0)
-                {
-                    foreach (string unqualifiedMetadataName in consumedMetadataReferences.Keys)
-                    {
-                        // Of course, since this throws an exception, there's no way we're ever going
-                        // to really loop here... it's just that the foreach is the only way I can
-                        // figure out how to get data out of the hashtable without knowing any of the
-                        // keys!
-                        ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "CannotReferenceItemMetadataWithoutItemName", unqualifiedMetadataName);
-                    }
-                }
-                else
-                {
-                    // If the batchable object consumes item metadata as well as items to be batched,
-                    // we need to partition the items consumed by the object.
-                    buckets = BucketConsumedItems(lookup, itemListsToBeBatched, consumedMetadataReferences, elementLocation, loggingContext);
-                }
+                // If the batchable object consumes item metadata as well as items to be batched,
+                // we need to partition the items consumed by the object.
+                buckets = BucketConsumedItems(
+                    lookup,
+                    batchingInfo.ItemListsToBeBatched,
+                    batchingInfo.ConsumedMetadataReferences,
+                    elementLocation,
+                    loggingContext);
             }
 
             // if the batchable object does not consume any item metadata or items, or if the item lists it consumes are all
@@ -180,6 +173,76 @@ namespace Microsoft.Build.BackEnd
             }
 
             return buckets;
+        }
+
+        internal static BatchingInfo AnalyzeBatching(
+            List<string> batchableObjectParameters,
+            Lookup lookup,
+            string implicitBatchableItemType,
+            ElementLocation elementLocation)
+        {
+            Assumed.NotNull(batchableObjectParameters, "Need the parameters of the batchable object to determine if it can be batched.");
+            Assumed.NotNull(lookup, "Need to specify the lookup.");
+
+            ItemsAndMetadataPair pair = ExpressionShredder.GetReferencedItemNamesAndMetadata(batchableObjectParameters);
+
+            // All the @(itemname) item list references in the tag, including transforms, etc.
+            HashSet<string> consumedItemReferences = pair.Items;
+
+            // All the %(itemname.metadataname) references in the tag (not counting those embedded
+            // inside item transforms), and note that the itemname portion is optional.
+            // The keys in the returned hash table are the qualified metadata names (e.g. "EmbeddedResource.Culture"
+            // or just "Culture").  The values are MetadataReference structs, which simply split out the item
+            // name (possibly null) and the actual metadata name.
+            Dictionary<string, MetadataReference> consumedMetadataReferences = pair.Metadata;
+            if (consumedMetadataReferences?.Count > 0 && implicitBatchableItemType != null)
+            {
+                consumedItemReferences ??= new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+                consumedItemReferences.Add(implicitBatchableItemType);
+            }
+
+            return AnalyzeBatching(
+                consumedMetadataReferences,
+                consumedItemReferences,
+                lookup,
+                elementLocation);
+        }
+
+        internal static BatchingInfo AnalyzeBatching(
+            Dictionary<string, MetadataReference> consumedMetadataReferences,
+            IEnumerable<string> consumedItemReferenceNames,
+            Lookup lookup,
+            ElementLocation elementLocation)
+        {
+            if (consumedMetadataReferences?.Count is not > 0)
+            {
+                return default;
+            }
+
+            // This method goes through all the item list references and figures out which ones
+            // will be participating in batching, and which ones won't. This method may return
+            // additional item names that weren't represented in consumedItemReferenceNames when
+            // qualified metadata references identify their item types.
+            Dictionary<string, ICollection<ProjectItemInstance>> itemListsToBeBatched =
+                GetItemListsToBeBatched(
+                    consumedMetadataReferences,
+                    consumedItemReferenceNames,
+                    lookup,
+                    elementLocation);
+
+            // Metadata without an associated item list is ambiguous.
+            if (itemListsToBeBatched.Count == 0)
+            {
+                foreach (string unqualifiedMetadataName in consumedMetadataReferences.Keys)
+                {
+                    ProjectErrorUtilities.ThrowInvalidProject(
+                        elementLocation,
+                        "CannotReferenceItemMetadataWithoutItemName",
+                        unqualifiedMetadataName);
+                }
+            }
+
+            return new BatchingInfo(itemListsToBeBatched, consumedMetadataReferences);
         }
 
         /// <summary>
@@ -200,7 +263,7 @@ namespace Microsoft.Build.BackEnd
         private static Dictionary<string, ICollection<ProjectItemInstance>> GetItemListsToBeBatched(
             Dictionary<string, MetadataReference> consumedMetadataReferences,   // Key is [string] potentially qualified metadata name
                                                                                 // Value is [struct MetadataReference]
-            HashSet<string> consumedItemReferenceNames,
+            IEnumerable<string> consumedItemReferenceNames,
             Lookup lookup,
             ElementLocation elementLocation)
         {
