@@ -167,19 +167,21 @@ This baseline covers target validation only. Evaluation restrictions, imports,
 environment reads, SDK resolution, and evaluation-time globs are not yet
 represented and will add a separate failure inventory.
 
-After the metadata, expression, and target-closure validation quanta, the same
-pinned build produces 146 diagnostics:
+After the metadata, expression, target-closure, and target input/output
+validation quanta, the same pinned build produces 100 diagnostics:
 
 | Code | Count |
 | --- | ---: |
-| `MSB4286` | 70 |
+| `MSB4286` | 24 |
 | `MSB4287` | 23 |
 | `MSB4288` | 53 |
 
 The blanket metadata diagnostics are gone. Static target conditions are now
 evaluated against sequential target-time property assignments, so unreachable
 dependencies and target bodies no longer contribute ambient-read or deferred
-value cascades.
+value cascades. Target `Inputs` and `Outputs` retain batching semantics without
+timestamp skipping, and `Outputs` retains its legacy return role when
+`Returns` is absent.
 
 ### Burn-down rules
 

@@ -174,7 +174,11 @@ internal sealed class HardenedTargetValidator
 
         if (targetExecutes)
         {
-            ValidateBatching([target.Returns], implicitItemType: null, target.ReturnsLocation, $"target '{target.Name}'");
+            ValidateBatching(
+                [target.Inputs, target.Outputs, target.Returns],
+                implicitItemType: null,
+                target.Location,
+                $"target '{target.Name}'");
 
             foreach (ProjectTargetInstanceChild child in target.Children)
             {
@@ -198,10 +202,15 @@ internal sealed class HardenedTargetValidator
                 }
             }
 
+            string returnExpression = string.IsNullOrEmpty(target.Returns) ? target.Outputs : target.Returns;
+            IElementLocation returnLocation = string.IsNullOrEmpty(target.Returns)
+                ? target.OutputsLocation
+                : target.ReturnsLocation;
+            string returnAttribute = string.IsNullOrEmpty(target.Returns) ? "Outputs" : "Returns";
             ValidateExpression(
-                target.Returns,
-                target.ReturnsLocation,
-                $"the Returns attribute of target '{target.Name}'",
+                returnExpression,
+                returnLocation,
+                $"the {returnAttribute} attribute of target '{target.Name}'",
                 requireStatic: false,
                 isCondition: false,
                 metadataBatchingValidated: true,
@@ -216,9 +225,6 @@ internal sealed class HardenedTargetValidator
 
     private void ValidateUnsupportedTargetConstructs(ProjectTargetInstance target)
     {
-        RejectNonEmpty(target.Inputs, target.InputsLocation, "the Inputs attribute", target.Name);
-        RejectNonEmpty(target.Outputs, target.OutputsLocation, "the Outputs attribute", target.Name);
-
         if (target.OnErrorChildren.Count > 0)
         {
             ReportUnsupported(target.OnErrorChildren[0].Location, "OnError", $"target '{target.Name}'");

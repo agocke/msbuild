@@ -54,17 +54,79 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void RejectsUnsupportedTargetInputs()
+    public void AllowsTargetInputsAndOutputs()
     {
-        InvalidProjectFileException exception = ValidateFailure(
+        ValidateSuccess(
             """
             <Project>
               <Target Name="Build" Inputs="input.txt" Outputs="output.txt" />
             </Project>
             """,
             new Dictionary<string, HardenedTaskClassification>());
+    }
 
-        exception.ErrorCode.ShouldBe("MSB4286");
+    [Fact]
+    public void AllowsDeferredTargetInputsWhenTheyDoNotDetermineBatching()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="Generate;Consume" />
+              <Target Name="Generate">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Generated" />
+                </Generate>
+              </Target>
+              <Target Name="Consume" Inputs="@(Generated)" />
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void RejectsDeferredMetadataThatDeterminesTargetBatching()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="Generate;Consume" />
+              <Target Name="Generate">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="Generated" />
+                </Generate>
+              </Target>
+              <Target Name="Consume" Inputs="@(Generated)" Outputs="%(Generated.OutputPath)" />
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("batching of target 'Consume'");
+    }
+
+    [Fact]
+    public void OutputsRetainsLegacyReturnRoleWhenReturnsIsAbsent()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build" Outputs="$(Generated)">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
     }
 
     [Fact]
@@ -677,8 +739,7 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
 
         IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
 
-        diagnostics.Count.ShouldBe(4);
-        diagnostics.Count(diagnostic => diagnostic.ErrorCode == "MSB4286").ShouldBe(2);
+        diagnostics.Count.ShouldBe(2);
         diagnostics.Count(diagnostic => diagnostic.ErrorCode == "MSB4287").ShouldBe(2);
     }
 
