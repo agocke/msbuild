@@ -236,7 +236,7 @@ internal sealed class HardenedTargetValidator
 
         if (targetExecutes)
         {
-            ValidateBatching(
+            BatchingValidationResult targetBatchingResult = ValidateBatching(
                 target,
                 [target.Inputs, target.Outputs, target.Returns],
                 implicitItemType: null,
@@ -246,45 +246,55 @@ internal sealed class HardenedTargetValidator
             LegacyCallTargetScope? callTargetScope = ContainsCallTarget(target)
                 ? new LegacyCallTargetScope(CaptureState())
                 : null;
-            foreach (ProjectTargetInstanceChild child in target.Children)
+            ValidateInBuckets(
+                targetBatchingResult,
+                _ => ValidateTargetBody(
+                    project,
+                    target,
+                    visitedTargets,
+                    callTargetScope));
+
+            string? returnExpression = target.Returns;
+            IElementLocation returnLocation = target.ReturnsLocation;
+            string returnAttribute = "Returns";
+            if (returnExpression is null && !target.ParentProjectSupportsReturnsAttribute)
             {
-                switch (child)
-                {
-                    case ProjectPropertyGroupTaskInstance propertyGroup:
-                        ValidatePropertyGroup(propertyGroup, target.Name, callTargetScope);
-                        break;
-
-                    case ProjectItemGroupTaskInstance itemGroup:
-                        ValidateItemGroup(itemGroup, target.Name, callTargetScope);
-                        break;
-
-                    case ProjectTaskInstance task:
-                        ValidateTask(project, task, target.Name, visitedTargets, callTargetScope);
-                        break;
-
-                    default:
-                        ReportUnsupported(child.Location, child.GetType().Name, $"target '{target.Name}'");
-                        break;
-                }
+                returnExpression = target.Outputs;
+                returnLocation = target.OutputsLocation;
+                returnAttribute = "Outputs";
             }
 
-            string returnExpression = string.IsNullOrEmpty(target.Returns) ? target.Outputs : target.Returns;
-            IElementLocation returnLocation = string.IsNullOrEmpty(target.Returns)
-                ? target.OutputsLocation
-                : target.ReturnsLocation;
-            string returnAttribute = string.IsNullOrEmpty(target.Returns) ? "Outputs" : "Returns";
-            ExpressionValidationResult returnResult = ValidateExpression(
-                target,
-                returnExpression,
-                returnLocation,
-                $"the {returnAttribute} attribute of target '{target.Name}'",
-                requireStatic: false,
-                isCondition: false,
-                metadataBatchingValidated: true,
-                includeItemMetadata: true);
-            targetResult = returnResult.CanEvaluate
-                ? returnResult.State
-                : ToBlocked(returnResult.State, $"return value of target '{target.Name}' is unavailable");
+            if (!string.IsNullOrEmpty(returnExpression))
+            {
+                BatchingValidationResult returnBatchingResult = ValidateBatching(
+                    target,
+                    [target.Inputs, target.Outputs, target.Returns],
+                    implicitItemType: null,
+                    target.Location,
+                    $"return value of target '{target.Name}'");
+                ValidateInBuckets(
+                    returnBatchingResult,
+                    batchingState =>
+                    {
+                        ExpressionValidationResult returnResult = ValidateExpression(
+                            target,
+                            returnExpression,
+                            returnLocation,
+                            $"the {returnAttribute} attribute of target '{target.Name}'",
+                            requireStatic: false,
+                            isCondition: false,
+                            metadataBatchingValidated: true,
+                            includeItemMetadata: true);
+                        ValueState returnState = ValueState.Combine(batchingState, returnResult.State);
+                        targetResult = ValueState.Combine(
+                            targetResult,
+                            returnResult.CanEvaluate
+                                ? returnState
+                                : ToBlocked(
+                                    returnState,
+                                    $"return value of target '{target.Name}' is unavailable"));
+                    });
+            }
 
             ValidateOnErrorTargets(project, target, visitedTargets);
             if (callTargetScope is not null)
@@ -306,6 +316,35 @@ internal sealed class HardenedTargetValidator
 
         _activeTargets.Remove(targetName);
         return targetResult;
+    }
+
+    private void ValidateTargetBody(
+        ProjectInstance project,
+        ProjectTargetInstance target,
+        HashSet<string> visitedTargets,
+        LegacyCallTargetScope? callTargetScope)
+    {
+        foreach (ProjectTargetInstanceChild child in target.Children)
+        {
+            switch (child)
+            {
+                case ProjectPropertyGroupTaskInstance propertyGroup:
+                    ValidatePropertyGroup(propertyGroup, target.Name, callTargetScope);
+                    break;
+
+                case ProjectItemGroupTaskInstance itemGroup:
+                    ValidateItemGroup(itemGroup, target.Name, callTargetScope);
+                    break;
+
+                case ProjectTaskInstance task:
+                    ValidateTask(project, task, target.Name, visitedTargets, callTargetScope);
+                    break;
+
+                default:
+                    ReportUnsupported(child.Location, child.GetType().Name, $"target '{target.Name}'");
+                    break;
+            }
+        }
     }
 
     private void ValidatePropertyGroup(

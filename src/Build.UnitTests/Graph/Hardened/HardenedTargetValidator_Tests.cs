@@ -113,6 +113,106 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void TargetBucketBodyOrderMatchesOrdinaryBuild()
+    {
+        const string projectXml = """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>z</Kind>
+                </Input>
+                <Input Include="b">
+                  <Kind>a</Kind>
+                </Input>
+                <Input Include="c">
+                  <Kind>z</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build" Returns="%(Input.Kind)">
+                <ItemGroup>
+                  <Observed Include="@(Input->'%(Kind):%(Identity)')"
+                            KeepDuplicates="true" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """;
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+
+        (ProjectInstance ordinaryProject, Lookup validationLookup) = BuildOrdinaryAndValidateHardened(
+            environment,
+            projectXml,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        DescribeItemSpecs(validationLookup.GetItems("Observed"))
+            .ShouldBe(DescribeItemSpecs(ordinaryProject.GetItems("Observed")));
+        DescribeItemSpecs(validationLookup.GetItems("Observed")).ShouldBe(
+        [
+            "z:a",
+            "z:c",
+            "a:b",
+        ]);
+    }
+
+    [Fact]
+    public void TargetBucketsKeepSiblingMutationsIsolated()
+    {
+        const string projectXml = """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>first</Kind>
+                </Input>
+                <Input Include="b">
+                  <Kind>second</Kind>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build" Returns="%(Input.Kind)">
+                <PropertyGroup>
+                  <Last Condition="'$(Last)' == ''">%(Input.Identity)</Last>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """;
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+
+        (ProjectInstance ordinaryProject, Lookup validationLookup) = BuildOrdinaryAndValidateHardened(
+            environment,
+            projectXml,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        validationLookup.GetProperty("Last")!.EvaluatedValue
+            .ShouldBe(ordinaryProject.GetPropertyValue("Last"));
+        ordinaryProject.GetPropertyValue("Last").ShouldBe("b");
+    }
+
+    [Fact]
+    public void FalseTargetConditionMatchesOrdinaryBuild()
+    {
+        const string projectXml = """
+            <Project>
+              <ItemGroup>
+                <Input Include="a;b" />
+              </ItemGroup>
+              <Target Name="Build" Condition="false">
+                <ItemGroup>
+                  <Input Remove="b" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """;
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+
+        (ProjectInstance ordinaryProject, Lookup validationLookup) = BuildOrdinaryAndValidateHardened(
+            environment,
+            projectXml,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        DescribeItemSpecs(validationLookup.GetItems("Input"))
+            .ShouldBe(DescribeItemSpecs(ordinaryProject.GetItems("Input")));
+        DescribeItemSpecs(validationLookup.GetItems("Input")).ShouldBe(["a", "b"]);
+    }
+
+    [Fact]
     public void OutputsRetainsLegacyReturnRoleWhenReturnsIsAbsent()
     {
         ValidateSuccess(
@@ -639,9 +739,9 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void ValidatesReturnsBatchingBeforeTargetBody()
+    public void RejectsDeferredReturnsBatchingAfterTargetBody()
     {
-        ValidateSuccess(
+        InvalidProjectFileException exception = ValidateFailure(
             """
             <Project>
               <ItemGroup>
@@ -665,6 +765,9 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             {
                 ["Generate"] = HardenedTaskClassification.DeclaredIO,
             });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("return value of target 'Build'");
     }
 
     [Fact]
