@@ -191,9 +191,23 @@ through an ambient upward search. A project may therefore glob files owned by
 another project or files unrelated to any project, provided they are within
 the same workspace.
 
+Globs whose fixed directory remains inside the owning project directory are
+valid without a workspace declaration. A glob that traverses above or
+otherwise outside the project directory requires an evaluated
+`<WorkspaceRoot>true</WorkspaceRoot>` marker. The marker value is not a path:
+the directory containing the winning property definition is the workspace
+root, so a repository can normally declare it once in `Directory.Build.props`.
+
 The declared path and resolved path of a symlink or junction are subject to the
 workspace-boundary policy. This check applies to declared graph inputs; it is not a
 general filesystem-access monitor.
+
+Target-body `ItemGroup` Include and Exclude operations are partially evaluated
+during graph construction with ordinary MSBuild batching and glob semantics.
+Their ordered matches, `RecursiveDir`, metadata, and source-item provenance are
+stored per operation and bucket. Deferred execution consumes that authoritative
+result through the existing intrinsic task; it MUST NOT enumerate the glob
+again, and a missing result is a validation failure.
 
 ### G6. Target graph edges
 

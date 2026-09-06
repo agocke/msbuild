@@ -101,9 +101,16 @@ namespace Microsoft.Build.BackEnd
             List<string> batchableObjectParameters,
             Lookup lookup,
             ElementLocation elementLocation,
-            LoggingContext loggingContext)
+            LoggingContext loggingContext,
+            object hardenedBucketOwner = null)
         {
-            return PrepareBatchingBuckets(batchableObjectParameters, lookup, null, elementLocation, loggingContext);
+            return PrepareBatchingBuckets(
+                batchableObjectParameters,
+                lookup,
+                null,
+                elementLocation,
+                loggingContext,
+                hardenedBucketOwner);
         }
 
         /// <summary>
@@ -116,13 +123,15 @@ namespace Microsoft.Build.BackEnd
         /// <param name="implicitBatchableItemType">Any item type that can be considered an implicit input to this batchable object.
         /// This is useful for items inside targets, where the item name is plainly an item type that's an "input" to the object.</param>
         /// <param name="loggingContext"></param>
+        /// <param name="hardenedBucketOwner">The evaluated node that owns these buckets in hardened mode.</param>
         /// <returns>List containing ItemBucket objects, each one representing an execution batch.</returns>
         internal static List<ItemBucket> PrepareBatchingBuckets(
             List<string> batchableObjectParameters,
             Lookup lookup,
             string implicitBatchableItemType,
             ElementLocation elementLocation,
-            LoggingContext loggingContext)
+            LoggingContext loggingContext,
+            object hardenedBucketOwner = null)
         {
             BatchingInfo batchingInfo = AnalyzeBatching(
                 batchableObjectParameters,
@@ -134,14 +143,16 @@ namespace Microsoft.Build.BackEnd
                 batchingInfo,
                 lookup,
                 elementLocation,
-                loggingContext);
+                loggingContext,
+                hardenedBucketOwner);
         }
 
         internal static List<ItemBucket> PrepareBatchingBuckets(
             BatchingInfo batchingInfo,
             Lookup lookup,
             IElementLocation elementLocation,
-            LoggingContext loggingContext)
+            LoggingContext loggingContext,
+            object hardenedBucketOwner = null)
         {
             Assumed.NotNull(lookup, "Need to specify the lookup.");
 
@@ -155,7 +166,8 @@ namespace Microsoft.Build.BackEnd
                     batchingInfo.ItemListsToBeBatched,
                     batchingInfo.ConsumedMetadataReferences,
                     elementLocation,
-                    loggingContext);
+                    loggingContext,
+                    hardenedBucketOwner);
             }
 
             // if the batchable object does not consume any item metadata or items, or if the item lists it consumes are all
@@ -164,7 +176,12 @@ namespace Microsoft.Build.BackEnd
             {
                 // create a default bucket that references the project items and properties -- this way we always have a bucket
                 buckets = new List<ItemBucket>(1);
-                var bucket = new ItemBucket(null, null, lookup, buckets.Count);
+                var bucket = new ItemBucket(
+                    null,
+                    null,
+                    lookup,
+                    buckets.Count,
+                    hardenedBucketOwner);
                 if (loggingContext != null)
                 {
                     bucket.Initialize(loggingContext);
@@ -440,7 +457,8 @@ namespace Microsoft.Build.BackEnd
             Dictionary<string, ICollection<ProjectItemInstance>> itemListsToBeBatched,
             Dictionary<string, MetadataReference> consumedMetadataReferences,
             IElementLocation elementLocation,
-            LoggingContext loggingContext)
+            LoggingContext loggingContext,
+            object hardenedBucketOwner)
         {
             Assumed.Positive(itemListsToBeBatched.Count, "Need item types consumed by the batchable object.");
             Assumed.Positive(consumedMetadataReferences.Count, "Need item metadata consumed by the batchable object.");
@@ -482,7 +500,12 @@ namespace Microsoft.Build.BackEnd
                         }
                         else
                         {
-                            matchingBucket = new ItemBucket(itemNames, itemMetadataValues, lookup, buckets.Count);
+                            matchingBucket = new ItemBucket(
+                                itemNames,
+                                itemMetadataValues,
+                                lookup,
+                                buckets.Count,
+                                hardenedBucketOwner);
                             if (loggingContext != null)
                             {
                                 matchingBucket.Initialize(loggingContext);

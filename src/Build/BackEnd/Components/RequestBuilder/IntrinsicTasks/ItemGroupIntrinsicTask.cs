@@ -12,6 +12,7 @@ using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Graph.Hardened;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
 using ElementLocation = Microsoft.Build.Construction.ElementLocation;
@@ -61,7 +62,13 @@ namespace Microsoft.Build.BackEnd
                 {
                     parameterValues ??= new List<string>();
                     GetBatchableValuesFromBuildItemGroupChild(parameterValues, child);
-                    buckets = BatchingEngine.PrepareBatchingBuckets(parameterValues, lookup, child.ItemType, _taskInstance.Location, LoggingContext);
+                    buckets = BatchingEngine.PrepareBatchingBuckets(
+                        parameterValues,
+                        lookup,
+                        child.ItemType,
+                        _taskInstance.Location,
+                        LoggingContext,
+                        hardenedBucketOwner: child);
 
                     // "Execute" each bucket
                     foreach (ItemBucket bucket in buckets)
@@ -168,13 +175,31 @@ namespace Microsoft.Build.BackEnd
             bucket.Expander.Metadata = metadataTable;
 
             // Second, expand the item include and exclude, and filter existing metadata as appropriate.
-            List<ProjectItemInstance> itemsToAdd = ExpandItemIntoItems(
-                Project,
-                child,
-                bucket.Expander,
-                keepMetadata,
-                removeMetadata,
-                loggingContext);
+            List<ProjectItemInstance> itemsToAdd;
+            if (bucket.Lookup.HardenedItemOperationPlan is not null)
+            {
+                if (!bucket.Lookup.HardenedItemOperationPlan.TryMaterialize(
+                        bucket.Lookup.HardenedBucketPath,
+                        child,
+                        Project,
+                        out itemsToAdd))
+                {
+                    ProjectErrorUtilities.ThrowInvalidProject(
+                        child.IncludeLocation,
+                        "HardenedGraphMissingItemOperationResult",
+                        child.ItemType);
+                }
+            }
+            else
+            {
+                itemsToAdd = ExpandItemIntoItems(
+                    Project,
+                    child,
+                    bucket.Expander,
+                    keepMetadata,
+                    removeMetadata,
+                    loggingContext);
+            }
 
             // Third, expand the metadata.
             foreach (ProjectItemGroupTaskMetadataInstance metadataInstance in child.Metadata)
@@ -409,7 +434,9 @@ namespace Microsoft.Build.BackEnd
             ISet<string> keepMetadata,
             ISet<string> removeMetadata,
             LoggingContext loggingContext = null,
-            IDictionary<ProjectItemInstance, ProjectItemInstance> itemSources = null)
+            IDictionary<ProjectItemInstance, ProjectItemInstance> itemSources = null,
+            HardenedGlobPolicy hardenedGlobPolicy = null,
+            HardenedItemOperationPlan.ExpansionCapture hardenedExpansionCapture = null)
         {
             // todo this is duplicated logic with the item computation logic from evaluation (in LazyIncludeOperation.SelectItems)
             ProjectErrorUtilities.VerifyThrowInvalidProject(!(keepMetadata != null && removeMetadata != null), originalItem.KeepMetadataLocation, "KeepAndRemoveMetadataMutuallyExclusive");
@@ -447,6 +474,10 @@ namespace Microsoft.Build.BackEnd
 
                     foreach (string excludeSplit in excludeSplits)
                     {
+                        hardenedGlobPolicy?.ValidatePattern(
+                            project.Directory,
+                            excludeSplit,
+                            originalItem.ExcludeLocation);
                         excludes.Add(excludeSplit);
                     }
                 }
@@ -464,6 +495,16 @@ namespace Microsoft.Build.BackEnd
             // EngineFileUtilities.GetFileListEscaped api invocation evaluates excludes by default.
             // If the code process any expression like "@(x)", we need to handle excludes explicitly using EvaluateExcludePaths().
             bool anyTransformExprProceeded = false;
+            HashSet<string> hardenedExcludesUnescapedForComparison =
+                hardenedExpansionCapture is not null && excludes.Count > 0
+                    ? EvaluateExcludePaths(
+                        project.Directory,
+                        excludes,
+                        originalItem.ExcludeLocation,
+                        loggingContext,
+                        hardenedGlobPolicy,
+                        hardenedExpansionCapture)
+                    : null;
 
             foreach (string includeSplit in includeSplits)
             {
@@ -479,25 +520,36 @@ namespace Microsoft.Build.BackEnd
                 if (itemsFromSplit != null)
                 {
                     // Expression is in form "@(X)", so add these items directly.
+                    hardenedExpansionCapture?.RecordInclude(includeSplit, itemsFromSplit);
                     items.AddRange(itemsFromSplit);
                     anyTransformExprProceeded = true;
                 }
                 else
                 {
                     // The expression is not of the form "@(X)". Treat as string
+                    hardenedGlobPolicy?.ValidatePattern(
+                        project.Directory,
+                        includeSplit,
+                        originalItem.IncludeLocation);
 
                     // Pass the non wildcard expanded excludes here to fix https://github.com/dotnet/msbuild/issues/2621
                     string[] includeSplitFiles = EngineFileUtilities.GetFileListEscaped(
                         project.Directory,
                         includeSplit,
-                        excludes,
+                        hardenedExpansionCapture is null ? excludes : null,
                         loggingMechanism: loggingContext,
                         includeLocation: originalItem.IncludeLocation,
                         excludeLocation: originalItem.ExcludeLocation,
                         disableExcludeDriveEnumerationWarning: true);
+                    hardenedExpansionCapture?.RecordInclude(includeSplit, includeSplitFiles);
 
                     foreach (string includeSplitFile in includeSplitFiles)
                     {
+                        hardenedGlobPolicy?.ValidateMatch(
+                            project.Directory,
+                            includeSplit,
+                            includeSplitFile,
+                            originalItem.IncludeLocation);
                         items.Add(new ProjectItemInstance(
                             project,
                             originalItem.ItemType,
@@ -512,13 +564,17 @@ namespace Microsoft.Build.BackEnd
             }
 
             // There is a need to Evaluate Exclude part explicitly because of of the expressions had the form "@(X)".
-            if (anyTransformExprProceeded)
+            if (anyTransformExprProceeded || hardenedExcludesUnescapedForComparison is not null)
             {
-                var excludesUnescapedForComparison = EvaluateExcludePaths(
-                    project.Directory,
-                    excludes,
-                    originalItem.ExcludeLocation,
-                    loggingContext);
+                HashSet<string> excludesUnescapedForComparison =
+                    hardenedExcludesUnescapedForComparison ??
+                    EvaluateExcludePaths(
+                        project.Directory,
+                        excludes,
+                        originalItem.ExcludeLocation,
+                        loggingContext,
+                        hardenedGlobPolicy,
+                        hardenedExpansionCapture: null);
 
                 // Subtract any Exclude
                 items.RemoveAll(i => excludesUnescapedForComparison.Contains(((IItem)i).EvaluatedInclude.NormalizeForPathComparison()));
@@ -593,18 +649,30 @@ namespace Microsoft.Build.BackEnd
             string projectDirectory,
             IReadOnlyList<string> excludes,
             ElementLocation excludeLocation,
-            LoggingContext loggingContext)
+            LoggingContext loggingContext,
+            HardenedGlobPolicy hardenedGlobPolicy,
+            HardenedItemOperationPlan.ExpansionCapture hardenedExpansionCapture)
         {
             HashSet<string> excludesUnescapedForComparison = new HashSet<string>(excludes.Count, StringComparer.OrdinalIgnoreCase);
             foreach (string excludeSplit in excludes)
             {
+                hardenedGlobPolicy?.ValidatePattern(
+                    projectDirectory,
+                    excludeSplit,
+                    excludeLocation);
                 string[] excludeSplitFiles = EngineFileUtilities.GetFileListUnescaped(
                     projectDirectory,
                     excludeSplit,
                     loggingMechanism: loggingContext,
                     excludeLocation: excludeLocation);
+                hardenedExpansionCapture?.RecordExcludeUnescaped(excludeSplit, excludeSplitFiles);
                 foreach (string excludeSplitFile in excludeSplitFiles)
                 {
+                    hardenedGlobPolicy?.ValidateMatch(
+                        projectDirectory,
+                        excludeSplit,
+                        EscapingUtilities.Escape(excludeSplitFile),
+                        excludeLocation);
                     excludesUnescapedForComparison.Add(excludeSplitFile.NormalizeForPathComparison());
                 }
             }

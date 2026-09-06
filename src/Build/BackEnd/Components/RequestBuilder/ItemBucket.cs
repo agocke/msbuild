@@ -73,16 +73,19 @@ namespace Microsoft.Build.BackEnd
         /// <param name="metadata">Hashtable of item metadata values: null indicates no batching is occurring</param>
         /// <param name="lookup">The <see cref="Lookup"/> to use for the items in the bucket.</param>
         /// <param name="bucketSequenceNumber">A sequence number indication what order the buckets were created in.</param>
+        /// <param name="hardenedBucketOwner">The evaluated node that owns this bucket in hardened mode.</param>
         internal ItemBucket(
             FrozenSet<string> itemNames,
             Dictionary<string, string> metadata,
             Lookup lookup,
-            int bucketSequenceNumber)
+            int bucketSequenceNumber,
+            object hardenedBucketOwner = null)
         {
             Assumed.NotNull(lookup, "Need lookup.");
 
             // Create our own lookup just for this bucket
             _lookup = lookup.Clone();
+            _lookup.EnterHardenedBucket(hardenedBucketOwner, bucketSequenceNumber);
 
             // Push down the items, so that item changes in this batch are not visible to parallel batches
             _lookupEntry = _lookup.EnterScope("ItemBucket()");

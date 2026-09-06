@@ -335,7 +335,12 @@ namespace Microsoft.Build.BackEnd
                 }
 
                 List<string> taskParameterValues = CreateListOfParameterValues();
-                buckets = BatchingEngine.PrepareBatchingBuckets(taskParameterValues, lookup, _targetChildInstance.Location, _targetLoggingContext);
+                buckets = BatchingEngine.PrepareBatchingBuckets(
+                    taskParameterValues,
+                    lookup,
+                    _targetChildInstance.Location,
+                    _targetLoggingContext,
+                    hardenedBucketOwner: _taskNode is null ? null : _targetChildInstance);
 
                 Dictionary<string, string> lookupHash = null;
 

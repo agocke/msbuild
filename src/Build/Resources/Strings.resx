@@ -1365,6 +1365,26 @@
     <value>MSB4288: Hardened static graph validation requires {0} to be static, but the expression "{1}" depends on the deferred value {2}. Move the discovery operation to fetch, or pass the deferred value directly to a non-Pure task.</value>
     <comment>{StrBegin="MSB4288: "}{0} describes the static MSBuild context. {1} is the expression. {2} is the dependency chain from the task output. The terms "static", "deferred", "fetch", and "Pure" are hardened static graph feature names.</comment>
   </data>
+  <data name="HardenedGraphMissingItemOperationResult" xml:space="preserve">
+    <value>MSB4289: Hardened static graph execution has no pre-resolved result for item "{0}" in this batching context. Re-run graph construction and fix any validation errors; execution-time filesystem enumeration is not permitted.</value>
+    <comment>{StrBegin="MSB4289: "}{0} is the MSBuild item type. The terms "graph construction" and "batching" describe hardened static graph processing.</comment>
+  </data>
+  <data name="HardenedGraphPathOutsideWorkspace" xml:space="preserve">
+    <value>MSB4290: Hardened static graph validation cannot resolve the glob "{0}" because path "{1}" is outside workspace "{2}". Move the path into the workspace or define WorkspaceRoot in a containing project file.</value>
+    <comment>{StrBegin="MSB4290: "}{0} is the glob expression. {1} is the declared or symlink-resolved path. {2} is the workspace root. WorkspaceRoot is an MSBuild property name and should not be localized.</comment>
+  </data>
+  <data name="HardenedGraphWorkspaceRootRequired" xml:space="preserve">
+    <value>MSB4291: Hardened static graph validation cannot resolve glob "{0}" outside the project directory because WorkspaceRoot is not set to true in an evaluated project file. Add &lt;WorkspaceRoot&gt;true&lt;/WorkspaceRoot&gt; to Directory.Build.props or another containing project file.</value>
+    <comment>{StrBegin="MSB4291: "}{0} is the glob expression. WorkspaceRoot and Directory.Build.props are MSBuild names and should not be localized.</comment>
+  </data>
+  <data name="HardenedGraphConflictingItemOperationResult" xml:space="preserve">
+    <value>MSB4292: Hardened static graph validation resolved item "{0}" differently for the same batching context. Rewrite the item operation so graph construction has one authoritative result.</value>
+    <comment>{StrBegin="MSB4292: "}{0} is the MSBuild item type. The terms "graph construction" and "batching" describe hardened static graph processing.</comment>
+  </data>
+  <data name="HardenedGraphUnresolvableLinkPath" xml:space="preserve">
+    <value>MSB4293: Hardened static graph validation cannot verify the resolved path for glob "{0}" at "{1}" against workspace "{2}". Ensure the path is accessible during graph construction.</value>
+    <comment>{StrBegin="MSB4293: "}{0} is the glob expression. {1} is the declared path. {2} is the workspace root.</comment>
+  </data>
   <data name="CouldNotLoadSdkResolver" xml:space="preserve">
     <value>MSB4237: The SDK resolver type "{0}" failed to load. {1}</value>
     <comment>{StrBegin="MSB4237: "}</comment>

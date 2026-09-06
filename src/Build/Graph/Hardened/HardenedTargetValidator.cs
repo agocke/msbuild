@@ -87,6 +87,7 @@ internal sealed class HardenedTargetValidator
     private IMetadataTable? _activeMetadata;
     private ProjectInstance? _project;
     private string? _projectDirectory;
+    private HardenedItemOperationPlan? _itemOperationPlan;
 
     internal HardenedTargetValidator(IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
     {
@@ -112,16 +113,29 @@ internal sealed class HardenedTargetValidator
         => Validate(
             project,
             new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith),
-            targetNames);
+            targetNames,
+            new HardenedItemOperationPlan(project.Directory));
 
     internal IReadOnlyList<InvalidProjectFileException> Validate(
         ProjectInstance project,
         Lookup lookup,
         IEnumerable<string> targetNames)
+        => Validate(
+            project,
+            lookup,
+            targetNames,
+            new HardenedItemOperationPlan(project.Directory));
+
+    internal IReadOnlyList<InvalidProjectFileException> Validate(
+        ProjectInstance project,
+        Lookup lookup,
+        IEnumerable<string> targetNames,
+        HardenedItemOperationPlan itemOperationPlan)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(lookup);
         ArgumentNullException.ThrowIfNull(targetNames);
+        ArgumentNullException.ThrowIfNull(itemOperationPlan);
 
         _diagnostics.Clear();
         _diagnosticKeys.Clear();
@@ -130,10 +144,12 @@ internal sealed class HardenedTargetValidator
         _expressionDescriptors.Clear();
         _validationLookup = lookup.Clone();
         _validationLookup.EnableHardenedState();
+        _validationLookup.ConfigureHardenedItemOperationPlan(itemOperationPlan);
         _validationLookup.EnterScope("HardenedTargetValidator");
         _activeMetadata = null;
         _project = project;
         _projectDirectory = project.Directory;
+        _itemOperationPlan = itemOperationPlan;
         _concreteExpander = CreateConcreteExpander(_validationLookup);
 
         HashSet<string> visitedTargets = new(MSBuildNameIgnoreCaseComparer.Default);
@@ -1193,7 +1209,7 @@ internal sealed class HardenedTargetValidator
             return false;
         }
 
-        int propertyStart = expression.IndexOf("$(", StringComparison.Ordinal);
+        int propertyStart = expression!.IndexOf("$(", StringComparison.Ordinal);
         while (propertyStart >= 0)
         {
             int propertyEnd = expression.IndexOf(')', propertyStart + 2);
@@ -2014,6 +2030,8 @@ internal sealed class HardenedTargetValidator
         if (isInclude)
         {
             var itemSources = new Dictionary<ProjectItemInstance, ProjectItemInstance>();
+            HardenedItemOperationPlan.ExpansionCapture expansionCapture =
+                ItemOperationPlan.CreateExpansionCapture();
             List<ProjectItemInstance> itemsToAdd;
             try
             {
@@ -2024,7 +2042,9 @@ internal sealed class HardenedTargetValidator
                     keepMetadata,
                     removeMetadata,
                     loggingContext: null,
-                    itemSources: itemSources);
+                    itemSources: itemSources,
+                    hardenedGlobPolicy: ItemOperationPlan.GlobPolicy,
+                    hardenedExpansionCapture: expansionCapture);
             }
             catch (InvalidProjectFileException exception)
             {
@@ -2032,6 +2052,25 @@ internal sealed class HardenedTargetValidator
                 Context.BlockItemMembership(
                     item.ItemType,
                     ValueState.Blocked(new ValueOrigin($"invalid Include into item '{item.ItemType}'")),
+                    $"item '{item.ItemType}' membership");
+                return;
+            }
+
+            try
+            {
+                ItemOperationPlan.Record(
+                    ValidationLookup.HardenedBucketPath,
+                    item,
+                    itemsToAdd,
+                    itemSources,
+                    expansionCapture);
+            }
+            catch (InvalidProjectFileException exception)
+            {
+                AddDiagnostic(exception);
+                Context.BlockItemMembership(
+                    item.ItemType,
+                    ValueState.Blocked(new ValueOrigin($"conflicting Include into item '{item.ItemType}'")),
                     $"item '{item.ItemType}' membership");
                 return;
             }
@@ -2418,7 +2457,18 @@ internal sealed class HardenedTargetValidator
     {
         if (batchingResult.Buckets is null)
         {
-            validate(batchingResult.State);
+            HardenedItemOperationPlan.HardenedBucketPath previousPath =
+                ValidationLookup.HardenedBucketPath;
+            ValidationLookup.EnterHardenedBucket(batchingResult.Owner, sequenceNumber: 0);
+            try
+            {
+                validate(batchingResult.State);
+            }
+            finally
+            {
+                ValidationLookup.RestoreHardenedBucketPath(previousPath);
+            }
+
             return;
         }
 
@@ -2467,8 +2517,18 @@ internal sealed class HardenedTargetValidator
     {
         if (batchingResult.Buckets is null)
         {
-            T result = validate(batchingResult.State);
-            return [new ValidatedBucket<T>(CaptureBranchState(), result, HasScope: false)];
+            HardenedItemOperationPlan.HardenedBucketPath previousPath =
+                ValidationLookup.HardenedBucketPath;
+            ValidationLookup.EnterHardenedBucket(batchingResult.Owner, sequenceNumber: 0);
+            try
+            {
+                T result = validate(batchingResult.State);
+                return [new ValidatedBucket<T>(CaptureBranchState(), result, HasScope: false)];
+            }
+            finally
+            {
+                ValidationLookup.RestoreHardenedBucketPath(previousPath);
+            }
         }
 
         List<ValidatedBucket<T>> results = new(batchingResult.Buckets.Count);
@@ -2561,12 +2621,12 @@ internal sealed class HardenedTargetValidator
 
         if (!hasExpression)
         {
-            return new BatchingValidationResult(ValueState.Static, Buckets: null);
+            return new BatchingValidationResult(ValueState.Static, Buckets: null, owner);
         }
 
         if (metadataReferences.Count == 0)
         {
-            return new BatchingValidationResult(ValueState.Static, Buckets: null);
+            return new BatchingValidationResult(ValueState.Static, Buckets: null, owner);
         }
 
         if (implicitItemType is not null)
@@ -2598,7 +2658,8 @@ internal sealed class HardenedTargetValidator
 
             return new BatchingValidationResult(
                 ValueState.Blocked(new ValueOrigin($"unresolved batching metadata in {context}")),
-                Buckets: null);
+                Buckets: null,
+                owner);
         }
 
         ValueState state = ValueState.Static;
@@ -2657,7 +2718,7 @@ internal sealed class HardenedTargetValidator
 
         if (!keysAreStatic || !reportDiagnostics)
         {
-            return new BatchingValidationResult(state, Buckets: null);
+            return new BatchingValidationResult(state, Buckets: null, owner);
         }
 
         try
@@ -2671,15 +2732,17 @@ internal sealed class HardenedTargetValidator
                 batchingInfo,
                 ValidationLookup,
                 effectiveLocation,
-                loggingContext: null);
-            return new BatchingValidationResult(state, buckets);
+                loggingContext: null,
+                hardenedBucketOwner: owner);
+            return new BatchingValidationResult(state, buckets, owner);
         }
         catch (InvalidProjectFileException exception)
         {
             AddDiagnostic(exception);
             return new BatchingValidationResult(
                 ValueState.Blocked(new ValueOrigin($"invalid batching in {context}")),
-                Buckets: null);
+                Buckets: null,
+                owner);
         }
     }
 
@@ -3314,6 +3377,9 @@ internal sealed class HardenedTargetValidator
     private HardenedLookupState Context
         => ValidationLookup.HardenedState;
 
+    private HardenedItemOperationPlan ItemOperationPlan
+        => _itemOperationPlan ?? throw new InvalidOperationException("The hardened item operation plan has not been initialized.");
+
     private Lookup ValidationLookup
         => _validationLookup ?? throw new InvalidOperationException("Validation lookup has not been initialized.");
 
@@ -3391,7 +3457,8 @@ internal sealed class HardenedTargetValidator
 
     private readonly record struct BatchingValidationResult(
         ValueState State,
-        List<ItemBucket>? Buckets);
+        List<ItemBucket>? Buckets,
+        object Owner);
 
     private readonly record struct ExpressionValidationResult(ValueState State, bool CanEvaluate);
 }

@@ -98,6 +98,10 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private HardenedLookupState _hardenedState;
 
+        private HardenedItemOperationPlan _hardenedItemOperationPlan;
+
+        private HardenedItemOperationPlan.HardenedBucketPath _hardenedBucketPath;
+
         #endregion
 
         #region Constructors
@@ -129,6 +133,8 @@ namespace Microsoft.Build.BackEnd
             _hardenedState = that._hardenedState is null
                 ? null
                 : HardenedLookupState.Create(this);
+            _hardenedItemOperationPlan = that._hardenedItemOperationPlan;
+            _hardenedBucketPath = that._hardenedBucketPath;
         }
 
         private Lookup(
@@ -148,6 +154,8 @@ namespace Microsoft.Build.BackEnd
                 ? that._cloneTable
                 : new Dictionary<ProjectItemInstance, ProjectItemInstance>(that._cloneTable);
             _hardenedState = HardenedLookupState.Create(this);
+            _hardenedItemOperationPlan = that._hardenedItemOperationPlan;
+            _hardenedBucketPath = that._hardenedBucketPath;
         }
 
         #endregion
@@ -271,6 +279,31 @@ namespace Microsoft.Build.BackEnd
         }
 
         internal HardenedLookupState HardenedState => _hardenedState;
+
+        internal HardenedItemOperationPlan HardenedItemOperationPlan => _hardenedItemOperationPlan;
+
+        internal HardenedItemOperationPlan.HardenedBucketPath HardenedBucketPath
+            => _hardenedBucketPath ?? HardenedItemOperationPlan.HardenedBucketPath.Root;
+
+        internal void ConfigureHardenedItemOperationPlan(HardenedItemOperationPlan plan)
+        {
+            _hardenedItemOperationPlan = plan;
+            _hardenedBucketPath = HardenedItemOperationPlan.HardenedBucketPath.Root;
+        }
+
+        internal void EnterHardenedBucket(object owner, int sequenceNumber)
+        {
+            if (_hardenedItemOperationPlan is not null && owner is not null)
+            {
+                _hardenedBucketPath = HardenedBucketPath.Append(owner, sequenceNumber);
+            }
+        }
+
+        internal void RestoreHardenedBucketPath(
+            HardenedItemOperationPlan.HardenedBucketPath bucketPath)
+        {
+            _hardenedBucketPath = bucketPath;
+        }
 
         internal HardenedLookupState EnableHardenedState()
         {

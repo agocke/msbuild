@@ -577,20 +577,45 @@
         <target state="translated">MSB3094: "{2}"은(는) 항목을 {0}개 참조하고 "{3}"은(는) 항목을 {1}개 참조합니다. 참조하는 항목 수는 같아야 합니다.</target>
         <note>{StrBegin="MSB3094: "}</note>
       </trans-unit>
+      <trans-unit id="HardenedGraphConflictingItemOperationResult">
+        <source>MSB4292: Hardened static graph validation resolved item "{0}" differently for the same batching context. Rewrite the item operation so graph construction has one authoritative result.</source>
+        <target state="new">MSB4292: Hardened static graph validation resolved item "{0}" differently for the same batching context. Rewrite the item operation so graph construction has one authoritative result.</target>
+        <note>{StrBegin="MSB4292: "}{0} is the MSBuild item type. The terms "graph construction" and "batching" describe hardened static graph processing.</note>
+      </trans-unit>
       <trans-unit id="HardenedGraphDeferredValueInStaticContext">
         <source>MSB4288: Hardened static graph validation requires {0} to be static, but the expression "{1}" depends on the deferred value {2}. Move the discovery operation to fetch, or pass the deferred value directly to a non-Pure task.</source>
         <target state="new">MSB4288: Hardened static graph validation requires {0} to be static, but the expression "{1}" depends on the deferred value {2}. Move the discovery operation to fetch, or pass the deferred value directly to a non-Pure task.</target>
         <note>{StrBegin="MSB4288: "}{0} describes the static MSBuild context. {1} is the expression. {2} is the dependency chain from the task output. The terms "static", "deferred", "fetch", and "Pure" are hardened static graph feature names.</note>
+      </trans-unit>
+      <trans-unit id="HardenedGraphMissingItemOperationResult">
+        <source>MSB4289: Hardened static graph execution has no pre-resolved result for item "{0}" in this batching context. Re-run graph construction and fix any validation errors; execution-time filesystem enumeration is not permitted.</source>
+        <target state="new">MSB4289: Hardened static graph execution has no pre-resolved result for item "{0}" in this batching context. Re-run graph construction and fix any validation errors; execution-time filesystem enumeration is not permitted.</target>
+        <note>{StrBegin="MSB4289: "}{0} is the MSBuild item type. The terms "graph construction" and "batching" describe hardened static graph processing.</note>
+      </trans-unit>
+      <trans-unit id="HardenedGraphPathOutsideWorkspace">
+        <source>MSB4290: Hardened static graph validation cannot resolve the glob "{0}" because path "{1}" is outside workspace "{2}". Move the path into the workspace or define WorkspaceRoot in a containing project file.</source>
+        <target state="new">MSB4290: Hardened static graph validation cannot resolve the glob "{0}" because path "{1}" is outside workspace "{2}". Move the path into the workspace or define WorkspaceRoot in a containing project file.</target>
+        <note>{StrBegin="MSB4290: "}{0} is the glob expression. {1} is the declared or symlink-resolved path. {2} is the workspace root. WorkspaceRoot is an MSBuild property name and should not be localized.</note>
       </trans-unit>
       <trans-unit id="HardenedGraphProhibitedFunction">
         <source>MSB4287: Hardened static graph validation prohibits the property function "{0}" in {1} because it may observe ambient state. Replace it with a pure expression over declared properties and items, or move the discovery operation to fetch.</source>
         <target state="new">MSB4287: Hardened static graph validation prohibits the property function "{0}" in {1} because it may observe ambient state. Replace it with a pure expression over declared properties and items, or move the discovery operation to fetch.</target>
         <note>{StrBegin="MSB4287: "}{0} is the untranslatable property-function expression. {1} describes the MSBuild context containing it. The terms "property", "item", and "fetch" are MSBuild feature names.</note>
       </trans-unit>
+      <trans-unit id="HardenedGraphUnresolvableLinkPath">
+        <source>MSB4293: Hardened static graph validation cannot verify the resolved path for glob "{0}" at "{1}" against workspace "{2}". Ensure the path is accessible during graph construction.</source>
+        <target state="new">MSB4293: Hardened static graph validation cannot verify the resolved path for glob "{0}" at "{1}" against workspace "{2}". Ensure the path is accessible during graph construction.</target>
+        <note>{StrBegin="MSB4293: "}{0} is the glob expression. {1} is the declared path. {2} is the workspace root.</note>
+      </trans-unit>
       <trans-unit id="HardenedGraphUnsupportedConstruct">
         <source>MSB4286: Hardened static graph validation does not yet support {0} in {1}. Rewrite it using supported static constructs before enabling hardened validation.</source>
         <target state="new">MSB4286: Hardened static graph validation does not yet support {0} in {1}. Rewrite it using supported static constructs before enabling hardened validation.</target>
         <note>{StrBegin="MSB4286: "}{0} is the unsupported MSBuild construct. {1} describes the context containing it.</note>
+      </trans-unit>
+      <trans-unit id="HardenedGraphWorkspaceRootRequired">
+        <source>MSB4291: Hardened static graph validation cannot resolve glob "{0}" outside the project directory because WorkspaceRoot is not set to true in an evaluated project file. Add &lt;WorkspaceRoot&gt;true&lt;/WorkspaceRoot&gt; to Directory.Build.props or another containing project file.</source>
+        <target state="new">MSB4291: Hardened static graph validation cannot resolve glob "{0}" outside the project directory because WorkspaceRoot is not set to true in an evaluated project file. Add &lt;WorkspaceRoot&gt;true&lt;/WorkspaceRoot&gt; to Directory.Build.props or another containing project file.</target>
+        <note>{StrBegin="MSB4291: "}{0} is the glob expression. WorkspaceRoot and Directory.Build.props are MSBuild names and should not be localized.</note>
       </trans-unit>
       <trans-unit id="HostObjectFailure">
         <source>The task "{0}" failed to acquire its host object. {1} Contact the author of the task to report this problem.</source>

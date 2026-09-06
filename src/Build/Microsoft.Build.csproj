@@ -251,6 +251,8 @@
     <Compile Include="Evaluation\PropertyTrackingEvaluatorDataWrapper.cs" />
     <Compile Include="Graph\GraphBuilder.cs" />
     <Compile Include="Graph\Hardened\HardenedExpressionDescriptor.cs" />
+    <Compile Include="Graph\Hardened\HardenedGlobPolicy.cs" />
+    <Compile Include="Graph\Hardened\HardenedItemOperationPlan.cs" />
     <Compile Include="Graph\Hardened\HardenedLookupState.cs" />
     <Compile Include="Graph\Hardened\HardenedTargetValidator.cs" />
     <Compile Include="Graph\Hardened\HardenedValidationState.cs" />

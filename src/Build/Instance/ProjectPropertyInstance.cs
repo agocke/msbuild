@@ -253,7 +253,14 @@ namespace Microsoft.Build.Execution
         /// </summary>
         internal static ProjectPropertyInstance Create(ProjectPropertyInstance that)
         {
-            return Create(that._name, that._escapedValue, mayBeReserved: true /* already validated */, isImmutable: that.IsImmutable, that is EnvironmentDerivedProjectPropertyInstance);
+            ProjectPropertyInstance clone = Create(
+                that._name,
+                that._escapedValue,
+                mayBeReserved: true /* already validated */,
+                isImmutable: that.IsImmutable,
+                that is EnvironmentDerivedProjectPropertyInstance);
+            clone._location = that._location;
+            return clone;
         }
 
         /// <summary>
@@ -262,7 +269,14 @@ namespace Microsoft.Build.Execution
         /// </summary>
         internal static ProjectPropertyInstance Create(ProjectPropertyInstance that, bool isImmutable)
         {
-            return Create(that._name, that._escapedValue, mayBeReserved: true /* already validated */, isImmutable: isImmutable, that is EnvironmentDerivedProjectPropertyInstance);
+            ProjectPropertyInstance clone = Create(
+                that._name,
+                that._escapedValue,
+                mayBeReserved: true /* already validated */,
+                isImmutable: isImmutable,
+                that is EnvironmentDerivedProjectPropertyInstance);
+            clone._location = that._location;
+            return clone;
         }
 
         /// <summary>
@@ -319,7 +333,7 @@ namespace Microsoft.Build.Execution
         /// as it should never be needed for any subsequent messages, and is just extra bulk.
         /// Inherits mutability from project if any.
         /// </summary>
-        private static ProjectPropertyInstance Create(string name, string escapedValue, bool mayBeReserved, ElementLocation location, bool isImmutable, bool isEnvironmentProperty = false, LoggingContext loggingContext = null)
+        internal static ProjectPropertyInstance Create(string name, string escapedValue, bool mayBeReserved, ElementLocation location, bool isImmutable, bool isEnvironmentProperty = false, LoggingContext loggingContext = null)
         {
             // Does not check immutability as this is only called during build (which is already protected) or evaluation
             ArgumentNullException.ThrowIfNull(escapedValue);
@@ -339,6 +353,11 @@ namespace Microsoft.Build.Execution
             ProjectPropertyInstance instance = isEnvironmentProperty ? new EnvironmentDerivedProjectPropertyInstance(name, escapedValue, loggingContext) :
                 isImmutable ? new ProjectPropertyInstanceImmutable(name, escapedValue) :
                 new ProjectPropertyInstance(name, escapedValue);
+            if (location is not null)
+            {
+                instance._location = (location.File, location.Line, location.Column);
+            }
+
             return instance;
         }
 

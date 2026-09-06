@@ -716,8 +716,11 @@ loading is a later milestone.
 14. When a static context reads a deferred value, report an error containing
    the producing task and output, intermediate assignments, consuming
    element, and the reason that context requires a static value.
-15. Complete without producing an execution graph or changing normal MSBuild
-   state.
+15. Store the ordinary expansion result for every static target-body
+   `ItemGroup` Include/Exclude operation under its operation identity and
+   hierarchical target/item bucket path.
+16. Complete without producing a separate execution graph or changing normal
+   MSBuild state.
 
 The validator must not use `Lookup` as its sole state. `Lookup` stores concrete
 `ProjectPropertyInstance` and `ProjectItemInstance` values and cannot represent
@@ -728,6 +731,22 @@ validator can reproduce without task execution or target-item batching. If an
 expression depends on a task output or an item operation whose concrete value
 has not been partially evaluated, the overlay must not fall back to the stale
 evaluation-time value.
+
+The item-operation companion plan is authoritative for hardened execution. It
+stores ordered Include and Exclude expansions, final item snapshots,
+`RecursiveDir`, copied metadata, and transitive source-item
+provenance. `ItemGroupIntrinsicTask` materializes those snapshots through the
+ordinary execution path. It never calls the glob implementation in hardened
+execution, and a missing operation/bucket entry is an error rather than a
+request to enumerate the filesystem.
+
+The project directory is the implicit boundary for globs whose fixed directory
+remains inside it. Upward or otherwise out-of-project traversal requires an
+evaluated `<WorkspaceRoot>true</WorkspaceRoot>` marker; the directory
+containing the winning property definition, normally `Directory.Build.props`,
+is used as the wider boundary. Glob resolution validates both lexical paths
+and link-resolved paths against the selected boundary before the result enters
+the companion plan.
 
 ### Diagnostics
 

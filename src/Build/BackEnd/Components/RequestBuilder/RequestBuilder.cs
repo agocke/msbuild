@@ -1239,12 +1239,16 @@ namespace Microsoft.Build.BackEnd
 
                 if (_componentHost.BuildParameters.HardenedGraphValidation)
                 {
+                    ProjectInstance project = _requestEntry.RequestConfiguration.Project;
+                    HardenedItemOperationPlan itemOperationPlan = new(
+                        GetHardenedWorkspaceRoot(project));
                     HardenedTargetValidator validator = new();
                     IReadOnlyList<InvalidProjectFileException> diagnostics =
                         validator.Validate(
-                            _requestEntry.RequestConfiguration.Project,
+                            project,
                             _requestEntry.RequestConfiguration.BaseLookup,
-                            allTargets.Select(target => target.name));
+                            allTargets.Select(target => target.name),
+                            itemOperationPlan);
 
                     if (diagnostics.Count > 0)
                     {
@@ -1255,6 +1259,9 @@ namespace Microsoft.Build.BackEnd
 
                         throw diagnostics[0];
                     }
+
+                    _requestEntry.RequestConfiguration.BaseLookup.ConfigureHardenedItemOperationPlan(
+                        itemOperationPlan);
                 }
 
                 // Set the current directory to that required by the project.
@@ -1302,6 +1309,20 @@ namespace Microsoft.Build.BackEnd
                         new CheckLoggingContext(_nodeLoggingContext.LoggingService, _projectLoggingContext.BuildEventContext),
                         _requestEntry.RequestConfiguration.ProjectFullPath);
                 }
+            }
+
+            static string GetHardenedWorkspaceRoot(ProjectInstance project)
+            {
+                ProjectPropertyInstance workspaceRoot = project.GetProperty("WorkspaceRoot");
+                if (workspaceRoot is null ||
+                    !bool.TryParse(workspaceRoot.EvaluatedValue, out bool enabled) ||
+                    !enabled ||
+                    string.IsNullOrEmpty(workspaceRoot.Location.File))
+                {
+                    return null;
+                }
+
+                return Path.GetDirectoryName(Path.GetFullPath(workspaceRoot.Location.File));
             }
 
             BuildResult CopyTargetResultsFromProxyTargetsToRealTargets(BuildResult resultFromTargetBuilder)

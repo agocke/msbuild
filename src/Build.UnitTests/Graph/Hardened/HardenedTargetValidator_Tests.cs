@@ -3,11 +3,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Microsoft.Build.BackEnd;
+using Microsoft.Build.BackEnd.Logging;
+using Microsoft.Build.Definition;
+using Microsoft.Build.Evaluation;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Graph.Hardened;
+using Microsoft.Build.Framework;
+using Microsoft.Build.UnitTests.BackEnd;
 using Shouldly;
 using Xunit;
 
@@ -2069,6 +2075,285 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void HardenedGlobExecutionMatchesOrdinaryOrderingExcludesMetadataBucketsAndRecursiveDir()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder workspace = environment.CreateFolder(createFolder: true);
+        Directory.CreateDirectory(Path.Combine(workspace.Path, "src", "a", "nested"));
+        Directory.CreateDirectory(Path.Combine(workspace.Path, "src", "b"));
+        File.WriteAllText(Path.Combine(workspace.Path, "src", "a", "one.txt"), string.Empty);
+        File.WriteAllText(Path.Combine(workspace.Path, "src", "a", "nested", "two.txt"), string.Empty);
+        File.WriteAllText(Path.Combine(workspace.Path, "src", "a", "nested", "skip.txt"), string.Empty);
+        File.WriteAllText(Path.Combine(workspace.Path, "src", "b", "three.txt"), string.Empty);
+        workspace.CreateFile(
+            "Directory.Build.props",
+            """
+            <Project>
+              <PropertyGroup>
+                <WorkspaceRoot>true</WorkspaceRoot>
+              </PropertyGroup>
+            </Project>
+            """);
+        string projectXml = """
+            <Project>
+              <Import Project="Directory.Build.props" />
+              <ItemGroup>
+                <Pattern Include="src/a">
+                  <Kind>a</Kind>
+                  <Glob>%(Identity)/**/*.txt</Glob>
+                </Pattern>
+                <Pattern Include="src/b">
+                  <Kind>b</Kind>
+                  <Glob>%(Identity)/**/*.txt</Glob>
+                </Pattern>
+              </ItemGroup>
+              <Target Name="Build"
+                      Inputs="%(Pattern.Identity)"
+                      Outputs="%(Pattern.Identity).stamp">
+                <ItemGroup>
+                  <Observed Include="%(Pattern.Glob)" Exclude="**/skip.txt">
+                    <SourceOrder>%(Pattern.Kind)</SourceOrder>
+                  </Observed>
+                  <Copied Include="@(Observed)" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """;
+
+        ProjectInstance ordinaryProject = BuildOrdinaryProject(
+            CreateProjectInstanceFromFile(environment, workspace, projectXml));
+        ProjectInstance hardenedProject = BuildHardenedProject(
+            CreateProjectInstanceFromFile(environment, workspace, projectXml));
+
+        DescribeGlobItems(hardenedProject.GetItems("Observed"))
+            .ShouldBe(DescribeGlobItems(ordinaryProject.GetItems("Observed")));
+        DescribeGlobItems(hardenedProject.GetItems("Copied"))
+            .ShouldBe(DescribeGlobItems(ordinaryProject.GetItems("Copied")));
+        DescribeGlobItems(hardenedProject.GetItems("Observed")).ShouldBe(
+        [
+            "src/a/nested/two.txt|a|nested/",
+            "src/a/one.txt|a|",
+            "src/b/three.txt|b|",
+        ]);
+    }
+
+    [Fact]
+    public void HardenedGlobExecutionUsesGraphConstructionSnapshot()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder workspace = environment.CreateFolder(createFolder: true);
+        string nestedDirectory = Path.Combine(workspace.Path, "files", "nested");
+        Directory.CreateDirectory(nestedDirectory);
+        string originalFile = Path.Combine(nestedDirectory, "before.txt");
+        string lateFile = Path.Combine(nestedDirectory, "after.txt");
+        File.WriteAllText(originalFile, string.Empty);
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            workspace,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Observed Include="files/**/*.txt" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+        var lookup = new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith);
+        var plan = new HardenedItemOperationPlan(workspace.Path);
+        HardenedTargetValidator validator = new();
+
+        validator.Validate(project, lookup, ["Build"], plan).ShouldBeEmpty();
+
+        File.Delete(originalFile);
+        File.WriteAllText(lateFile, string.Empty);
+
+        ProjectTargetInstance target = project.Targets["Build"];
+        ProjectItemGroupTaskInstance itemGroup = target.Children
+            .OfType<ProjectItemGroupTaskInstance>()
+            .Single();
+        lookup.ConfigureHardenedItemOperationPlan(plan);
+        lookup.EnterHardenedBucket(target, sequenceNumber: 0);
+        new ItemGroupIntrinsicTask(
+            itemGroup,
+            CreateTargetLoggingContext(),
+            project,
+            logTaskInputs: false).ExecuteTask(lookup);
+
+        DescribeGlobItems(lookup.GetItems("Observed")).ShouldBe(
+        [
+            "files/nested/before.txt||nested/",
+        ]);
+    }
+
+    [Fact]
+    public void HardenedGlobBuildDoesNotRequireWorkspaceRootForProjectLocalPattern()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder workspace = environment.CreateFolder(createFolder: true);
+        Directory.CreateDirectory(Path.Combine(workspace.Path, "files"));
+        File.WriteAllText(Path.Combine(workspace.Path, "files", "input.txt"), string.Empty);
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            workspace,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Observed Include="files/*.txt" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+
+        ProjectInstance result = BuildHardenedProject(project);
+
+        DescribeItemSpecs(result.GetItems("Observed")).ShouldBe(["files/input.txt"]);
+    }
+
+    [Fact]
+    public void HardenedGlobBuildRequiresWorkspaceRootForUpwardTraversal()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder parent = environment.CreateFolder(createFolder: true);
+        string projectDirectory = Path.Combine(parent.Path, "project");
+        string outsideDirectory = Path.Combine(parent.Path, "outside");
+        Directory.CreateDirectory(projectDirectory);
+        Directory.CreateDirectory(outsideDirectory);
+        File.WriteAllText(Path.Combine(outsideDirectory, "input.txt"), string.Empty);
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            projectDirectory,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Observed Include="../outside/*.txt" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+        var logger = new MockLogger(_output);
+        using BuildManager buildManager = new();
+
+        BuildResult result = buildManager.Build(
+            new BuildParameters
+            {
+                EnableNodeReuse = false,
+                HardenedGraphValidation = true,
+                Loggers = [logger],
+                MaxNodeCount = 1,
+            },
+            new BuildRequestData(project, ["Build"]));
+
+        result.ShouldHaveFailed();
+        logger.Errors.ShouldHaveSingleItem().Code.ShouldBe("MSB4291");
+    }
+
+    [Fact]
+    public void HardenedGlobExecutionRejectsMissingPreResolution()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder workspace = environment.CreateFolder(createFolder: true);
+        Directory.CreateDirectory(Path.Combine(workspace.Path, "files"));
+        File.WriteAllText(Path.Combine(workspace.Path, "files", "input.txt"), string.Empty);
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            workspace,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Observed Include="files/*.txt" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+        var lookup = new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith);
+        ProjectTargetInstance target = project.Targets["Build"];
+        ProjectItemGroupTaskInstance itemGroup = target.Children
+            .OfType<ProjectItemGroupTaskInstance>()
+            .Single();
+        lookup.ConfigureHardenedItemOperationPlan(
+            new HardenedItemOperationPlan(workspace.Path));
+        lookup.EnterHardenedBucket(target, sequenceNumber: 0);
+
+        InvalidProjectFileException exception = Should.Throw<InvalidProjectFileException>(
+            () => new ItemGroupIntrinsicTask(
+                itemGroup,
+                CreateTargetLoggingContext(),
+                project,
+                logTaskInputs: false).ExecuteTask(lookup));
+
+        exception.ErrorCode.ShouldBe("MSB4289");
+    }
+
+    [Fact]
+    public void HardenedGlobRejectsWorkspaceEscape()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder parent = environment.CreateFolder(createFolder: true);
+        string workspace = Path.Combine(parent.Path, "workspace");
+        string outside = Path.Combine(parent.Path, "outside");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, "input.txt"), string.Empty);
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            workspace,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Observed Include="../outside/*.txt" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+        var lookup = new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith);
+        var plan = new HardenedItemOperationPlan(workspace);
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics =
+            new HardenedTargetValidator().Validate(project, lookup, ["Build"], plan);
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4290");
+    }
+
+    [RequiresSymbolicLinksFact]
+    public void HardenedGlobRejectsSymlinkEscape()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder parent = environment.CreateFolder(createFolder: true);
+        string workspace = Path.Combine(parent.Path, "workspace");
+        string outside = Path.Combine(parent.Path, "outside");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, "input.txt"), string.Empty);
+        Directory.CreateSymbolicLink(Path.Combine(workspace, "linked"), outside);
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            workspace,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Observed Include="linked/*.txt" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+        var lookup = new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith);
+        var plan = new HardenedItemOperationPlan(workspace);
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics =
+            new HardenedTargetValidator().Validate(project, lookup, ["Build"], plan);
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4290");
+    }
+
+    [Fact]
     public void PropertyBucketDiscoveryOrderMatchesOrdinaryBuild()
     {
         const string projectXml = """
@@ -3341,6 +3626,25 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
         return project.Project.CreateProjectInstance();
     }
 
+    private static ProjectInstance CreateProjectInstanceFromFile(
+        TestEnvironment environment,
+        TransientTestFolder folder,
+        string projectXml)
+        => CreateProjectInstanceFromFile(environment, folder.Path, projectXml);
+
+    private static ProjectInstance CreateProjectInstanceFromFile(
+        TestEnvironment environment,
+        string folder,
+        string projectXml)
+    {
+        string projectPath = Path.Combine(folder, "test.proj");
+        File.WriteAllText(projectPath, projectXml.Cleanup());
+        var projectCollection = environment.CreateProjectCollection();
+        return ProjectInstance.FromFile(
+            projectPath,
+            new ProjectOptions { ProjectCollection = projectCollection.Collection });
+    }
+
     private ProjectInstance BuildOrdinaryProject(ProjectInstance project)
     {
         using BuildManager buildManager = new();
@@ -3361,6 +3665,37 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
         result.ProjectStateAfterBuild.ShouldNotBeNull();
         return result.ProjectStateAfterBuild;
     }
+
+    private ProjectInstance BuildHardenedProject(ProjectInstance project)
+    {
+        using BuildManager buildManager = new();
+        BuildResult result = buildManager.Build(
+            new BuildParameters
+            {
+                EnableNodeReuse = false,
+                HardenedGraphValidation = true,
+                Loggers = [new MockLogger(_output)],
+                MaxNodeCount = 1,
+            },
+            new BuildRequestData(
+                project,
+                ["Build"],
+                hostServices: null,
+                BuildRequestDataFlags.ProvideProjectStateAfterBuild));
+
+        result.ShouldHaveSucceeded();
+        result.ProjectStateAfterBuild.ShouldNotBeNull();
+        return result.ProjectStateAfterBuild;
+    }
+
+    private static TargetLoggingContext CreateTargetLoggingContext()
+        => new(
+            new MockLoggingService(),
+            new BuildEventContext(
+                nodeId: 1,
+                projectContextId: 2,
+                targetId: 3,
+                taskId: 4));
 
     private (ProjectInstance OrdinaryProject, Lookup ValidationLookup) BuildOrdinaryAndValidateHardened(
         TestEnvironment environment,
@@ -3386,4 +3721,11 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
                 $"{item.EvaluatedInclude.Replace('\\', '/')}|" +
                 $"{item.GetMetadataValue("SourceOrder")}|" +
                 item.GetMetadataValue("State"))];
+
+    private static string[] DescribeGlobItems(IEnumerable<ProjectItemInstance> items)
+        => [.. items.Select(
+            item =>
+                $"{item.EvaluatedInclude.Replace('\\', '/')}|" +
+                $"{item.GetMetadataValue("SourceOrder")}|" +
+                item.GetMetadataValue("RecursiveDir").Replace('\\', '/'))];
 }

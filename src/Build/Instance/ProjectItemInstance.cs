@@ -293,6 +293,9 @@ namespace Microsoft.Build.Execution
 
         internal TaskItem.MetadataNamesEnumerable EnumerableMetadataNames => _taskItem.EnumerableMetadataNames;
 
+        internal string EvaluatedIncludeBeforeWildcardExpansionEscaped
+            => _taskItem.IncludeBeforeWildcardExpansionEscaped;
+
         /// <summary>
         /// ITaskItem implementation
         /// </summary>

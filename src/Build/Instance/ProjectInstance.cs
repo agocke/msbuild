@@ -1944,7 +1944,11 @@ namespace Microsoft.Build.Execution
         ProjectPropertyInstance IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, LoggingContext loggingContext)
         {
             // Mutability not verified as this is being populated during evaluation
-            ProjectPropertyInstance property = ProjectPropertyInstance.Create(propertyElement.Name, evaluatedValueEscaped, false /* may not be reserved */, _isImmutable);
+            ProjectPropertyInstance property = ProjectPropertyInstance.Create(
+                propertyElement.Name,
+                evaluatedValueEscaped,
+                propertyElement.Location,
+                _isImmutable);
             _properties.Set(property);
             return property;
         }
@@ -3222,6 +3226,7 @@ namespace Microsoft.Build.Execution
                                 property.Name,
                                 ((IProperty)property).EvaluatedValueEscaped,
                                 true /* MAY be reserved name */,
+                                property.Xml?.Location,
                                 isImmutable,
                                 property.IsEnvironmentProperty);
             return instance;
