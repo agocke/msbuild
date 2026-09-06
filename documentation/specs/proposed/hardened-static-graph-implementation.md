@@ -72,6 +72,56 @@ The walk may maintain property and item availability state, but its output is
 only success or resource-backed MSBuild errors. It does not produce task
 invocation nodes or an alternate execution plan.
 
+## Soundness proposition
+
+The target validator exists to prove this proposition:
+
+> Before any deferred execution runs, every possible Declared-IO task
+> invocation has a finite, statically enumerable input and output footprint.
+
+Task annotations supply trusted premises: the resolved implementation is bound
+to its manifest, every external read and write is declared, and each declaration
+is a finite expression over task parameters. The validator must establish the
+remaining lemmas:
+
+1. The complete requested project and target closure is validated before any
+   non-Pure task in that closure executes.
+2. Every invocation, target bucket, task bucket, condition outcome, and failure
+   path that ordinary MSBuild can execute is represented.
+3. Property, item, and metadata state at each program point conservatively
+   contains every feasible ordinary execution state.
+4. Batch keys, bucket order, bucket-local views, sibling isolation, and scope
+   merge timing match ordinary MSBuild.
+5. Task routing, output conditions, output `TaskParameter` values, and expanded
+   `PropertyName` and `ItemName` destinations are static for each invocation.
+6. Declared read and write expressions have static structure. Deferred
+   parameter values are permitted only when they resolve to concrete paths
+   before the invocation becomes runnable.
+7. No value classified as Static depends on an unrecorded ambient observation
+   such as a target-time glob, file timestamp, current directory, environment,
+   clock, network, or file-content read.
+
+Rejecting a legal build is a completeness limitation. Accepting a build while
+omitting a feasible invocation, input, output, or path is a soundness failure.
+Precision improvements that prune false conditions therefore depend on the
+state- and bucket-equivalence lemmas above.
+
+Before allocation measurement or diagnostic-inventory pinning, differential
+gates must cover:
+
+- target-level buckets and per-bucket returns;
+- ordinary batchable-expression discovery order for properties and tasks;
+- sibling-bucket isolation and ordered scope merging;
+- false `PropertyGroup`, `ItemGroup`, item, task, and output conditions;
+- dynamic task-output destinations;
+- `OnError` state at every feasible failure prefix;
+- target-time globs and file-time metadata;
+- cross-project validation-before-execution and worker-node flag propagation.
+
+Declared-IO manifest binding, finite `Reads` and `Writes`, ready-time path
+resolution, read-set containment, and output-overlap checks remain required
+premises before the proposition can be considered established.
+
 ## First implementation slice
 
 ### Purpose

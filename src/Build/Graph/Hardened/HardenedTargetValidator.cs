@@ -335,7 +335,7 @@ internal sealed class HardenedTargetValidator
         {
             BatchingValidationResult batchingResult = ValidateBatching(
                 property,
-                [property.Condition, property.Value],
+                [property.Value, property.Condition],
                 implicitItemType: null,
                 property.Location,
                 $"property '{property.Name}'");
@@ -429,13 +429,23 @@ internal sealed class HardenedTargetValidator
         string targetName,
         LegacyCallTargetScope? callTargetScope)
     {
-        ValidateExpression(
+        ExpressionValidationResult groupConditionResult = ValidateExpression(
             itemGroup,
             itemGroup.Condition,
             itemGroup.ConditionLocation,
             $"the condition of an ItemGroup in target '{targetName}'",
             requireStatic: true,
             isCondition: true);
+        if (TryEvaluateCondition(
+                itemGroup,
+                itemGroup.Condition,
+                itemGroup.ConditionLocation,
+                groupConditionResult,
+                out bool groupConditionValue) &&
+            !groupConditionValue)
+        {
+            return;
+        }
 
         foreach (ProjectItemGroupTaskItemInstance item in itemGroup.Items)
         {
@@ -457,8 +467,6 @@ internal sealed class HardenedTargetValidator
         }
 
         List<string> batchableExpressions = [];
-        AddIfNotEmpty(batchableExpressions, task.Condition);
-        AddIfNotEmpty(batchableExpressions, task.ContinueOnError);
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
             AddIfNotEmpty(batchableExpressions, parameter.Value.Item1);
@@ -466,10 +474,13 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectTaskInstanceChild output in task.Outputs)
         {
-            AddIfNotEmpty(batchableExpressions, GetOutputDestination(output));
             AddIfNotEmpty(batchableExpressions, GetTaskParameter(output));
+            AddIfNotEmpty(batchableExpressions, GetOutputDestination(output));
             AddIfNotEmpty(batchableExpressions, output.Condition);
         }
+
+        AddIfNotEmpty(batchableExpressions, task.Condition);
+        AddIfNotEmpty(batchableExpressions, task.ContinueOnError);
 
         BatchingValidationResult batchingResult = ValidateBatching(
             task,
@@ -587,6 +598,26 @@ internal sealed class HardenedTargetValidator
                 $"condition of output '{outputTaskParameter}' from task '{task.Name}'",
                 reportDiagnostics: false).State;
 
+            ExpressionValidationResult outputConditionResult = ValidateExpression(
+                output,
+                output.Condition,
+                output.ConditionLocation,
+                $"the condition of output '{GetTaskParameter(output)}' from task '{task.Name}'",
+                requireStatic: true,
+                isCondition: true,
+                metadataBatchingValidated: true);
+
+            if (TryEvaluateCondition(
+                    output,
+                    output.Condition,
+                    output.ConditionLocation,
+                    outputConditionResult,
+                    out bool outputConditionValue) &&
+                !outputConditionValue)
+            {
+                continue;
+            }
+
             ExpressionValidationResult outputTaskParameterResult = ValidateExpression(
                 output,
                 outputTaskParameter,
@@ -596,15 +627,6 @@ internal sealed class HardenedTargetValidator
                 isCondition: false,
                 metadataBatchingValidated: true,
                 includeItemMetadata: true);
-
-            ExpressionValidationResult outputConditionResult = ValidateExpression(
-                output,
-                output.Condition,
-                output.ConditionLocation,
-                $"the condition of output '{GetTaskParameter(output)}' from task '{task.Name}'",
-                requireStatic: true,
-                isCondition: true,
-                metadataBatchingValidated: true);
 
             ValueState outputDestinationBatchingState = ValidateBatching(
                 output,
@@ -1794,22 +1816,20 @@ internal sealed class HardenedTargetValidator
         Lookup parentLookup = ValidationLookup;
         Expander<ProjectPropertyInstance, ProjectItemInstance> parentExpander = ConcreteExpander;
         IMetadataTable? parentMetadata = _activeMetadata;
-        for (int i = 0; i < batchingResult.Buckets.Count; i++)
+        int initializedBucketCount = 0;
+        try
         {
-            ItemBucket bucket = batchingResult.Buckets[i];
-            bucket.Initialize(loggingContext: null);
-            _validationLookup = bucket.Lookup;
-            _activeMetadata = bucket.Expander.Metadata;
-            _concreteExpander = bucket.Expander;
-            try
+            for (int i = 0; i < batchingResult.Buckets.Count; i++)
             {
-                validate(batchingResult.State);
-            }
-            finally
-            {
+                ItemBucket bucket = batchingResult.Buckets[i];
+                bucket.Initialize(loggingContext: null);
+                initializedBucketCount++;
+                _validationLookup = bucket.Lookup;
+                _activeMetadata = bucket.Expander.Metadata;
+                _concreteExpander = bucket.Expander;
                 try
                 {
-                    bucket.LeaveScope();
+                    validate(batchingResult.State);
                 }
                 finally
                 {
@@ -1818,6 +1838,17 @@ internal sealed class HardenedTargetValidator
                     _concreteExpander = parentExpander;
                 }
             }
+        }
+        finally
+        {
+            for (int i = 0; i < initializedBucketCount; i++)
+            {
+                batchingResult.Buckets[i].LeaveScope();
+            }
+
+            _validationLookup = parentLookup;
+            _activeMetadata = parentMetadata;
+            _concreteExpander = parentExpander;
         }
     }
 

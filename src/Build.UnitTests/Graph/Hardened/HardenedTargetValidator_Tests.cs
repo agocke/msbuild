@@ -1638,6 +1638,192 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void IntrinsicBucketFormationOrderAndConditionsMatchOrdinaryBuild()
+    {
+        const string projectXml = """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>z</Kind>
+                  <Emit>true</Emit>
+                </Input>
+                <Input Include="b">
+                  <Kind>a</Kind>
+                  <Emit>false</Emit>
+                </Input>
+                <Input Include="c">
+                  <Kind>z</Kind>
+                  <Emit>true</Emit>
+                </Input>
+                <Input Include="d">
+                  <Kind>m</Kind>
+                  <Emit>true</Emit>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Observed Include="@(Input->'%(Kind):%(Identity)', ',')"
+                            Condition="'%(Input.Emit)' == 'true' And '%(Input.Kind)' != ''" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """;
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+
+        (ProjectInstance ordinaryProject, Lookup validationLookup) = BuildOrdinaryAndValidateHardened(
+            environment,
+            projectXml,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        DescribeItemSpecs(validationLookup.GetItems("Observed"))
+            .ShouldBe(DescribeItemSpecs(ordinaryProject.GetItems("Observed")));
+        DescribeItemSpecs(validationLookup.GetItems("Observed")).ShouldBe(
+        [
+            "z:a,z:c",
+            "m:d",
+        ]);
+    }
+
+    [Fact]
+    public void PropertyBucketDiscoveryOrderMatchesOrdinaryBuild()
+    {
+        const string projectXml = """
+            <Project>
+              <ItemGroup>
+                <A Include="a">
+                  <M>1</M>
+                </A>
+                <B Include="b">
+                  <M>2</M>
+                </B>
+              </ItemGroup>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Chosen Condition="'%(B.M)' != '' Or '%(A.M)' != ''">%(A.M)x%(B.M)</Chosen>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """;
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+
+        (ProjectInstance ordinaryProject, Lookup validationLookup) = BuildOrdinaryAndValidateHardened(
+            environment,
+            projectXml,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        validationLookup.GetProperty("Chosen")!.EvaluatedValue
+            .ShouldBe(ordinaryProject.GetPropertyValue("Chosen"));
+        ordinaryProject.GetPropertyValue("Chosen").ShouldBe("x2");
+    }
+
+    [Fact]
+    public void FalseItemGroupConditionMatchesOrdinaryBuild()
+    {
+        const string projectXml = """
+            <Project>
+              <PropertyGroup>
+                <Enable>false</Enable>
+              </PropertyGroup>
+              <ItemGroup>
+                <Input Include="a;b" />
+              </ItemGroup>
+              <Target Name="Build">
+                <ItemGroup Condition="'$(Enable)' == 'true'">
+                  <Input Remove="b" />
+                </ItemGroup>
+                <ItemGroup>
+                  <Observed Include="@(Input)" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """;
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+
+        (ProjectInstance ordinaryProject, Lookup validationLookup) = BuildOrdinaryAndValidateHardened(
+            environment,
+            projectXml,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        DescribeItemSpecs(validationLookup.GetItems("Input"))
+            .ShouldBe(DescribeItemSpecs(ordinaryProject.GetItems("Input")));
+        DescribeItemSpecs(validationLookup.GetItems("Observed"))
+            .ShouldBe(DescribeItemSpecs(ordinaryProject.GetItems("Observed")));
+        DescribeItemSpecs(validationLookup.GetItems("Observed")).ShouldBe(["a", "b"]);
+    }
+
+    [Fact]
+    public void BucketedTaskConditionsAndDynamicOutputDestinationsMatchOrdinaryBuild()
+    {
+        const string projectXml = """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Kind>z</Kind>
+                  <Emit>true</Emit>
+                </Input>
+                <Input Include="b">
+                  <Kind>a</Kind>
+                  <Emit>false</Emit>
+                </Input>
+                <Input Include="c">
+                  <Kind>z</Kind>
+                  <Emit>true</Emit>
+                </Input>
+                <Input Include="d">
+                  <Kind>m</Kind>
+                  <Emit>true</Emit>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <CreateProperty Value="@(Input, ',')"
+                                Condition="'%(Input.Kind)' != 'm'">
+                  <Output TaskParameter="Value"
+                          PropertyName="Property_%(Input.Kind)"
+                          Condition="'%(Input.Emit)' == 'true'" />
+                </CreateProperty>
+                <CreateItem Include="@(Input)">
+                  <Output TaskParameter="Include"
+                          ItemName="Item_%(Input.Kind)"
+                          Condition="'%(Input.Emit)' == 'true'" />
+                </CreateItem>
+              </Target>
+            </Project>
+            """;
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+
+        (ProjectInstance ordinaryProject, Lookup validationLookup) = BuildOrdinaryAndValidateHardened(
+            environment,
+            projectXml,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["CreateProperty"] = HardenedTaskClassification.DeclaredIO,
+                ["CreateItem"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        string[] kinds = ["z", "a", "m"];
+        foreach (string kind in kinds)
+        {
+            bool ordinaryPropertyExists =
+                ordinaryProject.GetPropertyValue($"Property_{kind}").Length > 0;
+            bool hardenedPropertyExists =
+                !validationLookup.HardenedState.GetProperty($"Property_{kind}").State.IsStatic;
+            hardenedPropertyExists.ShouldBe(ordinaryPropertyExists);
+
+            bool ordinaryItemsExist = ordinaryProject.GetItems($"Item_{kind}").Count > 0;
+            bool hardenedItemsExist =
+                !validationLookup.HardenedState.GetItemMembership($"Item_{kind}").IsStatic;
+            hardenedItemsExist.ShouldBe(ordinaryItemsExist);
+        }
+
+        ordinaryProject.GetPropertyValue("Property_z").ShouldBe("a,c");
+        ordinaryProject.GetPropertyValue("Property_a").ShouldBeEmpty();
+        ordinaryProject.GetPropertyValue("Property_m").ShouldBeEmpty();
+        DescribeItemSpecs(ordinaryProject.GetItems("Item_z")).ShouldBe(["a", "c"]);
+        ordinaryProject.GetItems("Item_a").ShouldBeEmpty();
+        DescribeItemSpecs(ordinaryProject.GetItems("Item_m")).ShouldBe(["d"]);
+    }
+
+    [Fact]
     public void FalseTaskBucketDoesNotConsumeDeferredPayloadMetadata()
     {
         ValidateDiagnostics(
@@ -1720,9 +1906,9 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void MergedTaskBucketOutputsAreVisibleToLaterBuckets()
+    public void TaskBucketOutputsAreNotVisibleToSiblingBuckets()
     {
-        InvalidProjectFileException exception = ValidateFailure(
+        ValidateSuccess(
             """
             <Project>
               <ItemGroup>
@@ -1744,10 +1930,6 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             {
                 ["Generate"] = HardenedTaskClassification.DeclaredIO,
             });
-
-        exception.ErrorCode.ShouldBe("MSB4288");
-        exception.Message.ShouldContain("condition of task 'Generate'");
-        exception.Message.ShouldContain("output 'Result' of task 'Generate'");
     }
 
     [Fact]
@@ -2795,6 +2977,24 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
         result.ProjectStateAfterBuild.ShouldNotBeNull();
         return result.ProjectStateAfterBuild;
     }
+
+    private (ProjectInstance OrdinaryProject, Lookup ValidationLookup) BuildOrdinaryAndValidateHardened(
+        TestEnvironment environment,
+        string projectXml,
+        IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
+    {
+        ProjectInstance ordinaryProject = BuildOrdinaryProject(
+            CreateProjectInstance(environment, projectXml));
+        ProjectInstance validationProject = CreateProjectInstance(environment, projectXml);
+        HardenedTargetValidator validator = new(taskClassifications);
+
+        validator.Validate(validationProject, "Build").ShouldBeEmpty();
+
+        return (ordinaryProject, validator.GetValidationLookupForTesting());
+    }
+
+    private static string[] DescribeItemSpecs(IEnumerable<ProjectItemInstance> items)
+        => [.. items.Select(item => item.EvaluatedInclude.Replace('\\', '/'))];
 
     private static string[] DescribeItems(IEnumerable<ProjectItemInstance> items)
         => [.. items.Select(
