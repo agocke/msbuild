@@ -3249,9 +3249,9 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- AssignTargetPath generates TargetPath metadata that is consumed by CreateManifestResourceNames target for manifest name generation -->
-    <AssignTargetPath Files="@(EmbeddedResource)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(EmbeddedResource)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_Temporary" />
-    </AssignTargetPath>
+    </AssignTargetPathWithProjectDirectory>
 
     <ItemGroup>
       <!-- Replace items in EmbeddedResource with the items emitted by the AssignTargetPath task that have the TargetPath metadata -->
@@ -3260,21 +3260,21 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_Temporary Remove="@(_Temporary)" />
     </ItemGroup>
 
-    <AssignTargetPath Files="@(Content)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(Content)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="ContentWithTargetPath" />
-    </AssignTargetPath>
+    </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPath Files="@(None)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(None)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_NoneWithTargetPath" />
-    </AssignTargetPath>
+    </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPath Files="@(BaseApplicationManifest)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(BaseApplicationManifest)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_DeploymentBaseManifestWithTargetPath"/>
-    </AssignTargetPath>
+    </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPath Files="@(None)" RootFolder="$(MSBuildProjectDirectory)" Condition="'@(_DeploymentBaseManifestWithTargetPath)'=='' and '%(None.Extension)'=='.manifest'">
+    <AssignTargetPathWithProjectDirectory Files="@(None)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)" Condition="'@(_DeploymentBaseManifestWithTargetPath)'=='' and '%(None.Extension)'=='.manifest'">
       <Output TaskParameter="AssignedFiles" ItemName="_DeploymentBaseManifestWithTargetPath" />
-    </AssignTargetPath>
+    </AssignTargetPathWithProjectDirectory>
 
   </Target>
 
@@ -5335,9 +5335,9 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_CompileItemsToCopy Include="@(Compile->'%(FullPath)')" Condition="('%(Compile.CopyToOutputDirectory)'=='Always' or '%(Compile.CopyToOutputDirectory)'=='PreserveNewest' or '%(Compile.CopyToOutputDirectory)'=='IfDifferent') AND '%(Compile.MSBuildSourceProjectFile)'!=''"/>
     </ItemGroup>
 
-    <AssignTargetPath Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileItemsToCopyWithTargetPath" />
-    </AssignTargetPath>
+    </AssignTargetPathWithProjectDirectory>
 
     <ItemGroup>
       <_CopyToOutputDirectoryTransitiveItems       KeepMetadata="$(_GCTODIKeepMetadata)" Include="@(_CompileItemsToCopyWithTargetPath)" Condition="'%(_CompileItemsToCopyWithTargetPath.CopyToOutputDirectory)'=='Always'"/>
@@ -5374,9 +5374,9 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_CompileItemsToCopy Include="@(Compile->'%(FullPath)')" Condition="('%(Compile.CopyToOutputDirectory)'=='Always' or '%(Compile.CopyToOutputDirectory)'=='PreserveNewest' or '%(Compile.CopyToOutputDirectory)'=='IfDifferent') AND '%(Compile.MSBuildSourceProjectFile)'==''"/>
     </ItemGroup>
 
-    <AssignTargetPath Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileItemsToCopyWithTargetPath" />
-    </AssignTargetPath>
+    </AssignTargetPathWithProjectDirectory>
 
     <ItemGroup>
       <_ThisProjectItemsToCopyToOutputDirectory       KeepMetadata="$(_GCTODIKeepMetadata)" Include="@(_CompileItemsToCopyWithTargetPath)" Condition="'%(_CompileItemsToCopyWithTargetPath.CopyToOutputDirectory)'=='Always'"/>
@@ -6705,9 +6705,9 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       Returns="@(SourceFilesProjectOutputGroupOutput)"
       DependsOnTargets="$(SourceFilesProjectOutputGroupDependsOn)">
 
-    <AssignTargetPath Files="@(Compile)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(Compile)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileWithTargetPath" />
-    </AssignTargetPath>
+    </AssignTargetPathWithProjectDirectory>
 
     <ItemGroup>
       <!-- First we deal with Compile, EmbeddedResource and AppConfig -->

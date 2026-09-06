@@ -56,21 +56,23 @@ namespace Microsoft.Build.Tasks
 
             if (Files.Length > 0)
             {
+                AbsolutePath projectDirectory = GetProjectDirectory();
+                bool useCanonicalPathSemantics = UseCanonicalPathSemantics;
                 AbsolutePath fullRootPath = default;
                 string fullRootPathString = null;
                 bool isRootFolderSameAsCurrentDirectory;
 
-                if (ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_5))
+                if (useCanonicalPathSemantics)
                 {
                     // Compose a file in the root folder.
                     // NOTE: at this point fullRootPath may or may not have a trailing slash
                     // Ensure trailing slash otherwise c:\bin appears to match part of c:\bin2\foo
                     // Also ensure that relative segments in the path are resolved.
                     fullRootPath =
-                        TaskEnvironment.GetAbsolutePath(FileUtilities.EnsureTrailingSlash(RootFolder)).GetCanonicalForm();
+                        new AbsolutePath(FileUtilities.EnsureTrailingSlash(RootFolder), projectDirectory).GetCanonicalForm();
 
                     // Ensure trailing slash for comparison. Current directory is already canonical, so we don't need to call GetCanonicalForm on it.
-                    AbsolutePath currentDirectory = FileUtilities.EnsureTrailingSlash(TaskEnvironment.ProjectDirectory);
+                    AbsolutePath currentDirectory = FileUtilities.EnsureTrailingSlash(projectDirectory);
 
                     // Check if the root folder is the same as the current directory - AbsolutePath handles OS-aware case sensitivity.
                     isRootFolderSameAsCurrentDirectory = fullRootPath == currentDirectory;
@@ -82,12 +84,12 @@ namespace Microsoft.Build.Tasks
                     // Ensure trailing slash otherwise c:\bin appears to match part of c:\bin2\foo
                     // Also ensure that relative segments in the path are resolved and throw on illegal characters in Path.GetFullPath to preserve pre-existing behavior.
                     fullRootPathString = 
-#pragma warning disable MSBuildTask0002 // Path is already absolute from TaskEnvironment.GetAbsolutePath; GetFullPath only canonicalizes. Guarded by ChangeWave.
-                        Path.GetFullPath(TaskEnvironment.GetAbsolutePath(FileUtilities.EnsureTrailingSlash(RootFolder)));
+#pragma warning disable MSBuildTask0002 // AbsolutePath already resolved the path; GetFullPath only canonicalizes. Guarded by ChangeWave.
+                        Path.GetFullPath(new AbsolutePath(FileUtilities.EnsureTrailingSlash(RootFolder), projectDirectory));
 #pragma warning restore MSBuildTask0002
 
                     // Ensure trailing slash for comparison. Current directory is already canonical, so we don't need to call GetCanonicalForm on it.
-                    AbsolutePath currentDirectory = FileUtilities.EnsureTrailingSlash(TaskEnvironment.ProjectDirectory);
+                    AbsolutePath currentDirectory = FileUtilities.EnsureTrailingSlash(projectDirectory);
 
                     // Check if the root folder is the same as the current directory. 
                     // Perform a case-insensitive comparison to match Path.GetFullPath behavior on Windows, even on case-sensitive file systems, 
@@ -125,10 +127,10 @@ namespace Microsoft.Build.Tasks
                         }
                         else
                         {
-                            if (ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_5)) 
+                            if (useCanonicalPathSemantics)
                             {
                                 AbsolutePath itemSpecFullFileNamePath = 
-                                    TaskEnvironment.GetAbsolutePath(Files[i].ItemSpec).GetCanonicalForm();
+                                    new AbsolutePath(Files[i].ItemSpec, projectDirectory).GetCanonicalForm();
 
 
                                 if (itemSpecFullFileNamePath.Value.StartsWith(fullRootPath.Value, FileUtilities.PathComparison))
@@ -145,8 +147,8 @@ namespace Microsoft.Build.Tasks
                             else 
                             {
                                 string itemSpecFullFileNamePath = 
-#pragma warning disable MSBuildTask0002 // Path is already absolute from TaskEnvironment.GetAbsolutePath; GetFullPath only canonicalizes. Guarded by ChangeWave.
-                                    Path.GetFullPath(TaskEnvironment.GetAbsolutePath(Files[i].ItemSpec));
+#pragma warning disable MSBuildTask0002 // AbsolutePath already resolved the path; GetFullPath only canonicalizes. Guarded by ChangeWave.
+                                    Path.GetFullPath(new AbsolutePath(Files[i].ItemSpec, projectDirectory));
 #pragma warning restore MSBuildTask0002
 
                                 if (String.Compare(fullRootPathString, 0, itemSpecFullFileNamePath, 0, fullRootPathString.Length, StringComparison.CurrentCultureIgnoreCase) == 0)
@@ -169,5 +171,32 @@ namespace Microsoft.Build.Tasks
 
             return true;
         }
+
+        protected virtual AbsolutePath GetProjectDirectory()
+        {
+            return TaskEnvironment.ProjectDirectory;
+        }
+
+        protected virtual bool UseCanonicalPathSemantics => ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_5);
+    }
+
+    /// <summary>
+    /// Assigns TargetPath metadata using an explicitly supplied project directory.
+    /// </summary>
+    [MSBuildMultiThreadableTask]
+    public sealed class AssignTargetPathWithProjectDirectory : AssignTargetPath
+    {
+        /// <summary>
+        /// The directory against which relative item paths are resolved.
+        /// </summary>
+        [Required]
+        public string ProjectDirectory { get; set; }
+
+        protected override AbsolutePath GetProjectDirectory()
+        {
+            return new AbsolutePath(ProjectDirectory);
+        }
+
+        protected override bool UseCanonicalPathSemantics => true;
     }
 }
