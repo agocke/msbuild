@@ -1242,13 +1242,25 @@ namespace Microsoft.Build.BackEnd
                     ProjectInstance project = _requestEntry.RequestConfiguration.Project;
                     HardenedItemOperationPlan itemOperationPlan = new(
                         GetHardenedWorkspaceRoot(project));
-                    HardenedTargetValidator validator = new();
-                    IReadOnlyList<InvalidProjectFileException> diagnostics =
-                        validator.Validate(
-                            project,
-                            _requestEntry.RequestConfiguration.BaseLookup,
-                            allTargets.Select(target => target.name),
-                            itemOperationPlan);
+                    ITaskBuilder pureTaskBuilder =
+                        (ITaskBuilder)_componentHost.GetComponent(BuildComponentType.TaskBuilder);
+                    IReadOnlyList<InvalidProjectFileException> diagnostics;
+                    try
+                    {
+                        HardenedTargetValidator validator = new(
+                            HardenedTaskClassifications.BuiltIn,
+                            (target, task, lookup) =>
+                                ExecuteHardenedPureTask(pureTaskBuilder, target, task, lookup));
+                        diagnostics = validator.Validate(
+                                project,
+                                _requestEntry.RequestConfiguration.BaseLookup,
+                                allTargets.Select(target => target.name),
+                                itemOperationPlan);
+                    }
+                    finally
+                    {
+                        ((IBuildComponent)pureTaskBuilder).ShutdownComponent();
+                    }
 
                     if (diagnostics.Count > 0)
                     {
@@ -1308,6 +1320,49 @@ namespace Microsoft.Build.BackEnd
                     buildCheckManager.EndProjectRequest(
                         new CheckLoggingContext(_nodeLoggingContext.LoggingService, _projectLoggingContext.BuildEventContext),
                         _requestEntry.RequestConfiguration.ProjectFullPath);
+                }
+            }
+
+            void ExecuteHardenedPureTask(
+                ITaskBuilder taskBuilder,
+                ProjectTargetInstance target,
+                ProjectTaskInstance task,
+                Lookup lookup)
+            {
+                var targetLoggingContext = new TargetLoggingContext(
+                    _projectLoggingContext,
+                    _requestEntry.RequestConfiguration.ProjectFullPath,
+                    target,
+                    parentTargetName: null,
+                    TargetBuiltReason.None);
+                bool success = false;
+
+                try
+                {
+                    WorkUnitResult result = taskBuilder.ExecuteTask(
+                        targetLoggingContext,
+                        _requestEntry,
+                        (ITargetBuilderCallback)_targetBuilder,
+                        task,
+                        TaskExecutionMode.ExecuteTaskAndGatherOutputs,
+                        lookup,
+                        lookup,
+                        _cancellationTokenSource.Token).ConfigureAwait(false).GetAwaiter().GetResult();
+
+                    success = result.ResultCode is WorkUnitResultCode.Success or WorkUnitResultCode.Skipped;
+                    if (!success)
+                    {
+                        throw result.Exception is null
+                            ? new BuildAbortedException()
+                            : new BuildAbortedException(result.Exception.Message, result.Exception);
+                    }
+                }
+                finally
+                {
+                    targetLoggingContext.LogTargetBatchFinished(
+                        _requestEntry.RequestConfiguration.ProjectFullPath,
+                        success,
+                        targetOutputs: null);
                 }
             }
 

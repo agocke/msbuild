@@ -254,6 +254,7 @@
     <Compile Include="Graph\Hardened\HardenedGlobPolicy.cs" />
     <Compile Include="Graph\Hardened\HardenedItemOperationPlan.cs" />
     <Compile Include="Graph\Hardened\HardenedLookupState.cs" />
+    <Compile Include="Graph\Hardened\HardenedTaskExecution.cs" />
     <Compile Include="Graph\Hardened\HardenedTargetValidator.cs" />
     <Compile Include="Graph\Hardened\HardenedValidationState.cs" />
     <Compile Include="Graph\ParallelWorkSet.cs" />

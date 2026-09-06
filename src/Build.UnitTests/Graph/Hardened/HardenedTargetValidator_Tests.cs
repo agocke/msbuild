@@ -2098,6 +2098,111 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ExecutedPureTaskOutputIsAvailableToLaterPureTask()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build">
+                <PureGenerate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </PureGenerate>
+                <PureConsume Input="$(Generated)" />
+              </Target>
+            </Project>
+            """);
+        var lookup = new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith);
+        int executionCount = 0;
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureGenerate"] = HardenedTaskClassification.Pure,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            (target, task, taskLookup) =>
+            {
+                executionCount++;
+                if (task.Name == "PureGenerate")
+                {
+                    taskLookup.SetProperty(ProjectPropertyInstance.Create("Generated", "concrete"));
+                }
+            });
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics =
+            validator.Validate(project, lookup, ["Build"]);
+
+        diagnostics.ShouldBeEmpty();
+        executionCount.ShouldBe(2);
+    }
+
+    [Fact]
+    public void OnlyPureTasksExecuteDuringValidation()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build">
+                <Declared />
+                <Unaudited />
+                <Pure />
+              </Target>
+            </Project>
+            """);
+        List<string> executedTasks = [];
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Declared"] = HardenedTaskClassification.DeclaredIO,
+                ["Pure"] = HardenedTaskClassification.Pure,
+            },
+            (target, task, lookup) => executedTasks.Add(task.Name));
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
+
+        diagnostics.ShouldBeEmpty();
+        executedTasks.ShouldBe(["Pure"]);
+    }
+
+    [Fact]
+    public void PureTaskWithDeferredInputDoesNotExecuteDuringValidation()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a" />
+              </ItemGroup>
+              <Target Name="Build">
+                <Pure Input="@(Input)" />
+              </Target>
+            </Project>
+            """);
+        var lookup = new Lookup(project.ItemsToBuildWith, project.PropertiesToBuildWith);
+        lookup.EnableHardenedState().AddTaskOutputItems(
+            "Input",
+            ValueState.Deferred(new ValueOrigin("deferred input membership")));
+        int executionCount = 0;
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Pure"] = HardenedTaskClassification.Pure,
+            },
+            (target, task, taskLookup) => executionCount++);
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics =
+            validator.Validate(project, lookup, ["Build"]);
+
+        diagnostics.ShouldNotBeEmpty();
+        executionCount.ShouldBe(0);
+    }
+
+    [Fact]
     public void CollectTargetFrameworkForTelemetryValidatesWithoutSpecialCasing()
     {
         ValidateSuccess(

@@ -946,11 +946,13 @@ Likely locations:
 - `src/Build/BackEnd/Components/RequestBuilder/Lookup.cs`
 - `src/Build/BackEnd/Components/RequestBuilder/IntrinsicTask.cs`
 
-Pure-task execution during graph construction is deliberately not introduced
-by this roadmap. Validation may classify a Pure output as a value that would
-be static, but cases that require its concrete value to resolve target topology
-remain unsupported until their execution semantics are designed without
-creating a parallel workflow.
+Pure-task execution during graph construction reuses the existing
+`TaskBuilder` and `TaskExecutionHost` path after the invocation condition,
+batching, and parameters are static. The validator applies the concrete
+outputs to its existing `Lookup` state and continues partial evaluation from
+those values. Initial built-in classification is intentionally narrow;
+sidecar-bound classifications and reuse of graph-construction results by the
+later execution phase remain separate work.
 
 ## Milestone 4 - Declared-IO validation
 

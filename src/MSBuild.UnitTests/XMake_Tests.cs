@@ -2986,6 +2986,35 @@ $@"<Project>
             logContents.ShouldContain("NodeCount=1");
         }
 
+        [Fact]
+        public void HardenedGraphExecutesAssignTargetPathWithStaticInputs()
+        {
+            string projectContents = """
+                <Project>
+                  <ItemGroup>
+                    <Input Include="folder/file.txt" />
+                  </ItemGroup>
+                  <Target Name="Build">
+                    <AssignTargetPathWithProjectDirectory
+                        Files="@(Input)"
+                        RootFolder="$(MSBuildProjectDirectory)"
+                        ProjectDirectory="$(MSBuildProjectDirectory)">
+                      <Output TaskParameter="AssignedFiles" ItemName="Assigned" />
+                    </AssignTargetPathWithProjectDirectory>
+                    <ItemGroup>
+                      <Observed Include="@(Assigned->'%(TargetPath)')" />
+                    </ItemGroup>
+                    <Message Text="Assigned=@(Observed)" />
+                  </Target>
+                </Project>
+                """;
+
+            string logContents =
+                ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "--hardened-graph");
+
+            logContents.ShouldContain("Assigned=folder/file.txt");
+        }
+
         /// <summary>
         /// Regression test for https://github.com/dotnet/msbuild/issues/4631
         /// </summary>

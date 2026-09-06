@@ -76,6 +76,7 @@ internal sealed class HardenedTargetValidator
     ];
 
     private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
+    private readonly HardenedPureTaskExecutor? _pureTaskExecutor;
     private readonly List<InvalidProjectFileException> _diagnostics = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ValueState> _targetResults =
@@ -89,8 +90,11 @@ internal sealed class HardenedTargetValidator
     private string? _projectDirectory;
     private HardenedItemOperationPlan? _itemOperationPlan;
 
-    internal HardenedTargetValidator(IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications)
+    internal HardenedTargetValidator(
+        IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications,
+        HardenedPureTaskExecutor? pureTaskExecutor = null)
     {
+        _pureTaskExecutor = pureTaskExecutor;
         _taskClassifications = new Dictionary<string, HardenedTaskClassification>(
             taskClassifications.Count,
             MSBuildNameIgnoreCaseComparer.Default);
@@ -451,7 +455,7 @@ internal sealed class HardenedTargetValidator
                         ValidateTask(
                             project,
                             task,
-                            target.Name,
+                            target,
                             visitedTargets,
                             callTargetScope,
                             collectFailureStates));
@@ -617,7 +621,7 @@ internal sealed class HardenedTargetValidator
     private List<FailureState> ValidateTask(
         ProjectInstance project,
         ProjectTaskInstance task,
-        string targetName,
+        ProjectTargetInstance target,
         HashSet<string> visitedTargets,
         LegacyCallTargetScope? callTargetScope,
         bool collectFailureStates)
@@ -658,7 +662,7 @@ internal sealed class HardenedTargetValidator
                     ValidateTaskCore(
                         project,
                         task,
-                        targetName,
+                        target,
                         visitedTargets,
                         callTargetScope,
                         classification,
@@ -675,7 +679,7 @@ internal sealed class HardenedTargetValidator
                 ValidateTaskCore(
                     project,
                     task,
-                    targetName,
+                    target,
                     visitedTargets,
                     callTargetScope,
                     classification,
@@ -691,7 +695,7 @@ internal sealed class HardenedTargetValidator
     private TaskValidationResult ValidateTaskCore(
         ProjectInstance project,
         ProjectTaskInstance task,
-        string targetName,
+        ProjectTargetInstance target,
         HashSet<string> visitedTargets,
         LegacyCallTargetScope? callTargetScope,
         HardenedTaskClassification classification,
@@ -768,6 +772,16 @@ internal sealed class HardenedTargetValidator
                 callTargetScope ?? throw new InvalidOperationException("CallTarget scope was not captured."));
         }
 
+        HardenedPureTaskExecutor? pureTaskExecutor = _pureTaskExecutor;
+        bool pureTaskExecuted = false;
+        if (pureTaskExecutor is not null &&
+            classification == HardenedTaskClassification.Pure &&
+            taskControlState.IsStatic)
+        {
+            pureTaskExecutor(target, task, ValidationLookup);
+            pureTaskExecuted = true;
+        }
+
         foreach (ProjectTaskInstanceChild output in task.Outputs)
         {
             string outputTaskParameter = GetTaskParameter(output);
@@ -832,7 +846,7 @@ internal sealed class HardenedTargetValidator
                     break;
 
                 default:
-                    ReportUnsupported(output.Location, output.GetType().Name, $"target '{targetName}'");
+                    ReportUnsupported(output.Location, output.GetType().Name, $"target '{target.Name}'");
                     continue;
             }
 
@@ -859,6 +873,10 @@ internal sealed class HardenedTargetValidator
             {
                 outputState = intrinsicState.WithOrigin($"output '{outputTaskParameter}' of task '{task.Name}'");
             }
+            else if (pureTaskExecuted)
+            {
+                outputState = ValueState.Static;
+            }
             else
             {
                 outputState = ValueState.Deferred(origin);
@@ -867,9 +885,19 @@ internal sealed class HardenedTargetValidator
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
                     callTargetScope?.CallerAssignedProperties.Add(destination);
-                    Context.SetProperty(
-                        destination,
-                        HardenedValue<string>.NonStatic(outputState));
+                    if (pureTaskExecuted && outputState.IsStatic)
+                    {
+                        Context.SetConcreteProperty(
+                            destination,
+                            ValidationLookup.GetProperty(destination)?.EvaluatedValue ?? string.Empty);
+                    }
+                    else
+                    {
+                        Context.SetProperty(
+                            destination,
+                            HardenedValue<string>.NonStatic(outputState));
+                    }
+
                     break;
 
                 case ProjectTaskOutputItemInstance itemOutput:
@@ -879,16 +907,25 @@ internal sealed class HardenedTargetValidator
             }
         }
 
-        ValueState taskStatus = ValueState.Deferred(new ValueOrigin($"result of task '{task.Name}'"));
         callTargetScope?.CallerAssignedProperties.Add(ReservedPropertyNames.lastTaskResult);
-        Context.SetProperty(
-            ReservedPropertyNames.lastTaskResult,
-            HardenedValue<string>.NonStatic(taskStatus),
-            overwrite: true);
+        if (pureTaskExecuted)
+        {
+            Context.SetConcreteProperty(
+                ReservedPropertyNames.lastTaskResult,
+                ValidationLookup.GetProperty(ReservedPropertyNames.lastTaskResult)?.EvaluatedValue ?? "true");
+        }
+        else
+        {
+            ValueState taskStatus = ValueState.Deferred(new ValueOrigin($"result of task '{task.Name}'"));
+            Context.SetProperty(
+                ReservedPropertyNames.lastTaskResult,
+                HardenedValue<string>.NonStatic(taskStatus),
+                overwrite: true);
+        }
 
         return new TaskValidationResult(
             canStopOnFailure,
-            Executed: true,
+            Executed: !pureTaskExecuted,
             callTargetScope?.Clone());
     }
 
