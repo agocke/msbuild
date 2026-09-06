@@ -1213,10 +1213,15 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       </AppConfigWithTargetPath>
     </ItemGroup>
 
-    <FindAppConfigFile PrimaryList="@(None)" SecondaryList="@(Content)" TargetPath="$(TargetFileName).config" Condition="'$(AppConfig)'==''">
+    <FindAppConfigFileWithDeterministicSemantics
+        PrimaryList="@(None)"
+        SecondaryList="@(Content)"
+        TargetPath="$(TargetFileName).config"
+        HostOS="$(OS)"
+        Condition="'$(AppConfig)'==''">
       <Output TaskParameter="AppConfigFile" ItemName="AppConfigWithTargetPath"/>
       <Output TaskParameter="AppConfigFile" PropertyName="AppConfig"/>
-    </FindAppConfigFile>
+    </FindAppConfigFileWithDeterministicSemantics>
 
     <!-- Create the directories for intermediate and final build products, and any other arbitrary directories. -->
     <!-- We are going to continue on error here so that if the tree is read only we will still get intellisense -->

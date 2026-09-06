@@ -5,6 +5,7 @@ using System;
 using System.IO;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
+using Microsoft.Build.Utilities;
 
 #nullable disable
 
@@ -122,11 +123,11 @@ namespace Microsoft.Build.Tasks
         {
             try
             {
-                string filename = (matchWholeItemSpec ? item.ItemSpec : Path.GetFileName(item.ItemSpec));
+                string filename = matchWholeItemSpec ? item.ItemSpec : GetFileName(item.ItemSpec);
 
                 if (String.Equals(filename, appConfigFile, StringComparison.OrdinalIgnoreCase))
                 {
-                    AppConfigFile = item;
+                    AppConfigFile = CreateOutputItem(item);
 
                     // Originally the app.config was found in such a way that it's "OriginalItemSpec"
                     // metadata was cleared out. Although it doesn't really matter, for compatibility,
@@ -146,6 +147,47 @@ namespace Microsoft.Build.Tasks
                 Log.LogMessageFromResources(MessageImportance.Low, "FindInList.InvalidPath", item.ItemSpec, ex.Message);
             }
             return false;
+        }
+
+        private protected virtual string GetFileName(string itemSpec)
+        {
+            return Path.GetFileName(itemSpec);
+        }
+
+        private protected virtual ITaskItem CreateOutputItem(ITaskItem item)
+        {
+            return item;
+        }
+    }
+
+    /// <summary>
+    /// Finds the app.config file using explicit host-OS path semantics without mutating input items.
+    /// </summary>
+    [MSBuildMultiThreadableTask]
+    [MSBuildPureTask]
+    public sealed class FindAppConfigFileWithDeterministicSemantics : FindAppConfigFile
+    {
+        /// <summary>
+        /// The operating system hosting the local source filesystem.
+        /// </summary>
+        [Required]
+        public string HostOS { get; set; }
+
+        private protected override string GetFileName(string itemSpec)
+        {
+            int fileNameStart = itemSpec.LastIndexOf('/');
+            if (String.Equals(HostOS, "Windows_NT", StringComparison.OrdinalIgnoreCase))
+            {
+                fileNameStart = Math.Max(fileNameStart, itemSpec.LastIndexOf('\\'));
+            }
+
+            fileNameStart++;
+            return itemSpec.Substring(fileNameStart);
+        }
+
+        private protected override ITaskItem CreateOutputItem(ITaskItem item)
+        {
+            return new TaskItem(item);
         }
     }
 }
