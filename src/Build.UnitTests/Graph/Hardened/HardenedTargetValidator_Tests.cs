@@ -2232,6 +2232,78 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void IncludeWithDeferredMetadataAndDuplicateFilteringMarksMembershipNonStatic()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Payload>existing</Payload>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Input Include="a">
+                    <Payload>$(Generated)</Payload>
+                  </Input>
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        validator.Validate(project, "Build").ShouldBeEmpty();
+
+        Lookup lookup = validator.GetValidationLookupForTesting();
+        lookup.HardenedState.GetItemMembership("Input").IsStatic.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void IncludeWithKeepDuplicatesPreservesConcreteItemsAndDeferredMetadata()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Generated" />
+                </Generate>
+                <ItemGroup>
+                  <Input Include="a" KeepDuplicates="true">
+                    <Payload>$(Generated)</Payload>
+                  </Input>
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        validator.Validate(project, "Build").ShouldBeEmpty();
+
+        Lookup lookup = validator.GetValidationLookupForTesting();
+        ProjectItemInstance item = lookup.GetItems("Input").ShouldHaveSingleItem();
+        lookup.HardenedState.GetItemMembership("Input").ShouldBe(ValueState.Static);
+        lookup.HardenedState.GetItemMetadata(item, "Payload").Availability
+            .ShouldBe(ValueAvailability.Deferred);
+    }
+
+    [Fact]
     public void SupportsStaticItemOperationsAndMetadataFilters()
     {
         ValidateSuccess(
@@ -2264,6 +2336,68 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             {
                 ["Consume"] = HardenedTaskClassification.DeclaredIO,
             });
+    }
+
+    [Fact]
+    public void ConstructiveItemOperationsMatchOrdinaryBuild()
+    {
+        const string projectXml = """
+            <Project>
+              <PropertyGroup>
+                <OutputRoot>obj/</OutputRoot>
+              </PropertyGroup>
+              <ItemGroup>
+                <Source Include="a.cs">
+                  <Kind>keep</Kind>
+                  <Order>1</Order>
+                </Source>
+                <Source Include="b.cs">
+                  <Kind>drop</Kind>
+                  <Order>2</Order>
+                </Source>
+                <Source Include="c.cs">
+                  <Kind>keep</Kind>
+                  <Order>3</Order>
+                </Source>
+                <Source Include="d.cs">
+                  <Kind>keep</Kind>
+                  <Order>4</Order>
+                </Source>
+              </ItemGroup>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Selected Include="@(Source->'$(OutputRoot)%(Filename).out')"
+                            Condition="'%(Source.Kind)' == 'keep'"
+                            KeepDuplicates="true">
+                    <SourceOrder>%(Source.Order)</SourceOrder>
+                  </Selected>
+                  <Selected Remove="$(OutputRoot)a.out" />
+                  <Selected Condition="'%(Selected.SourceOrder)' == '3'">
+                    <State>updated</State>
+                  </Selected>
+                  <Final Include="@(Selected)" KeepDuplicates="true" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """;
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance ordinaryProject = BuildOrdinaryProject(
+            CreateProjectInstance(environment, projectXml));
+        ProjectInstance validationProject = CreateProjectInstance(environment, projectXml);
+        HardenedTargetValidator validator = new();
+
+        validator.Validate(validationProject, "Build").ShouldBeEmpty();
+
+        Lookup validationLookup = validator.GetValidationLookupForTesting();
+        DescribeItems(validationLookup.GetItems("Selected"))
+            .ShouldBe(DescribeItems(ordinaryProject.GetItems("Selected")));
+        DescribeItems(validationLookup.GetItems("Final"))
+            .ShouldBe(DescribeItems(ordinaryProject.GetItems("Final")));
+        DescribeItems(validationLookup.GetItems("Final")).ShouldBe(
+        [
+            "obj/c.out|3|updated",
+            "obj/d.out|4|",
+        ]);
     }
 
     [Theory]
@@ -2640,4 +2774,32 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
 
         return project.Project.CreateProjectInstance();
     }
+
+    private ProjectInstance BuildOrdinaryProject(ProjectInstance project)
+    {
+        using BuildManager buildManager = new();
+        BuildResult result = buildManager.Build(
+            new BuildParameters
+            {
+                EnableNodeReuse = false,
+                Loggers = [new MockLogger(_output)],
+                MaxNodeCount = 1,
+            },
+            new BuildRequestData(
+                project,
+                ["Build"],
+                hostServices: null,
+                BuildRequestDataFlags.ProvideProjectStateAfterBuild));
+
+        result.ShouldHaveSucceeded();
+        result.ProjectStateAfterBuild.ShouldNotBeNull();
+        return result.ProjectStateAfterBuild;
+    }
+
+    private static string[] DescribeItems(IEnumerable<ProjectItemInstance> items)
+        => [.. items.Select(
+            item =>
+                $"{item.EvaluatedInclude.Replace('\\', '/')}|" +
+                $"{item.GetMetadataValue("SourceOrder")}|" +
+                item.GetMetadataValue("State"))];
 }

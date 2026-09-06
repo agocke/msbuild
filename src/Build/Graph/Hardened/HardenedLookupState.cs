@@ -7,6 +7,7 @@ using Microsoft.Build.BackEnd;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Framework;
 
 #nullable enable
 
@@ -125,6 +126,11 @@ internal sealed class HardenedLookupState
         }
 
         ValueState state = itemList.Membership;
+        foreach (ItemState itemState in itemList.Items.Values)
+        {
+            state = ValueState.Combine(state, itemState.Identity);
+        }
+
         if (!includeMetadata)
         {
             return state;
@@ -138,11 +144,44 @@ internal sealed class HardenedLookupState
 
         foreach (ItemState itemState in itemList.Items.Values)
         {
-            state = ValueState.Combine(state, itemState.Identity);
+            state = ValueState.Combine(state, itemState.DefaultMetadata);
             foreach (ValueState metadataState in itemState.Metadata.Values)
             {
                 state = ValueState.Combine(state, metadataState);
             }
+        }
+
+        return state;
+    }
+
+    internal ValueState GetItemValue(ProjectItemInstance item, bool includeMetadata)
+    {
+        ItemListState? itemList = FindItemList(item.ItemType);
+        if (itemList is null)
+        {
+            return ValueState.Static;
+        }
+
+        ValueState state = ValueState.Combine(itemList.Membership, GetItemIdentity(item));
+        if (!includeMetadata ||
+            !itemList.Items.TryGetValue(item, out ItemState? itemState))
+        {
+            return state;
+        }
+
+        state = ValueState.Combine(state, itemState.DefaultMetadata);
+        if (!itemState.IgnoreListMetadata)
+        {
+            state = ValueState.Combine(state, itemList.DefaultMetadata);
+            foreach (ValueState metadataState in itemList.Metadata.Values)
+            {
+                state = ValueState.Combine(state, metadataState);
+            }
+        }
+
+        foreach (ValueState metadataState in itemState.Metadata.Values)
+        {
+            state = ValueState.Combine(state, metadataState);
         }
 
         return state;
@@ -181,6 +220,14 @@ internal sealed class HardenedLookupState
             metadataState = ValueState.Combine(metadataState, concreteState);
         }
 
+        if (ItemSpecModifiers.IsItemSpecModifier(metadataName))
+        {
+            foreach (ItemState itemState in itemList.Items.Values)
+            {
+                metadataState = ValueState.Combine(metadataState, itemState.Identity);
+            }
+        }
+
         return ValueState.Combine(itemList.Membership, metadataState);
     }
 
@@ -195,6 +242,11 @@ internal sealed class HardenedLookupState
         ValueState metadataState = MSBuildNameIgnoreCaseComparer.Default.Equals(metadataName, "Identity")
             ? GetItemIdentity(item)
             : GetItemMetadata(itemList, item, metadataName);
+
+        if (ItemSpecModifiers.IsItemSpecModifier(metadataName))
+        {
+            metadataState = ValueState.Combine(metadataState, GetItemIdentity(item));
+        }
 
         return ValueState.Combine(itemList.Membership, metadataState);
     }
@@ -236,7 +288,7 @@ internal sealed class HardenedLookupState
         }
         else if (itemState.IgnoreListMetadata)
         {
-            metadataState = ValueState.Static;
+            metadataState = itemState.DefaultMetadata;
         }
         else
         {
@@ -349,112 +401,6 @@ internal sealed class HardenedLookupState
         }
     }
 
-    internal void UpdateMetadata(
-        string itemType,
-        ICollection<ProjectItemInstance> items,
-        IReadOnlyDictionary<string, ValueState> assignedMetadata)
-    {
-        if (items.Count > 0)
-        {
-            foreach (ProjectItemInstance item in items)
-            {
-                ItemState itemState = GetOrCreateItemState(item);
-                foreach (KeyValuePair<string, ValueState> metadata in assignedMetadata)
-                {
-                    itemState.Metadata[metadata.Key] =
-                        metadata.Value.WithOrigin($"metadata '{metadata.Key}' on item '{itemType}'");
-                }
-            }
-
-            CurrentScopeState.MarkItemChanged(itemType);
-            return;
-        }
-
-        ItemListState itemList = GetOrCreateItemList(itemType);
-        CurrentScopeState.MarkItemListChanged(itemType);
-        foreach (KeyValuePair<string, ValueState> metadata in assignedMetadata)
-        {
-            MergeMetadata(
-                itemList,
-                metadata.Key,
-                metadata.Value.WithOrigin($"metadata '{metadata.Key}' on item '{itemType}'"));
-        }
-    }
-
-    internal void ApplyMetadataFilters(
-        string itemType,
-        ICollection<ProjectItemInstance> items,
-        string? keepMetadata,
-        string? removeMetadata)
-    {
-        bool hasKeepFilter = TryParseLiteralMetadataNames(keepMetadata, out HashSet<string>? metadataToKeep);
-        bool hasRemoveFilter = TryParseLiteralMetadataNames(removeMetadata, out HashSet<string>? metadataToRemove);
-        if (items.Count > 0)
-        {
-            foreach (ProjectItemInstance item in items)
-            {
-                ItemState itemState = GetOrCreateItemState(item);
-                if (hasKeepFilter)
-                {
-                    var keptMetadata = new Dictionary<string, ValueState>(
-                        MSBuildNameIgnoreCaseComparer.Default);
-                    foreach (string metadataName in metadataToKeep!)
-                    {
-                        keptMetadata[metadataName] = GetItemMetadata(item, metadataName);
-                    }
-
-                    itemState.IgnoreListMetadata = true;
-                    itemState.Metadata.Clear();
-                    foreach (KeyValuePair<string, ValueState> metadata in keptMetadata)
-                    {
-                        itemState.Metadata.Add(metadata.Key, metadata.Value);
-                    }
-                }
-
-                if (hasRemoveFilter)
-                {
-                    foreach (string metadataName in metadataToRemove!)
-                    {
-                        itemState.Metadata[metadataName] = ValueState.Static;
-                    }
-                }
-            }
-
-            CurrentScopeState.MarkItemChanged(itemType);
-            return;
-        }
-
-        ItemListState itemList = GetOrCreateItemList(itemType);
-        CurrentScopeState.MarkItemListChanged(itemType);
-
-        if (hasKeepFilter)
-        {
-            List<string> keysToRemove = [];
-            foreach (string metadataName in itemList.Metadata.Keys)
-            {
-                if (!metadataToKeep!.Contains(metadataName))
-                {
-                    keysToRemove.Add(metadataName);
-                }
-            }
-
-            foreach (string metadataName in keysToRemove)
-            {
-                itemList.Metadata.Remove(metadataName);
-            }
-
-            itemList.DefaultMetadata = ValueState.Static;
-        }
-
-        if (hasRemoveFilter)
-        {
-            foreach (string metadataName in metadataToRemove!)
-            {
-                itemList.Metadata.Remove(metadataName);
-            }
-        }
-    }
-
     internal void AddTaskOutputItems(string itemType, ValueState outputState)
     {
         ItemListState itemList = GetOrCreateItemList(itemType);
@@ -474,6 +420,25 @@ internal sealed class HardenedLookupState
 
         itemList.Membership = blocked;
         itemList.DefaultMetadata = blocked;
+    }
+
+    internal void SetItemMembershipNonStatic(
+        string itemType,
+        ValueState cause,
+        string description)
+    {
+        if (cause.IsStatic)
+        {
+            throw new ArgumentException(
+                "A non-static item membership requires a blocked or deferred cause.",
+                nameof(cause));
+        }
+
+        ItemListState itemList = GetOrCreateItemList(itemType);
+        CurrentScopeState.MarkItemListChanged(itemType);
+        ValueState state = cause.WithOrigin(description);
+        itemList.Membership = state;
+        itemList.DefaultMetadata = ValueState.Combine(itemList.DefaultMetadata, state);
     }
 
     internal void BlockMetadata(string itemType, string metadataName, ValueState cause, string description)
@@ -546,6 +511,50 @@ internal sealed class HardenedLookupState
         CurrentScopeState.MarkItemChanged(itemType);
     }
 
+    internal ValueState GetIncludedItemValue(
+        string itemType,
+        ProjectItemInstance? sourceItem,
+        IReadOnlyDictionary<string, HardenedValue<string>> assignedMetadata,
+        ISet<string>? keepMetadata,
+        ISet<string>? removeMetadata,
+        string description)
+        => GetItemStateValue(
+            CreateIncludedItemState(
+                itemType,
+                sourceItem,
+                assignedMetadata,
+                keepMetadata,
+                removeMetadata,
+                description));
+
+    internal void ApplyIncludedItems(
+        string itemType,
+        ICollection<ProjectItemInstance> items,
+        IReadOnlyDictionary<ProjectItemInstance, ProjectItemInstance> itemSources,
+        IReadOnlyDictionary<string, HardenedValue<string>> assignedMetadata,
+        ISet<string>? keepMetadata,
+        ISet<string>? removeMetadata,
+        string description)
+    {
+        foreach (ProjectItemInstance item in items)
+        {
+            itemSources.TryGetValue(item, out ProjectItemInstance? sourceItem);
+            GetOrCreateItemList(item.ItemType).Items[item] =
+                CreateIncludedItemState(
+                    itemType,
+                    sourceItem,
+                    assignedMetadata,
+                    keepMetadata,
+                    removeMetadata,
+                    description);
+        }
+
+        if (items.Count > 0)
+        {
+            CurrentScopeState.MarkItemChanged(itemType);
+        }
+    }
+
     internal void RemoveItems(
         ICollection<ProjectItemInstance> items,
         Func<ProjectItemInstance, ProjectItemInstance> getSourceItem)
@@ -570,8 +579,23 @@ internal sealed class HardenedLookupState
             ItemState itemState = GetOrCreateItemState(item);
             if (metadataChanges.KeepOnlySpecified)
             {
+                var keptMetadata = new Dictionary<string, ValueState>(
+                    MSBuildNameIgnoreCaseComparer.Default);
+                foreach (KeyValuePair<string, Lookup.MetadataModification> change in metadataChanges.ExplicitModifications)
+                {
+                    if (change.Value.KeepValue)
+                    {
+                        keptMetadata[change.Key] = GetItemMetadata(item, change.Key);
+                    }
+                }
+
                 itemState.IgnoreListMetadata = true;
+                itemState.DefaultMetadata = ValueState.Static;
                 itemState.Metadata.Clear();
+                foreach (KeyValuePair<string, ValueState> metadata in keptMetadata)
+                {
+                    itemState.Metadata.Add(metadata.Key, metadata.Value);
+                }
             }
 
             foreach (KeyValuePair<string, Lookup.MetadataModification> change in metadataChanges.ExplicitModifications)
@@ -585,6 +609,88 @@ internal sealed class HardenedLookupState
             CurrentScopeState.MarkItemChanged(item.ItemType);
             CurrentScopeState.MapPopulatedItem(item.ItemType, item, getSourceItem(item));
         }
+    }
+
+    private ItemState CreateIncludedItemState(
+        string itemType,
+        ProjectItemInstance? sourceItem,
+        IReadOnlyDictionary<string, HardenedValue<string>> assignedMetadata,
+        ISet<string>? keepMetadata,
+        ISet<string>? removeMetadata,
+        string description)
+    {
+        var includedState = new ItemState { IgnoreListMetadata = true };
+        if (sourceItem is not null)
+        {
+            ItemListState? sourceList = FindItemList(sourceItem.ItemType);
+            includedState.Identity = GetItemIdentity(sourceItem).WithOrigin(description);
+            if (sourceList is not null)
+            {
+                sourceList.Items.TryGetValue(sourceItem, out ItemState? sourceState);
+                if (keepMetadata is null &&
+                    sourceState is not null &&
+                    !sourceState.IgnoreListMetadata)
+                {
+                    includedState.DefaultMetadata =
+                        sourceList.DefaultMetadata.WithOrigin(description);
+                }
+
+                if (sourceState is null || !sourceState.IgnoreListMetadata)
+                {
+                    foreach (string metadataName in sourceList.Metadata.Keys)
+                    {
+                        CopyMetadataState(metadataName);
+                    }
+                }
+
+                if (sourceState is not null)
+                {
+                    if (keepMetadata is null)
+                    {
+                        includedState.DefaultMetadata = ValueState.Combine(
+                            includedState.DefaultMetadata,
+                            sourceState.DefaultMetadata.WithOrigin(description));
+                    }
+
+                    foreach (string metadataName in sourceState.Metadata.Keys)
+                    {
+                        CopyMetadataState(metadataName);
+                    }
+                }
+            }
+        }
+
+        foreach (KeyValuePair<string, HardenedValue<string>> metadata in assignedMetadata)
+        {
+            includedState.Metadata[metadata.Key] =
+                metadata.Value.State.WithOrigin(
+                    $"metadata '{metadata.Key}' on item '{itemType}'");
+        }
+
+        return includedState;
+
+        void CopyMetadataState(string metadataName)
+        {
+            if ((keepMetadata is not null && !keepMetadata.Contains(metadataName)) ||
+                (removeMetadata is not null && removeMetadata.Contains(metadataName)))
+            {
+                return;
+            }
+
+            includedState.Metadata[metadataName] =
+                GetItemMetadata(sourceItem!, metadataName).WithOrigin(description);
+        }
+    }
+
+    private static ValueState GetItemStateValue(ItemState itemState)
+    {
+        ValueState state = ValueState.Combine(itemState.Identity, itemState.DefaultMetadata);
+        foreach (ValueState metadataState in itemState.Metadata.Values)
+        {
+            state = ValueState.Combine(state, metadataState);
+        }
+
+        return state;
     }
 
     private void SetPropertyValue(
@@ -1064,6 +1170,7 @@ internal sealed class HardenedLookupState
         internal ItemState(ItemState other)
         {
             Identity = other.Identity;
+            DefaultMetadata = other.DefaultMetadata;
             IgnoreListMetadata = other.IgnoreListMetadata;
             foreach (KeyValuePair<string, ValueState> metadata in other.Metadata)
             {
@@ -1072,6 +1179,8 @@ internal sealed class HardenedLookupState
         }
 
         internal ValueState Identity { get; set; } = ValueState.Static;
+
+        internal ValueState DefaultMetadata { get; set; } = ValueState.Static;
 
         internal bool IgnoreListMetadata { get; set; }
 
@@ -1082,7 +1191,7 @@ internal sealed class HardenedLookupState
         {
             get
             {
-                if (!Identity.IsStatic || IgnoreListMetadata)
+                if (!Identity.IsStatic || !DefaultMetadata.IsStatic || IgnoreListMetadata)
                 {
                     return false;
                 }

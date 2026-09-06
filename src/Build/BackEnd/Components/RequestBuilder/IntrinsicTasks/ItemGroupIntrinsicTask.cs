@@ -8,6 +8,7 @@ using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.Collections;
+using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
@@ -167,7 +168,13 @@ namespace Microsoft.Build.BackEnd
             bucket.Expander.Metadata = metadataTable;
 
             // Second, expand the item include and exclude, and filter existing metadata as appropriate.
-            List<ProjectItemInstance> itemsToAdd = ExpandItemIntoItems(child, bucket.Expander, keepMetadata, removeMetadata, loggingContext);
+            List<ProjectItemInstance> itemsToAdd = ExpandItemIntoItems(
+                Project,
+                child,
+                bucket.Expander,
+                keepMetadata,
+                removeMetadata,
+                loggingContext);
 
             // Third, expand the metadata.
             foreach (ProjectItemGroupTaskMetadataInstance metadataInstance in child.Metadata)
@@ -389,30 +396,33 @@ namespace Microsoft.Build.BackEnd
         /// <summary>
         /// Takes an item specification, evaluates it and expands it into a list of items
         /// </summary>
-        /// <param name="originalItem">The original item data</param>
-        /// <param name="expander">The expander to use.</param>
-        /// <param name="keepMetadata">An <see cref="ISet{String}"/> of metadata names to keep.</param>
-        /// <param name="removeMetadata">An <see cref="ISet{String}"/> of metadata names to remove.</param>
-        /// <param name="loggingContext">Context for logging</param>
         /// <remarks>
         /// This code is very close to that which exists in the Evaluator.EvaluateItemXml method.  However, because
         /// it invokes type constructors, and those constructors take arguments of fundamentally different types, it has not
         /// been refactored.
         /// </remarks>
         /// <returns>A list of items.</returns>
-        private List<ProjectItemInstance> ExpandItemIntoItems(
+        internal static List<ProjectItemInstance> ExpandItemIntoItems(
+            ProjectInstance project,
             ProjectItemGroupTaskItemInstance originalItem,
             Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
             ISet<string> keepMetadata,
             ISet<string> removeMetadata,
-            LoggingContext loggingContext = null)
+            LoggingContext loggingContext = null,
+            IDictionary<ProjectItemInstance, ProjectItemInstance> itemSources = null)
         {
             // todo this is duplicated logic with the item computation logic from evaluation (in LazyIncludeOperation.SelectItems)
             ProjectErrorUtilities.VerifyThrowInvalidProject(!(keepMetadata != null && removeMetadata != null), originalItem.KeepMetadataLocation, "KeepAndRemoveMetadataMutuallyExclusive");
             List<ProjectItemInstance> items = new List<ProjectItemInstance>();
 
             // Expand properties and metadata in Include
-            string evaluatedInclude = expander.ExpandIntoStringLeaveEscaped(originalItem.Include, ExpanderOptions.ExpandPropertiesAndMetadata, originalItem.IncludeLocation);
+            ExpanderOptions includeOptions = expander.Metadata is null
+                ? ExpanderOptions.ExpandProperties
+                : ExpanderOptions.ExpandPropertiesAndMetadata;
+            string evaluatedInclude = expander.ExpandIntoStringLeaveEscaped(
+                originalItem.Include,
+                includeOptions,
+                originalItem.IncludeLocation);
 
             if (evaluatedInclude.Length == 0)
             {
@@ -423,7 +433,13 @@ namespace Microsoft.Build.BackEnd
             var excludes = ImmutableList<string>.Empty.ToBuilder();
             if (originalItem.Exclude.Length > 0)
             {
-                string evaluatedExclude = expander.ExpandIntoStringLeaveEscaped(originalItem.Exclude, ExpanderOptions.ExpandAll, originalItem.ExcludeLocation);
+                ExpanderOptions excludeOptions = expander.Metadata is null
+                    ? ExpanderOptions.ExpandPropertiesAndItems
+                    : ExpanderOptions.ExpandAll;
+                string evaluatedExclude = expander.ExpandIntoStringLeaveEscaped(
+                    originalItem.Exclude,
+                    excludeOptions,
+                    originalItem.ExcludeLocation);
 
                 if (evaluatedExclude.Length > 0)
                 {
@@ -438,7 +454,12 @@ namespace Microsoft.Build.BackEnd
 
             // Split Include on any semicolons, and take each split in turn
             var includeSplits = ExpressionShredder.SplitSemiColonSeparatedList(evaluatedInclude);
-            ProjectItemInstanceFactory itemFactory = new ProjectItemInstanceFactory(Project, originalItem.ItemType);
+            IItemFactory<ProjectItemInstance, ProjectItemInstance> itemFactory =
+                new ProjectItemInstanceFactory(project, originalItem.ItemType);
+            if (itemSources != null)
+            {
+                itemFactory = new SourceTrackingItemFactory(itemFactory, itemSources);
+            }
 
             // EngineFileUtilities.GetFileListEscaped api invocation evaluates excludes by default.
             // If the code process any expression like "@(x)", we need to handle excludes explicitly using EvaluateExcludePaths().
@@ -467,10 +488,10 @@ namespace Microsoft.Build.BackEnd
 
                     // Pass the non wildcard expanded excludes here to fix https://github.com/dotnet/msbuild/issues/2621
                     string[] includeSplitFiles = EngineFileUtilities.GetFileListEscaped(
-                        Project.Directory,
+                        project.Directory,
                         includeSplit,
                         excludes,
-                        loggingMechanism: LoggingContext,
+                        loggingMechanism: loggingContext,
                         includeLocation: originalItem.IncludeLocation,
                         excludeLocation: originalItem.ExcludeLocation,
                         disableExcludeDriveEnumerationWarning: true);
@@ -478,7 +499,7 @@ namespace Microsoft.Build.BackEnd
                     foreach (string includeSplitFile in includeSplitFiles)
                     {
                         items.Add(new ProjectItemInstance(
-                            Project,
+                            project,
                             originalItem.ItemType,
                             includeSplitFile,
                             includeSplit /* before wildcard expansion */,
@@ -493,8 +514,11 @@ namespace Microsoft.Build.BackEnd
             // There is a need to Evaluate Exclude part explicitly because of of the expressions had the form "@(X)".
             if (anyTransformExprProceeded)
             {
-                // Calculate all Exclude
-                var excludesUnescapedForComparison = EvaluateExcludePaths(excludes, originalItem.ExcludeLocation);
+                var excludesUnescapedForComparison = EvaluateExcludePaths(
+                    project.Directory,
+                    excludes,
+                    originalItem.ExcludeLocation,
+                    loggingContext);
 
                 // Subtract any Exclude
                 items.RemoveAll(i => excludesUnescapedForComparison.Contains(((IItem)i).EvaluatedInclude.NormalizeForPathComparison()));
@@ -564,18 +588,20 @@ namespace Microsoft.Build.BackEnd
         /// Returns a list of all items specified in Exclude parameter.
         /// If no items match, returns empty list.
         /// </summary>
-        /// <param name="excludes">The items to match</param>
-        /// <param name="excludeLocation">The specification to match against the items.</param>
         /// <returns>A list of matching items</returns>
-        private HashSet<string> EvaluateExcludePaths(IReadOnlyList<string> excludes, ElementLocation excludeLocation)
+        private static HashSet<string> EvaluateExcludePaths(
+            string projectDirectory,
+            IReadOnlyList<string> excludes,
+            ElementLocation excludeLocation,
+            LoggingContext loggingContext)
         {
             HashSet<string> excludesUnescapedForComparison = new HashSet<string>(excludes.Count, StringComparer.OrdinalIgnoreCase);
             foreach (string excludeSplit in excludes)
             {
                 string[] excludeSplitFiles = EngineFileUtilities.GetFileListUnescaped(
-                    Project.Directory,
+                    projectDirectory,
                     excludeSplit,
-                    loggingMechanism: LoggingContext,
+                    loggingMechanism: loggingContext,
                     excludeLocation: excludeLocation);
                 foreach (string excludeSplitFile in excludeSplitFiles)
                 {
@@ -584,6 +610,56 @@ namespace Microsoft.Build.BackEnd
             }
 
             return excludesUnescapedForComparison;
+        }
+
+        private sealed class SourceTrackingItemFactory(
+            IItemFactory<ProjectItemInstance, ProjectItemInstance> inner,
+            IDictionary<ProjectItemInstance, ProjectItemInstance> itemSources)
+            : IItemFactory<ProjectItemInstance, ProjectItemInstance>
+        {
+            public string ItemType
+            {
+                get => inner.ItemType;
+                set => inner.ItemType = value;
+            }
+
+            public ProjectItemElement ItemElement
+            {
+                set => inner.ItemElement = value;
+            }
+
+            public ProjectItemInstance CreateItem(string include, string definingProject)
+                => inner.CreateItem(include, definingProject);
+
+            public ProjectItemInstance CreateItem(
+                ProjectItemInstance source,
+                string definingProject)
+                => Track(inner.CreateItem(source, definingProject), source);
+
+            public ProjectItemInstance CreateItem(
+                string include,
+                ProjectItemInstance source,
+                string definingProject)
+                => Track(inner.CreateItem(include, source, definingProject), source);
+
+            public ProjectItemInstance CreateItem(
+                string include,
+                string includeBeforeWildcardExpansion,
+                string definingProject)
+                => inner.CreateItem(include, includeBeforeWildcardExpansion, definingProject);
+
+            public void SetMetadata(
+                IEnumerable<KeyValuePair<ProjectMetadataElement, string>> metadata,
+                IEnumerable<ProjectItemInstance> destinationItems)
+                => inner.SetMetadata(metadata, destinationItems);
+
+            private ProjectItemInstance Track(
+                ProjectItemInstance item,
+                ProjectItemInstance source)
+            {
+                itemSources[item] = source;
+                return item;
+            }
         }
 
         /// <summary>
@@ -615,7 +691,13 @@ namespace Microsoft.Build.BackEnd
             HashSet<string> specificationsToFind = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             // Split by semicolons
-            var specificationPieces = expander.ExpandIntoStringListLeaveEscaped(specification, ExpanderOptions.ExpandAll, specificationLocation);
+            ExpanderOptions options = expander.Metadata is null
+                ? ExpanderOptions.ExpandPropertiesAndItems
+                : ExpanderOptions.ExpandAll;
+            var specificationPieces = expander.ExpandIntoStringListLeaveEscaped(
+                specification,
+                options,
+                specificationLocation);
 
             foreach (string piece in specificationPieces)
             {
