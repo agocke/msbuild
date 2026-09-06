@@ -184,6 +184,7 @@ namespace Microsoft.Build.Tasks
     /// Assigns TargetPath metadata using an explicitly supplied project directory.
     /// </summary>
     [MSBuildMultiThreadableTask]
+    [MSBuildPureTask]
     public sealed class AssignTargetPathWithProjectDirectory : AssignTargetPath
     {
         /// <summary>

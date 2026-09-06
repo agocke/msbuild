@@ -1248,7 +1248,12 @@ namespace Microsoft.Build.BackEnd
                     try
                     {
                         HardenedTargetValidator validator = new(
-                            HardenedTaskClassifications.BuiltIn,
+                            (task, taskIdentityParameters) =>
+                                HardenedTaskClassificationResolver.Classify(
+                                    project,
+                                    _projectLoggingContext,
+                                    task,
+                                    taskIdentityParameters),
                             (target, task, lookup) =>
                                 ExecuteHardenedPureTask(pureTaskBuilder, target, task, lookup));
                         diagnostics = validator.Validate(

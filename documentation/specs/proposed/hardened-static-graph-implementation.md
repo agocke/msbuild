@@ -130,8 +130,9 @@ The first slice proves the central validator: invalid target constructs and
 invalid static/deferred data flow are rejected with actionable errors.
 
 It is invoked over an already evaluated `ProjectInstance` and the requested
-targets. Task classifications are supplied directly until sidecar discovery
-is implemented.
+targets. Production Pure classification is read from the exact task type
+selected by `TaskRegistry`; focused validator tests may inject classifications
+directly.
 
 ### Supported validation
 
@@ -535,7 +536,7 @@ stalls.
    manifests for SDK, NuGet, SourceLink, and analyzer tasks.
 3. Classify high-fan-out tasks first, in this order:
    - pure item and property transforms such as `AssignTargetPath`,
-     `AssignCulture`, `AssignLinkMetadata`, and
+     `AssignCultureWithDeterministicSemantics`, `AssignLinkMetadata`, and
      `AssignProjectConfiguration`;
    - the residual framework and package projections after Workstream 4 has
      replaced assets-file ingestion;
@@ -891,11 +892,18 @@ validation is off.
 
 ### Goal
 
-Resolve trusted sidecar annotations after MSBuild selects a task assembly.
+Resolve trusted task annotations after MSBuild selects a task implementation.
+Class attributes are the authoring surface; assembly-hash-bound sidecars are
+the packaged form used to avoid loading task code.
 
 ### Work
 
+- Define non-inherited task attributes and inspect them through metadata-only
+  loading without constructing attributes, factories, or tasks.
+- Honor task overrides and runtime/architecture identity when selecting the
+  annotated implementation.
 - Define sidecar discovery, schema, and versioning.
+- Generate sidecars from task attributes during build or packaging.
 - Bind the annotation to the selected task assembly content hash.
 - Record the annotation manifest hash.
 - Classify each invoked task as Pure, Declared-IO, or Unaudited.
@@ -950,9 +958,9 @@ Pure-task execution during graph construction reuses the existing
 `TaskBuilder` and `TaskExecutionHost` path after the invocation condition,
 batching, and parameters are static. The validator applies the concrete
 outputs to its existing `Lookup` state and continues partial evaluation from
-those values. Initial built-in classification is intentionally narrow;
-sidecar-bound classifications and reuse of graph-construction results by the
-later execution phase remain separate work.
+those values. Initial `[MSBuildPureTask]` use is intentionally narrow;
+sidecar emission and reuse of graph-construction results by the later
+execution phase remain separate work.
 
 ## Milestone 4 - Declared-IO validation
 

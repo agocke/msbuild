@@ -2168,6 +2168,26 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void PureTaskIdentityCanExpandPropertiesWithoutMetadata()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <PropertyGroup>
+                <Runtime>CurrentRuntime</Runtime>
+              </PropertyGroup>
+              <Target Name="Build">
+                <Pure MSBuildRuntime="$(Runtime)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Pure"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
     public void PureTaskWithDeferredInputDoesNotExecuteDuringValidation()
     {
         using TestEnvironment environment = TestEnvironment.Create(_output);

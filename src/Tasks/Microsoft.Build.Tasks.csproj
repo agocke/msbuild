@@ -266,6 +266,7 @@
     <Compile Include="AssignCulture.cs" />
     <Compile Include="Culture.cs" />
     <Compile Include="CultureInfoCache.cs" />
+    <Compile Include="DeterministicCultureInfoCache.cs" />
     <Compile Include="WriteCodeFragment.cs" />
     <Compile Include="XmlPeek.cs" />
     <Compile Include="XmlPoke.cs" />

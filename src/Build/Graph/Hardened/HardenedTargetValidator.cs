@@ -76,6 +76,7 @@ internal sealed class HardenedTargetValidator
     ];
 
     private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
+    private readonly HardenedTaskClassifier? _taskClassifier;
     private readonly HardenedPureTaskExecutor? _pureTaskExecutor;
     private readonly List<InvalidProjectFileException> _diagnostics = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
@@ -103,6 +104,14 @@ internal sealed class HardenedTargetValidator
         {
             _taskClassifications.Add(classification.Key, classification.Value);
         }
+    }
+
+    internal HardenedTargetValidator(
+        HardenedTaskClassifier taskClassifier,
+        HardenedPureTaskExecutor? pureTaskExecutor = null)
+        : this(new Dictionary<string, HardenedTaskClassification>(), pureTaskExecutor)
+    {
+        _taskClassifier = taskClassifier;
     }
 
     internal HardenedTargetValidator()
@@ -626,11 +635,6 @@ internal sealed class HardenedTargetValidator
         LegacyCallTargetScope? callTargetScope,
         bool collectFailureStates)
     {
-        if (!_taskClassifications.TryGetValue(task.Name, out HardenedTaskClassification classification))
-        {
-            classification = HardenedTaskClassification.Unaudited;
-        }
-
         List<string> batchableExpressions = [];
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
@@ -646,6 +650,8 @@ internal sealed class HardenedTargetValidator
 
         AddIfNotEmpty(batchableExpressions, task.Condition);
         AddIfNotEmpty(batchableExpressions, task.ContinueOnError);
+        AddIfNotEmpty(batchableExpressions, task.MSBuildRuntime);
+        AddIfNotEmpty(batchableExpressions, task.MSBuildArchitecture);
 
         BatchingValidationResult batchingResult = ValidateBatching(
             task,
@@ -665,7 +671,6 @@ internal sealed class HardenedTargetValidator
                         target,
                         visitedTargets,
                         callTargetScope,
-                        classification,
                         batchingState));
             return [];
         }
@@ -682,7 +687,6 @@ internal sealed class HardenedTargetValidator
                     target,
                     visitedTargets,
                     callTargetScope,
-                    classification,
                     batchingState));
 
         return MaterializeTaskFailureStates(
@@ -698,7 +702,6 @@ internal sealed class HardenedTargetValidator
         ProjectTargetInstance target,
         HashSet<string> visitedTargets,
         LegacyCallTargetScope? callTargetScope,
-        HardenedTaskClassification classification,
         ValueState taskBatchingState)
     {
         ConditionValidationResult taskConditionResult = ValidateCondition(
@@ -726,9 +729,53 @@ internal sealed class HardenedTargetValidator
             metadataBatchingValidated: true);
         bool canStopOnFailure = CanTaskStopOnFailure(task, continueOnErrorResult);
 
+        ExpressionValidationResult runtimeResult = ValidateExpression(
+            task,
+            task.MSBuildRuntime,
+            task.MSBuildRuntimeLocation ?? task.Location,
+            $"MSBuildRuntime of task '{task.Name}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+        ExpressionValidationResult architectureResult = ValidateExpression(
+            task,
+            task.MSBuildArchitecture,
+            task.MSBuildArchitectureLocation ?? task.Location,
+            $"MSBuildArchitecture of task '{task.Name}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true);
+
         ValueState taskControlState = ValueState.Combine(
             taskBatchingState,
-            ValueState.Combine(taskConditionResult.State, continueOnErrorResult.State));
+            ValueState.Combine(
+                taskConditionResult.State,
+                ValueState.Combine(
+                    continueOnErrorResult.State,
+                    ValueState.Combine(runtimeResult.State, architectureResult.State))));
+
+        HardenedTaskClassification classification = HardenedTaskClassification.Unaudited;
+        if (runtimeResult.State.IsStatic && architectureResult.State.IsStatic)
+        {
+            TaskHostParameters taskIdentityParameters =
+                TaskBuilder.GatherTaskIdentityParameters(
+                    task,
+                    ConcreteExpander,
+                    _activeMetadata is null
+                        ? ExpanderOptions.ExpandPropertiesAndItems
+                        : ExpanderOptions.ExpandAll);
+            if (_taskClassifier is not null)
+            {
+                classification = _taskClassifier(task, taskIdentityParameters);
+            }
+            else
+            {
+                if (!_taskClassifications.TryGetValue(task.Name, out classification))
+                {
+                    classification = HardenedTaskClassification.Unaudited;
+                }
+            }
+        }
 
         bool isCallTarget = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget");
         bool isMSBuild = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild");

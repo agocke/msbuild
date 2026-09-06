@@ -5,6 +5,7 @@ using System;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Tasks;
 using Microsoft.Build.Utilities;
+using Shouldly;
 using Xunit;
 
 #nullable disable
@@ -13,6 +14,19 @@ namespace Microsoft.Build.UnitTests
 {
     public sealed class AssignCulture_Tests
     {
+        [Fact]
+        public void OnlyDeterministicVariantIsMarkedPure()
+        {
+            Attribute.IsDefined(
+                typeof(AssignCultureWithDeterministicSemantics),
+                typeof(MSBuildPureTaskAttribute),
+                inherit: false).ShouldBeTrue();
+            Attribute.IsDefined(
+                typeof(AssignCulture),
+                typeof(MSBuildPureTaskAttribute),
+                inherit: false).ShouldBeFalse();
+        }
+
         /// <summary>
         /// Tests the basic functionality.
         /// </summary>
@@ -300,6 +314,44 @@ namespace Microsoft.Build.UnitTests
             Assert.Equal("fr", t.AssignedFiles[0].GetMetadata("Culture"));
             Assert.Equal("MyResource.fr.resx", t.AssignedFiles[0].ItemSpec);
             Assert.Equal("MyResource.resx", t.CultureNeutralAssignedFiles[0].ItemSpec);
+        }
+
+        [Theory]
+        [InlineData("fr")]
+        [InlineData("qps-Ploc")]
+        [InlineData("sh-BA")]
+        [InlineData("shi-MA")]
+        [InlineData("zh-MO")]
+        [InlineData("zh-TW")]
+        public void DeterministicVariantRecognizesFixedCultures(string culture)
+        {
+            AssignCultureWithDeterministicSemantics task = new()
+            {
+                BuildEngine = new MockEngine(),
+                Files = [new TaskItem($"MyResource.{culture}.resx")],
+            };
+
+            task.Execute().ShouldBeTrue();
+            task.AssignedFiles.ShouldHaveSingleItem()
+                .GetMetadata("Culture").ShouldBe(culture);
+            task.CultureNeutralAssignedFiles.ShouldHaveSingleItem()
+                .ItemSpec.ShouldBe("MyResource.resx");
+        }
+
+        [Fact]
+        public void DeterministicVariantRejectsUnknownCulture()
+        {
+            AssignCultureWithDeterministicSemantics task = new()
+            {
+                BuildEngine = new MockEngine(),
+                Files = [new TaskItem("MyResource.notalocale.resx")],
+            };
+
+            task.Execute().ShouldBeTrue();
+            task.AssignedFiles.ShouldHaveSingleItem()
+                .GetMetadata("Culture").ShouldBeEmpty();
+            task.CultureNeutralAssignedFiles.ShouldHaveSingleItem()
+                .ItemSpec.ShouldBe("MyResource.notalocale.resx");
         }
     }
 }

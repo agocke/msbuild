@@ -40,6 +40,13 @@ namespace Microsoft.Build.UnitTests
                 typeof(X).GetMember("TestValue", BindingFlags.NonPublic | BindingFlags.Static)[0].GetCustomAttribute<RequiredAttribute>();
             attribute.ShouldNotBeNull();
         }
+
+        [Fact]
+        public void MSBuildPureTaskAttributeIsNotInherited()
+        {
+            typeof(PureTask).GetCustomAttribute<MSBuildPureTaskAttribute>().ShouldNotBeNull();
+            typeof(DerivedTask).GetCustomAttribute<MSBuildPureTaskAttribute>().ShouldBeNull();
+        }
     }
 
     /// <summary>
@@ -66,4 +73,9 @@ namespace Microsoft.Build.UnitTests
             }
         }
     }
+
+    [MSBuildPureTask]
+    internal class PureTask;
+
+    internal sealed class DerivedTask : PureTask;
 }

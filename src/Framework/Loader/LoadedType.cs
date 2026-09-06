@@ -48,6 +48,7 @@ namespace Microsoft.Build.Shared
             Assembly = assemblyLoadInfo;
 
             HasSTAThreadAttribute = CheckForHardcodedSTARequirement();
+            HasMSBuildPureTaskAttribute = CheckForMSBuildPureTaskAttribute();
             LoadedAssemblyName = loadedAssembly.GetName();
             LoadedViaMetadataLoadContext = loadedViaMetadataLoadContext;
             Architecture = architecture;
@@ -276,6 +277,11 @@ namespace Microsoft.Build.Shared
         public bool LoadedViaMetadataLoadContext { get; }
 
         /// <summary>
+        /// Gets whether the exact task type is marked with MSBuildPureTaskAttribute.
+        /// </summary>
+        internal bool HasMSBuildPureTaskAttribute { get; }
+
+        /// <summary>
         /// Determines if the task has a hardcoded requirement for STA thread usage.
         /// </summary>
         private bool CheckForHardcodedSTARequirement()
@@ -415,5 +421,27 @@ namespace Microsoft.Build.Shared
         internal AssemblyLoadInfo Assembly { get; private set; }
 
         #endregion
+
+        private bool CheckForMSBuildPureTaskAttribute()
+        {
+            const string attributeFullName = "Microsoft.Build.Framework.MSBuildPureTaskAttribute";
+
+            foreach (CustomAttributeData attribute in CustomAttributeData.GetCustomAttributes(Type))
+            {
+                try
+                {
+                    if (attribute.AttributeType?.FullName == attributeFullName)
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception e) when (!ExceptionHandling.IsCriticalException(e))
+                {
+                    // Ignore attributes whose types cannot be resolved in the metadata-only load context.
+                }
+            }
+
+            return false;
+        }
     }
 }

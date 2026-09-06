@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Microsoft.Build.Framework;
@@ -15,6 +16,19 @@ namespace Microsoft.Build.UnitTests
 {
     public sealed class AssignTargetPath_Tests
     {
+        [Fact]
+        public void OnlyProjectDirectoryVariantIsMarkedPure()
+        {
+            Attribute.IsDefined(
+                typeof(AssignTargetPathWithProjectDirectory),
+                typeof(MSBuildPureTaskAttribute),
+                inherit: false).ShouldBeTrue();
+            Attribute.IsDefined(
+                typeof(AssignTargetPath),
+                typeof(MSBuildPureTaskAttribute),
+                inherit: false).ShouldBeFalse();
+        }
+
         [Fact]
         public void Regress314791()
         {

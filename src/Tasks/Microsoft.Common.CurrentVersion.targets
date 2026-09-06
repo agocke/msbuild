@@ -3336,12 +3336,12 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       </EmbeddedResource>
     </ItemGroup>
 
-    <AssignCulture Files="@(EmbeddedResource)" Condition="'%(Extension)'!='.licx'"  RespectAlreadyAssignedItemCulture="$(RespectAlreadyAssignedItemCulture)" WarnOnCultureOverwritten="$(WarnOnCultureOverwritten)">
+    <AssignCultureWithDeterministicSemantics Files="@(EmbeddedResource)" Condition="'%(Extension)'!='.licx'"  RespectAlreadyAssignedItemCulture="$(RespectAlreadyAssignedItemCulture)" WarnOnCultureOverwritten="$(WarnOnCultureOverwritten)">
       <!-- Create the list of culture resx and embedded resource files -->
       <Output TaskParameter="AssignedFilesWithCulture" ItemName="_MixedResourceWithCulture"/>
       <!-- Create the list of non-culture resx and embedded resource files -->
       <Output TaskParameter="AssignedFilesWithNoCulture" ItemName="_MixedResourceWithNoCulture"/>
-    </AssignCulture>
+    </AssignCultureWithDeterministicSemantics>
 
     <ItemGroup>
 

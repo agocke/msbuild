@@ -26,6 +26,7 @@ namespace Microsoft.Build.Framework;
 internal sealed class TaskClassRegistration
 {
     private readonly Func<TaskEnvironment, ITask> _createInstance;
+    private readonly LoadedType? _staticallyKnownLoadedType;
 
     /// <summary>
     /// The reflected type metadata the engine binds the task's parameters against. For the generic,
@@ -42,6 +43,7 @@ internal sealed class TaskClassRegistration
     internal TaskClassRegistration(Func<TaskEnvironment, ITask> createInstance, LoadedType loadedType)
     {
         _createInstance = createInstance;
+        _staticallyKnownLoadedType = loadedType;
         _loadedType = new Lazy<LoadedType>(() => loadedType);
     }
 
@@ -68,6 +70,26 @@ internal sealed class TaskClassRegistration
     /// Gets the reflected type metadata the engine uses to discover and bind the task's parameters.
     /// </summary>
     internal LoadedType GetLoadedType() => _loadedType.Value;
+
+    /// <summary>
+    /// Gets the task type metadata when doing so does not require constructing the task.
+    /// </summary>
+    internal bool TryGetLoadedTypeWithoutConstruction([NotNullWhen(true)] out LoadedType? loadedType)
+    {
+        loadedType = _staticallyKnownLoadedType;
+        if (loadedType is not null)
+        {
+            return true;
+        }
+
+        if (_loadedType.IsValueCreated)
+        {
+            loadedType = _loadedType.Value;
+            return true;
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Builds the <see cref="LoadedType"/> for the factory-only registration from a probe instance's type.

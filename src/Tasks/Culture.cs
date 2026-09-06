@@ -88,5 +88,85 @@ namespace Microsoft.Build.Tasks
 
             return info;
         }
+
+        /// <summary>
+        /// Gets culture information without consulting host path or globalization data.
+        /// </summary>
+        internal static ItemCultureInfo GetItemCultureInfoDeterministic(
+            string name,
+            string dependentUponFilename,
+            bool treatAsCultureNeutral = false)
+        {
+            ItemCultureInfo info;
+            info.culture = null;
+            string parentName = dependentUponFilename ?? String.Empty;
+
+            if (treatAsCultureNeutral || FileNamesWithoutExtensionsEqual(parentName, name))
+            {
+                info.cultureNeutralFilename = name;
+                return info;
+            }
+
+            int fileNameStart = GetFileNameStart(name);
+            int extensionSeparator = name.LastIndexOf('.');
+
+            if (extensionSeparator <= fileNameStart)
+            {
+                info.cultureNeutralFilename = name;
+                return info;
+            }
+
+            int cultureSeparator = name.LastIndexOf('.', extensionSeparator - 1);
+            if (cultureSeparator <= fileNameStart || cultureSeparator + 1 == extensionSeparator)
+            {
+                info.cultureNeutralFilename = name;
+                return info;
+            }
+
+            string cultureName = name.Substring(
+                cultureSeparator + 1,
+                extensionSeparator - cultureSeparator - 1);
+
+            if (!DeterministicCultureInfoCache.IsValidCultureString(cultureName))
+            {
+                info.cultureNeutralFilename = name;
+                return info;
+            }
+
+            info.culture = cultureName;
+            info.cultureNeutralFilename = name.Remove(
+                cultureSeparator,
+                extensionSeparator - cultureSeparator);
+            return info;
+        }
+
+        private static bool FileNamesWithoutExtensionsEqual(string left, string right)
+        {
+            int leftStart = GetFileNameStart(left);
+            int rightStart = GetFileNameStart(right);
+            int leftLength = GetFileNameWithoutExtensionLength(left, leftStart);
+            int rightLength = GetFileNameWithoutExtensionLength(right, rightStart);
+
+            return leftLength == rightLength &&
+                string.Compare(
+                    left,
+                    leftStart,
+                    right,
+                    rightStart,
+                    leftLength,
+                    StringComparison.OrdinalIgnoreCase) == 0;
+        }
+
+        private static int GetFileNameStart(string path)
+        {
+            return Math.Max(path.LastIndexOf('/'), path.LastIndexOf('\\')) + 1;
+        }
+
+        private static int GetFileNameWithoutExtensionLength(string path, int fileNameStart)
+        {
+            int extensionSeparator = path.LastIndexOf('.');
+            int end = extensionSeparator >= fileNameStart ? extensionSeparator : path.Length;
+            return end - fileNameStart;
+        }
     }
 }

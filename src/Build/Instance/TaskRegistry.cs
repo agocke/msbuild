@@ -117,6 +117,8 @@ namespace Microsoft.Build.Execution
         /// </summary>
         private static readonly string s_potentialTasksCoreLocation = Path.Combine(BuildEnvironmentHelper.Instance.CurrentMSBuildToolsDirectory, s_tasksCoreFilename);
 
+        private static readonly TypeLoader s_taskTypeLoader = TypeLoader.Create<ITask>();
+
         /// <summary>
         /// Monotonically increasing counter for registered tasks.
         /// </summary>
@@ -633,6 +635,130 @@ namespace Microsoft.Build.Execution
             }
 
             return taskRecord;
+        }
+
+        /// <summary>
+        /// Resolves the task type using metadata-only assembly loading.
+        /// </summary>
+        /// <returns>
+        /// <see langword="true"/> when a registration determines task resolution. The returned type is
+        /// <see langword="null"/> when that registration uses a factory that cannot be inspected without execution.
+        /// </returns>
+        [RequiresUnreferencedCode("Loads task metadata from an assembly discovered at runtime, which is incompatible with trimming.")]
+        internal bool TryGetRegisteredTaskTypeForMetadata(
+            string taskName,
+            in TaskHostParameters taskIdentityParameters,
+            bool exactMatchRequired,
+            LoggingContext loggingContext,
+            out LoadedType loadedType)
+        {
+            RegisteredTaskIdentity taskIdentity = new(taskName, taskIdentityParameters);
+
+            if (_overriddenTasks.TryGetValue(taskName, out List<RegisteredTaskRecord> overrideRecords))
+            {
+                foreach (RegisteredTaskRecord record in overrideRecords)
+                {
+                    if (RegisteredTaskIdentity.RegisteredTaskIdentityComparer.IsPartialMatch(taskIdentity, record.TaskIdentity))
+                    {
+                        loadedType = LoadRegisteredTaskTypeForMetadata(taskName, taskIdentity, record);
+                        return true;
+                    }
+                }
+            }
+
+            if (_toolset is not null)
+            {
+                TaskRegistry overrideRegistry = _toolset.GetOverrideTaskRegistry(loggingContext, RootElementCache);
+                if (overrideRegistry.TryGetRegisteredTaskTypeForMetadata(
+                    taskName,
+                    taskIdentityParameters,
+                    exactMatchRequired,
+                    loggingContext,
+                    out loadedType))
+                {
+                    return true;
+                }
+            }
+
+            if (_taskRegistrations?.Count > 0)
+            {
+                foreach (RegisteredTaskRecord record in GetRelevantOrderedRegistrations(taskIdentity, exactMatchRequired))
+                {
+                    loadedType = LoadRegisteredTaskTypeForMetadata(taskName, taskIdentity, record);
+                    if (loadedType is not null ||
+                        !IsAssemblyTaskFactory(record) ||
+                        RegisteredTaskIdentity.RegisteredTaskIdentityComparer.Fuzzy.Equals(record.TaskIdentity, taskIdentity))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            if (_toolset is not null)
+            {
+                TaskRegistry fallbackRegistry = _toolset.GetTaskRegistry(loggingContext, RootElementCache);
+                if (fallbackRegistry.TryGetRegisteredTaskTypeForMetadata(
+                    taskName,
+                    taskIdentityParameters,
+                    exactMatchRequired,
+                    loggingContext,
+                    out loadedType))
+                {
+                    return true;
+                }
+            }
+
+            loadedType = null;
+            return false;
+        }
+
+        [RequiresUnreferencedCode("Loads task metadata from an assembly discovered at runtime, which is incompatible with trimming.")]
+        private static LoadedType LoadRegisteredTaskTypeForMetadata(
+            string taskName,
+            RegisteredTaskIdentity taskIdentity,
+            RegisteredTaskRecord record)
+        {
+            if (!IsAssemblyTaskFactory(record))
+            {
+                return null;
+            }
+
+            if (!RegisteredTaskIdentity.RegisteredTaskIdentityComparer.IsPartialMatch(taskIdentity, record.TaskIdentity))
+            {
+                return null;
+            }
+
+            string typeName = taskName.Length > record.TaskIdentity.Name.Length
+                ? taskName
+                : record.TaskIdentity.Name;
+            AssemblyLoadInfo assemblyLoadInfo = GetMetadataAssemblyLoadInfo(record);
+            return assemblyLoadInfo is null
+                ? null
+                : s_taskTypeLoader.LoadFromMetadata(typeName, assemblyLoadInfo);
+        }
+
+        private static bool IsAssemblyTaskFactory(RegisteredTaskRecord record)
+            => record.TaskFactoryAttributeName.Equals(RegisteredTaskRecord.AssemblyTaskFactory, StringComparison.OrdinalIgnoreCase) ||
+                record.TaskFactoryAttributeName.Equals(RegisteredTaskRecord.TaskHostFactory, StringComparison.OrdinalIgnoreCase);
+
+        private static AssemblyLoadInfo GetMetadataAssemblyLoadInfo(RegisteredTaskRecord record)
+        {
+            AssemblyLoadInfo assemblyLoadInfo = record.TaskFactoryAssemblyLoadInfo;
+            if (!string.IsNullOrEmpty(assemblyLoadInfo.AssemblyFile))
+            {
+                return assemblyLoadInfo;
+            }
+
+            if (string.IsNullOrEmpty(assemblyLoadInfo.AssemblyName))
+            {
+                return null;
+            }
+
+            var assemblyName = new AssemblyName(assemblyLoadInfo.AssemblyName);
+            return string.Equals(assemblyName.Name, s_tasksCoreSimpleName, StringComparison.OrdinalIgnoreCase) &&
+                File.Exists(s_potentialTasksCoreLocation)
+                    ? AssemblyLoadInfo.Create(null, s_potentialTasksCoreLocation)
+                    : null;
         }
 
         /// <summary>

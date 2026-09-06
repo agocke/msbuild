@@ -340,6 +340,24 @@ namespace Microsoft.Build.Shared
             AssemblyLoadInfo assembly) => GetLoadedType(s_cacheOfReflectionOnlyLoadedTypesByFilter, typeName, assembly, useTaskHost: false, taskHostParamsMatchCurrentProc: true, logWarning: (format, args) => { });
 
         /// <summary>
+        /// Loads the specified type through a MetadataLoadContext without loading the assembly for execution.
+        /// </summary>
+        /// <returns>The loaded type, or null when the assembly has no file path or the type was not found.</returns>
+        [RequiresUnreferencedCode("Loads types by reflecting over assemblies discovered at runtime, which is incompatible with trimming.")]
+        internal LoadedType LoadFromMetadata(
+            string typeName,
+            AssemblyLoadInfo assembly)
+            => string.IsNullOrEmpty(assembly.AssemblyFile)
+                ? null
+                : GetLoadedType(
+                    s_cacheOfReflectionOnlyLoadedTypesByFilter,
+                    typeName,
+                    assembly,
+                    useTaskHost: true,
+                    taskHostParamsMatchCurrentProc: true,
+                    logWarning: (format, args) => { });
+
+        /// <summary>
         /// Loads the specified type if it exists in the given assembly. If the type name is fully qualified, then a match (if
         /// any) is unambiguous; otherwise, if there are multiple types with the same name in different namespaces, the first type
         /// found will be returned.
