@@ -1029,6 +1029,33 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ValidatesOnErrorTargetClosureForDependencyFailure()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build" DependsOnTargets="Dependency">
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Dependency">
+                <Generate />
+              </Target>
+              <Target Name="Cleanup">
+                <PropertyGroup>
+                  <Value>$([System.Guid]::NewGuid())</Value>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4287");
+    }
+
+    [Fact]
     public void CollectsMissingOnErrorTarget()
     {
         InvalidProjectFileException exception = ValidateFailure(
@@ -1066,6 +1093,260 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             {
                 ["Generate"] = HardenedTaskClassification.DeclaredIO,
             });
+    }
+
+    [Fact]
+    public void OnErrorDoesNotObserveSuccessfulTailState()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Value" />
+                </Generate>
+                <PropertyGroup>
+                  <Value>success</Value>
+                </PropertyGroup>
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("failure paths of target 'Build'");
+    }
+
+    [Theory]
+    [InlineData("true")]
+    [InlineData("WarnAndContinue")]
+    [InlineData("ErrorAndContinue")]
+    public void OnErrorIgnoresStateFromTasksThatCannotStopTheTarget(string continueOnError)
+    {
+        ValidateSuccess(
+            $"""
+            <Project>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Value>failure-prefix</Value>
+                </PropertyGroup>
+                <Generate />
+                <Generate ContinueOnError="{continueOnError}">
+                  <Output TaskParameter="Result" PropertyName="Value" />
+                </Generate>
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void OnErrorJoinsFailurePrefixesWithinTaskBatching()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a;b" />
+              </ItemGroup>
+              <Target Name="Build">
+                <Generate Input="%(Input.Identity)">
+                  <Output TaskParameter="Result"
+                          PropertyName="Value_%(Input.Identity)" />
+                </Generate>
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="$(Value_b)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("Value_b");
+    }
+
+    [Fact]
+    public void OnErrorJoinsDistinctFailurePrefixes()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Value>first</Value>
+                </PropertyGroup>
+                <Generate />
+                <PropertyGroup>
+                  <Value>second</Value>
+                </PropertyGroup>
+                <Generate />
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("failure paths of target 'Build'");
+    }
+
+    [Fact]
+    public void FalseTaskConditionDoesNotContributeOnErrorFailureState()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Value>static</Value>
+                </PropertyGroup>
+                <Generate Condition="false">
+                  <Output TaskParameter="Result" PropertyName="Value" />
+                </Generate>
+                <Generate />
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void OnErrorJoinsFailureStatesAcrossTargetBuckets()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a">
+                  <Value>first</Value>
+                </Input>
+                <Input Include="b">
+                  <Value>second</Value>
+                </Input>
+              </ItemGroup>
+              <Target Name="Build" Returns="%(Input.Value)">
+                <PropertyGroup>
+                  <Value>%(Input.Value)</Value>
+                </PropertyGroup>
+                <Generate />
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("failure paths of target 'Build'");
+    }
+
+    [Fact]
+    public void OnErrorFailureStateIncludesCompletedCallTargetScope()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <CallTarget Targets="GenerateValue" />
+                <Generate />
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="GenerateValue">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Value" />
+                </Generate>
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="$(Value)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("Value");
+    }
+
+    [Fact]
+    public void ContinueOnErrorJoinDoesNotDetachTargetBucketState()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <Input Include="a;b" />
+              </ItemGroup>
+              <Target Name="Build" Returns="%(Input.Identity)">
+                <Generate ContinueOnError="true"
+                          Input="%(Input.Identity)">
+                  <Output TaskParameter="Result" PropertyName="Optional" />
+                </Generate>
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Later" />
+                </Generate>
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup" />
+              <Target Name="Consume" AfterTargets="Build">
+                <PureConsume Input="$(Later)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("Later");
     }
 
     [Fact]

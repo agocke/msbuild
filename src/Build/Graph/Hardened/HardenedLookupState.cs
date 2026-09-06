@@ -89,15 +89,41 @@ internal sealed class HardenedLookupState
 
     internal void CopyPropertyFrom(HardenedLookupState source, string propertyName)
     {
-        SetPropertyValue(propertyName, source.GetProperty(propertyName));
+        SetPropertyValue(
+            propertyName,
+            source.GetProperty(propertyName),
+            mayBeReserved: true);
     }
 
-    internal void SetConcreteProperty(string propertyName, string value)
+    internal void SetConcreteProperty(string propertyName, string value, bool updateLookup = false)
     {
         SetPropertyValue(
             propertyName,
             HardenedValue<string>.Static(value),
-            updateLookup: false);
+            updateLookup,
+            mayBeReserved: true);
+    }
+
+    internal void CollectTrackedNames(ISet<string> propertyNames, ISet<string> itemTypes)
+    {
+        for (Lookup.Scope? scope = _lookup.CurrentScope; scope is not null; scope = scope.Parent)
+        {
+            if (scope.HardenedState?.Properties is not null)
+            {
+                foreach (string propertyName in scope.HardenedState.Properties.Keys)
+                {
+                    propertyNames.Add(propertyName);
+                }
+            }
+
+            if (scope.HardenedState?.Items is not null)
+            {
+                foreach (string itemType in scope.HardenedState.Items.Keys)
+                {
+                    itemTypes.Add(itemType);
+                }
+            }
+        }
     }
 
     internal ValueState GetItemMembership(string itemType)
@@ -696,14 +722,19 @@ internal sealed class HardenedLookupState
     private void SetPropertyValue(
         string propertyName,
         HardenedValue<string> value,
-        bool updateLookup = true)
+        bool updateLookup = true,
+        bool mayBeReserved = false)
     {
         CurrentScopeState.Properties ??=
             new Dictionary<string, HardenedValue<string>>(MSBuildNameIgnoreCaseComparer.Default);
         CurrentScopeState.Properties[propertyName] = value;
         if (updateLookup && value.TryGetStaticValue(out string? staticValue))
         {
-            _lookup.SetProperty(ProjectPropertyInstance.Create(propertyName, staticValue));
+            _lookup.SetProperty(
+                ProjectPropertyInstance.Create(
+                    propertyName,
+                    staticValue,
+                    mayBeReserved));
         }
     }
 

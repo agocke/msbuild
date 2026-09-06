@@ -131,13 +131,22 @@ namespace Microsoft.Build.BackEnd
                 : HardenedLookupState.Create(this);
         }
 
-        private Lookup(Lookup that, bool snapshotHardenedState)
+        private Lookup(
+            Lookup that,
+            bool snapshotHardenedState,
+            bool cloneConcreteState)
         {
             Assumed.True(snapshotHardenedState);
 
             _baseItems = that._baseItems;
-            _lookupScopes = Scope.CloneChain(this, that._lookupScopes);
-            _cloneTable = that._cloneTable;
+            _lookupScopes = Scope.CloneChain(
+                this,
+                that._lookupScopes,
+                cloneHardenedState: true,
+                cloneConcreteState);
+            _cloneTable = !cloneConcreteState || that._cloneTable is null
+                ? that._cloneTable
+                : new Dictionary<ProjectItemInstance, ProjectItemInstance>(that._cloneTable);
             _hardenedState = HardenedLookupState.Create(this);
         }
 
@@ -285,7 +294,30 @@ namespace Microsoft.Build.BackEnd
         internal Lookup SnapshotHardenedLookup()
         {
             Assumed.NotNull(_hardenedState);
-            return new Lookup(this, snapshotHardenedState: true);
+            return new Lookup(this, snapshotHardenedState: true, cloneConcreteState: false);
+        }
+
+        internal Lookup SnapshotHardenedLookupForBranching()
+        {
+            Assumed.NotNull(_hardenedState);
+            return new Lookup(this, snapshotHardenedState: true, cloneConcreteState: true);
+        }
+
+        internal void ApplyHardenedScopeSnapshot(Lookup source)
+        {
+            Assumed.NotNull(_hardenedState);
+            Assumed.NotNull(source);
+            Assumed.NotNull(source._hardenedState);
+            Assumed.NotNull(source._lookupScopes.Parent);
+
+            Scope scope = new Scope(
+                this,
+                source._lookupScopes,
+                _lookupScopes,
+                cloneHardenedState: true,
+                cloneConcreteState: true);
+            _lookupScopes = scope;
+            LeaveScope(scope);
         }
 
         internal Scope CurrentScope => _lookupScopes;
@@ -1523,20 +1555,27 @@ namespace Microsoft.Build.BackEnd
                 Parent = lookup._lookupScopes;
             }
 
-            private Scope(
+            internal Scope(
                 Lookup lookup,
                 Scope source,
                 Scope parent,
-                bool cloneHardenedState)
+                bool cloneHardenedState,
+                bool cloneConcreteState = false)
             {
                 _owningLookup = lookup;
                 _description = source._description;
-                _items = source._items;
-                _adds = source._adds;
-                _removes = source._removes;
-                _modifies = source._modifies;
-                _properties = source._properties;
-                _propertySets = source._propertySets;
+                _items = cloneConcreteState ? source._items?.Clone() : source._items;
+                _adds = cloneConcreteState ? source._adds?.Clone() : source._adds;
+                _removes = cloneConcreteState ? source._removes?.Clone() : source._removes;
+                _modifies = cloneConcreteState
+                    ? CloneModifications(source._modifies)
+                    : source._modifies;
+                _properties = cloneConcreteState && source._properties is not null
+                    ? new PropertyDictionary<ProjectPropertyInstance>(source._properties)
+                    : source._properties;
+                _propertySets = cloneConcreteState && source._propertySets is not null
+                    ? new PropertyDictionary<ProjectPropertyInstance>(source._propertySets)
+                    : source._propertySets;
                 _itemTypesToTruncateAtThisScope = source._itemTypesToTruncateAtThisScope;
                 HardenedState = cloneHardenedState
                     ? source.HardenedState?.Clone()
@@ -1655,12 +1694,47 @@ namespace Microsoft.Build.BackEnd
             internal static Scope CloneChain(
                 Lookup lookup,
                 Scope scope,
-                bool cloneHardenedState = true)
+                bool cloneHardenedState = true,
+                bool cloneConcreteState = false)
             {
                 Scope parent = scope.Parent is null
                     ? null
-                    : CloneChain(lookup, scope.Parent, cloneHardenedState);
-                return new Scope(lookup, scope, parent, cloneHardenedState);
+                    : CloneChain(
+                        lookup,
+                        scope.Parent,
+                        cloneHardenedState,
+                        cloneConcreteState);
+                return new Scope(
+                    lookup,
+                    scope,
+                    parent,
+                    cloneHardenedState,
+                    cloneConcreteState);
+            }
+
+            private static ItemTypeToItemsMetadataUpdateDictionary CloneModifications(
+                ItemTypeToItemsMetadataUpdateDictionary source)
+            {
+                if (source is null)
+                {
+                    return null;
+                }
+
+                var clone = new ItemTypeToItemsMetadataUpdateDictionary(
+                    MSBuildNameIgnoreCaseComparer.Default);
+                foreach (KeyValuePair<string, Dictionary<ProjectItemInstance, MetadataModifications>> itemType in source)
+                {
+                    var itemModifications =
+                        new Dictionary<ProjectItemInstance, MetadataModifications>(itemType.Value.Count);
+                    foreach (KeyValuePair<ProjectItemInstance, MetadataModifications> item in itemType.Value)
+                    {
+                        itemModifications.Add(item.Key, item.Value.Clone());
+                    }
+
+                    clone.Add(itemType.Key, itemModifications);
+                }
+
+                return clone;
             }
         }
     }

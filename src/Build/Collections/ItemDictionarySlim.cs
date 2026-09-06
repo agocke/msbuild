@@ -18,6 +18,17 @@ namespace Microsoft.Build.Collections
         public ItemDictionarySlim() =>
             _itemLists = new Dictionary<string, List<ProjectItemInstance>>(MSBuildNameIgnoreCaseComparer.Default);
 
+        internal ItemDictionarySlim Clone()
+        {
+            var clone = new ItemDictionarySlim();
+            foreach (KeyValuePair<string, List<ProjectItemInstance>> itemList in _itemLists)
+            {
+                clone._itemLists.Add(itemList.Key, [.. itemList.Value]);
+            }
+
+            return clone;
+        }
+
         /// <summary>
         /// Gets all items of the given type, or null if there are none.
         /// </summary>

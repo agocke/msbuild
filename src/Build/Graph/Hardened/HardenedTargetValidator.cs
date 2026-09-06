@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 using Microsoft.Build.BackEnd;
@@ -10,6 +11,7 @@ using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
 using ReservedPropertyNames = Microsoft.Build.Internal.ReservedPropertyNames;
@@ -149,7 +151,8 @@ internal sealed class HardenedTargetValidator
         string targetName,
         IElementLocation referenceLocation,
         HashSet<string> visitedTargets,
-        bool isAfterTarget = false)
+        bool isAfterTarget = false,
+        bool isFailureContext = false)
     {
         if (_activeTargets.Contains(targetName))
         {
@@ -180,7 +183,15 @@ internal sealed class HardenedTargetValidator
         }
 
         _activeTargets.Add(targetName);
+        List<FailureState>? preBodyFailureStates =
+            target.OnErrorChildren.Count == 0 ? null : [];
         ValueState targetResult = ValueState.Static;
+        if (preBodyFailureStates is not null &&
+            MayThrowDuringExpansion(target.Condition))
+        {
+            preBodyFailureStates.Add(new FailureState(CaptureBranchState(), CallTargetScope: null));
+        }
+
         bool targetConditionMetadataValidated = RejectTargetMetadata(
             target.Condition,
             target.ConditionLocation,
@@ -224,14 +235,28 @@ internal sealed class HardenedTargetValidator
             {
                 foreach (string dependency in ExpressionShredder.SplitSemiColonSeparatedList(expandedDependencies))
                 {
-                    ValidateTarget(project, dependency, target.DependsOnTargetsLocation, visitedTargets);
+                    preBodyFailureStates?.Add(
+                        new FailureState(CaptureBranchState(), CallTargetScope: null));
+                    ValidateTarget(
+                        project,
+                        dependency,
+                        target.DependsOnTargetsLocation,
+                        visitedTargets,
+                        isFailureContext: isFailureContext);
                 }
             }
         }
 
         foreach (TargetSpecification beforeTarget in project.GetTargetsWhichRunBefore(target.Name))
         {
-            ValidateTarget(project, beforeTarget.TargetName, beforeTarget.ReferenceLocation, visitedTargets);
+            preBodyFailureStates?.Add(
+                new FailureState(CaptureBranchState(), CallTargetScope: null));
+            ValidateTarget(
+                project,
+                beforeTarget.TargetName,
+                beforeTarget.ReferenceLocation,
+                visitedTargets,
+                isFailureContext: isFailureContext);
         }
 
         if (targetExecutes)
@@ -246,13 +271,39 @@ internal sealed class HardenedTargetValidator
             LegacyCallTargetScope? callTargetScope = ContainsCallTarget(target)
                 ? new LegacyCallTargetScope(CaptureState())
                 : null;
-            ValidateInBuckets(
-                targetBatchingResult,
-                _ => ValidateTargetBody(
-                    project,
-                    target,
-                    visitedTargets,
-                    callTargetScope));
+            List<FailureState> failureStates;
+            if (target.OnErrorChildren.Count == 0)
+            {
+                ValidateInBuckets(
+                    targetBatchingResult,
+                    _ => ValidateTargetBody(
+                        project,
+                        target,
+                        visitedTargets,
+                        callTargetScope,
+                        collectFailureStates: false));
+                failureStates = [];
+            }
+            else
+            {
+                ValidatorState targetEntryState = CaptureBranchState();
+                List<ValidatedBucket<TargetBodyValidationResult>> targetBuckets =
+                    ValidateInBucketsWithResults(
+                        targetBatchingResult,
+                        _ => ValidateTargetBody(
+                            project,
+                            target,
+                            visitedTargets,
+                            callTargetScope,
+                            collectFailureStates: true));
+                failureStates =
+                    MaterializeTargetFailureStates(targetEntryState, targetBuckets);
+            }
+
+            if (preBodyFailureStates is not null)
+            {
+                failureStates.InsertRange(0, preBodyFailureStates);
+            }
 
             string? returnExpression = target.Returns;
             IElementLocation returnLocation = target.ReturnsLocation;
@@ -296,7 +347,42 @@ internal sealed class HardenedTargetValidator
                     });
             }
 
-            ValidateOnErrorTargets(project, target, visitedTargets);
+            if (failureStates.Count > 0)
+            {
+                ValidatorState successfulState = CaptureState();
+                var successfulTargetResults = new Dictionary<string, ValueState>(
+                    _targetResults,
+                    MSBuildNameIgnoreCaseComparer.Default);
+                try
+                {
+                    List<ValidatorState> completedFailureStates = new(failureStates.Count);
+                    foreach (FailureState failureState in failureStates)
+                    {
+                        completedFailureStates.Add(CompleteLegacyCallTargetScope(failureState));
+                    }
+
+                    RestoreState(
+                        JoinStates(
+                            completedFailureStates,
+                            $"failure paths of target '{target.Name}'"));
+                    ValidateOnErrorTargets(
+                        project,
+                        target,
+                        isFailureContext
+                            ? visitedTargets
+                            : new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default));
+                }
+                finally
+                {
+                    RestoreState(successfulState);
+                    _targetResults.Clear();
+                    foreach (KeyValuePair<string, ValueState> targetResultEntry in successfulTargetResults)
+                    {
+                        _targetResults.Add(targetResultEntry.Key, targetResultEntry.Value);
+                    }
+                }
+            }
+
             if (callTargetScope is not null)
             {
                 CompleteLegacyCallTargetScope(callTargetScope);
@@ -311,33 +397,51 @@ internal sealed class HardenedTargetValidator
                 afterTarget.TargetName,
                 afterTarget.ReferenceLocation,
                 visitedTargets,
-                isAfterTarget: true);
+                isAfterTarget: true,
+                isFailureContext: isFailureContext);
         }
 
         _activeTargets.Remove(targetName);
         return targetResult;
     }
 
-    private void ValidateTargetBody(
+    private TargetBodyValidationResult ValidateTargetBody(
         ProjectInstance project,
         ProjectTargetInstance target,
         HashSet<string> visitedTargets,
-        LegacyCallTargetScope? callTargetScope)
+        LegacyCallTargetScope? callTargetScope,
+        bool collectFailureStates)
     {
+        List<FailureState> failureStates = [];
         foreach (ProjectTargetInstanceChild child in target.Children)
         {
             switch (child)
             {
                 case ProjectPropertyGroupTaskInstance propertyGroup:
-                    ValidatePropertyGroup(propertyGroup, target.Name, callTargetScope);
+                    ValidatePropertyGroup(
+                        propertyGroup,
+                        target.Name,
+                        callTargetScope,
+                        collectFailureStates ? failureStates : null);
                     break;
 
                 case ProjectItemGroupTaskInstance itemGroup:
-                    ValidateItemGroup(itemGroup, target.Name, callTargetScope);
+                    ValidateItemGroup(
+                        itemGroup,
+                        target.Name,
+                        callTargetScope,
+                        collectFailureStates ? failureStates : null);
                     break;
 
                 case ProjectTaskInstance task:
-                    ValidateTask(project, task, target.Name, visitedTargets, callTargetScope);
+                    failureStates.AddRange(
+                        ValidateTask(
+                            project,
+                            task,
+                            target.Name,
+                            visitedTargets,
+                            callTargetScope,
+                            collectFailureStates));
                     break;
 
                 default:
@@ -345,13 +449,21 @@ internal sealed class HardenedTargetValidator
                     break;
             }
         }
+
+        return new TargetBodyValidationResult(failureStates);
     }
 
     private void ValidatePropertyGroup(
         ProjectPropertyGroupTaskInstance propertyGroup,
         string targetName,
-        LegacyCallTargetScope? callTargetScope)
+        LegacyCallTargetScope? callTargetScope,
+        List<FailureState>? failureStates)
     {
+        if (MayThrowDuringExpansion(propertyGroup.Condition))
+        {
+            failureStates?.Add(CaptureFailureState(callTargetScope));
+        }
+
         ExpressionValidationResult groupConditionResult = ValidateExpression(
             propertyGroup,
             propertyGroup.Condition,
@@ -372,6 +484,12 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectPropertyGroupTaskPropertyInstance property in propertyGroup.Properties)
         {
+            if (MayThrowDuringExpansion(property.Condition) ||
+                MayThrowDuringExpansion(property.Value))
+            {
+                failureStates?.Add(CaptureFailureState(callTargetScope));
+            }
+
             BatchingValidationResult batchingResult = ValidateBatching(
                 property,
                 [property.Value, property.Condition],
@@ -466,8 +584,14 @@ internal sealed class HardenedTargetValidator
     private void ValidateItemGroup(
         ProjectItemGroupTaskInstance itemGroup,
         string targetName,
-        LegacyCallTargetScope? callTargetScope)
+        LegacyCallTargetScope? callTargetScope,
+        List<FailureState>? failureStates)
     {
+        if (MayThrowDuringExpansion(itemGroup.Condition))
+        {
+            failureStates?.Add(CaptureFailureState(callTargetScope));
+        }
+
         ExpressionValidationResult groupConditionResult = ValidateExpression(
             itemGroup,
             itemGroup.Condition,
@@ -488,17 +612,26 @@ internal sealed class HardenedTargetValidator
 
         foreach (ProjectItemGroupTaskItemInstance item in itemGroup.Items)
         {
+            if (MayThrowDuringExpansion(item.Condition) ||
+                MayThrowDuringExpansion(item.Include) ||
+                MayThrowDuringExpansion(item.Exclude) ||
+                MayThrowDuringExpansion(item.Remove))
+            {
+                failureStates?.Add(CaptureFailureState(callTargetScope));
+            }
+
             callTargetScope?.CallerAssignedItemTypes.Add(item.ItemType);
             ValidateItemOperation(item, targetName);
         }
     }
 
-    private void ValidateTask(
+    private List<FailureState> ValidateTask(
         ProjectInstance project,
         ProjectTaskInstance task,
         string targetName,
         HashSet<string> visitedTargets,
-        LegacyCallTargetScope? callTargetScope)
+        LegacyCallTargetScope? callTargetScope,
+        bool collectFailureStates)
     {
         if (!_taskClassifications.TryGetValue(task.Name, out HardenedTaskClassification classification))
         {
@@ -528,7 +661,26 @@ internal sealed class HardenedTargetValidator
             task.Location,
             $"task '{task.Name}'");
 
-        ValidateInBuckets(
+        if (!collectFailureStates)
+        {
+            ValidateInBuckets(
+                batchingResult,
+                batchingState =>
+                    ValidateTaskCore(
+                        project,
+                        task,
+                        targetName,
+                        visitedTargets,
+                        callTargetScope,
+                        classification,
+                        batchingState));
+            return [];
+        }
+
+        ValidatorState taskEntryState = CaptureBranchState();
+        LegacyCallTargetScope? taskEntryCallTargetScope = callTargetScope?.Clone();
+        List<ValidatedBucket<TaskValidationResult>> taskBuckets =
+            ValidateInBucketsWithResults(
             batchingResult,
             batchingState =>
                 ValidateTaskCore(
@@ -539,9 +691,15 @@ internal sealed class HardenedTargetValidator
                     callTargetScope,
                     classification,
                     batchingState));
+
+        return MaterializeTaskFailureStates(
+            task,
+            taskEntryState,
+            taskEntryCallTargetScope,
+            taskBuckets);
     }
 
-    private void ValidateTaskCore(
+    private TaskValidationResult ValidateTaskCore(
         ProjectInstance project,
         ProjectTaskInstance task,
         string targetName,
@@ -567,7 +725,10 @@ internal sealed class HardenedTargetValidator
             out bool taskConditionValue) &&
             !taskConditionValue)
         {
-            return;
+            return new TaskValidationResult(
+                CanStopOnFailure: false,
+                Executed: false,
+                callTargetScope?.Clone());
         }
 
         ExpressionValidationResult continueOnErrorResult = ValidateExpression(
@@ -578,6 +739,7 @@ internal sealed class HardenedTargetValidator
             requireStatic: true,
             isCondition: false,
             metadataBatchingValidated: true);
+        bool canStopOnFailure = CanTaskStopOnFailure(task, continueOnErrorResult);
 
         ValueState taskControlState = ValueState.Combine(
             taskBatchingState,
@@ -750,6 +912,62 @@ internal sealed class HardenedTargetValidator
             ReservedPropertyNames.lastTaskResult,
             HardenedValue<string>.NonStatic(taskStatus),
             overwrite: true);
+
+        return new TaskValidationResult(
+            canStopOnFailure,
+            Executed: true,
+            callTargetScope?.Clone());
+    }
+
+    private bool CanTaskStopOnFailure(
+        ProjectTaskInstance task,
+        ExpressionValidationResult continueOnErrorResult)
+    {
+        if (string.IsNullOrEmpty(task.ContinueOnError))
+        {
+            return true;
+        }
+
+        if (!continueOnErrorResult.CanEvaluate ||
+            !TryExpandConcreteExpression(
+                task,
+                task.ContinueOnError,
+                task.ContinueOnErrorLocation,
+                $"ContinueOnError of task '{task.Name}'",
+                reportUnmodeled: false,
+                out string expandedValue))
+        {
+            return true;
+        }
+
+        if (string.Equals(
+                XMakeAttributes.ContinueOnErrorValues.errorAndContinue,
+                expandedValue,
+                StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(
+                XMakeAttributes.ContinueOnErrorValues.warnAndContinue,
+                expandedValue,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (string.Equals(
+                XMakeAttributes.ContinueOnErrorValues.errorAndStop,
+                expandedValue,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        try
+        {
+            return !ConversionUtilities.ConvertStringToBool(expandedValue);
+        }
+        catch (ArgumentException)
+        {
+            return true;
+        }
     }
 
     private ValueState ValidateMSBuildProjectMetadata(
@@ -869,29 +1087,366 @@ internal sealed class HardenedTargetValidator
             return;
         }
 
-        ValidatorState callerState = CaptureState();
-        ValidatorState mergedState = callTargetScope.CalledState;
-
-        foreach (string propertyName in callTargetScope.CallerAssignedProperties)
-        {
-            mergedState.Context.CopyPropertyFrom(callerState.Context, propertyName);
-        }
-
-        foreach (string itemType in callTargetScope.CallerAssignedItemTypes)
-        {
-            mergedState.Context.CopyItemFrom(callerState.Context, itemType);
-        }
-
-        RestoreState(mergedState);
+        RestoreState(
+            CompleteLegacyCallTargetScope(
+                new FailureState(CaptureBranchState(), callTargetScope.Clone())));
     }
 
     private ValidatorState CaptureState()
         => new(ValidationLookup.SnapshotHardenedLookup());
 
+    private ValidatorState CaptureBranchState()
+        => new(ValidationLookup.SnapshotHardenedLookupForBranching());
+
+    private static ValidatorState CloneState(ValidatorState state)
+        => new(state.Lookup.SnapshotHardenedLookupForBranching());
+
+    private FailureState CaptureFailureState(LegacyCallTargetScope? callTargetScope)
+        => new(CaptureBranchState(), callTargetScope?.Clone());
+
     private void RestoreState(ValidatorState state)
     {
         _validationLookup = state.Lookup;
         _concreteExpander = CreateConcreteExpander(_validationLookup);
+    }
+
+    private List<FailureState> MaterializeTaskFailureStates(
+        ProjectTaskInstance task,
+        ValidatorState taskEntryState,
+        LegacyCallTargetScope? taskEntryCallTargetScope,
+        IReadOnlyList<ValidatedBucket<TaskValidationResult>> taskBuckets)
+    {
+        List<FailureState> failureStates = [];
+        ValidatorState reachableState = CloneState(taskEntryState);
+        LegacyCallTargetScope? reachableCallTargetScope = taskEntryCallTargetScope;
+
+        foreach (ValidatedBucket<TaskValidationResult> bucket in taskBuckets)
+        {
+            ValidatorState preTaskState = CloneState(reachableState);
+            ValidatorState postTaskState = bucket.HasScope
+                ? CloneState(reachableState)
+                : CloneState(bucket.State);
+            if (bucket.HasScope)
+            {
+                postTaskState.Lookup.ApplyHardenedScopeSnapshot(bucket.State.Lookup);
+            }
+
+            if (!bucket.Result.Executed)
+            {
+                reachableState = postTaskState;
+                reachableCallTargetScope = bucket.Result.CallTargetScope;
+            }
+            else if (bucket.Result.CanStopOnFailure)
+            {
+                failureStates.Add(
+                    new FailureState(
+                        preTaskState,
+                        reachableCallTargetScope?.Clone()));
+
+                ValidatorState falseReturnState = CloneState(postTaskState);
+                falseReturnState.Context.SetConcreteProperty(
+                    ReservedPropertyNames.lastTaskResult,
+                    "false",
+                    updateLookup: true);
+                failureStates.Add(
+                    new FailureState(
+                        falseReturnState,
+                        bucket.Result.CallTargetScope?.Clone()));
+
+                reachableState = postTaskState;
+                reachableCallTargetScope = bucket.Result.CallTargetScope;
+            }
+            else
+            {
+                reachableState = JoinStates(
+                    [preTaskState, postTaskState],
+                    $"continuing outcomes of task '{task.Name}'");
+                reachableCallTargetScope = bucket.Result.CallTargetScope;
+            }
+        }
+
+        bool requiresContinuationJoin = false;
+        foreach (ValidatedBucket<TaskValidationResult> bucket in taskBuckets)
+        {
+            requiresContinuationJoin |=
+                bucket.Result.Executed &&
+                !bucket.Result.CanStopOnFailure;
+        }
+
+        if (requiresContinuationJoin)
+        {
+            ValueState taskStatus = ValueState.Deferred(new ValueOrigin($"result of task '{task.Name}'"));
+            reachableState.Context.SetProperty(
+                ReservedPropertyNames.lastTaskResult,
+                HardenedValue<string>.NonStatic(taskStatus),
+                overwrite: true);
+            ApplyJoinedAvailability(reachableState);
+        }
+
+        return failureStates;
+    }
+
+    private static bool MayThrowDuringExpansion(string? expression)
+    {
+        if (string.IsNullOrEmpty(expression))
+        {
+            return false;
+        }
+
+        int propertyStart = expression.IndexOf("$(", StringComparison.Ordinal);
+        while (propertyStart >= 0)
+        {
+            int propertyEnd = expression.IndexOf(')', propertyStart + 2);
+            if (propertyEnd < 0)
+            {
+                return true;
+            }
+
+            ReadOnlySpan<char> propertyExpression =
+                expression.AsSpan(propertyStart + 2, propertyEnd - propertyStart - 2);
+            if (propertyExpression.StartsWith("[", StringComparison.Ordinal) ||
+                propertyExpression.Contains(".", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            propertyStart = expression.IndexOf("$(", propertyEnd + 1, StringComparison.Ordinal);
+        }
+
+        return false;
+    }
+
+    private void ApplyJoinedAvailability(ValidatorState source)
+    {
+        var propertyNames = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        var itemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        source.Context.CollectTrackedNames(propertyNames, itemTypes);
+
+        foreach (string propertyName in propertyNames)
+        {
+            HardenedValue<string> value = source.Context.GetProperty(propertyName);
+            if (!value.IsStatic)
+            {
+                Context.SetProperty(propertyName, value, overwrite: true);
+            }
+        }
+
+        foreach (string itemType in itemTypes)
+        {
+            ValueState state = source.Context.GetItemValue(itemType, includeMetadata: true);
+            if (!state.IsStatic)
+            {
+                Context.SetItemMembershipNonStatic(
+                    itemType,
+                    state,
+                    $"continuing outcomes for item '{itemType}'");
+            }
+        }
+    }
+
+    private static List<FailureState> MaterializeTargetFailureStates(
+        ValidatorState targetEntryState,
+        IReadOnlyList<ValidatedBucket<TargetBodyValidationResult>> targetBuckets)
+    {
+        List<FailureState> failureStates = [];
+        ValidatorState reachableState = CloneState(targetEntryState);
+
+        foreach (ValidatedBucket<TargetBodyValidationResult> bucket in targetBuckets)
+        {
+            foreach (FailureState bucketFailureState in bucket.Result.FailureStates)
+            {
+                if (!bucket.HasScope)
+                {
+                    failureStates.Add(
+                        new FailureState(
+                            CloneState(bucketFailureState.State),
+                            bucketFailureState.CallTargetScope?.Clone()));
+                    continue;
+                }
+
+                ValidatorState failureState = CloneState(reachableState);
+                failureState.Lookup.ApplyHardenedScopeSnapshot(bucketFailureState.State.Lookup);
+                failureStates.Add(
+                    new FailureState(
+                        failureState,
+                        bucketFailureState.CallTargetScope?.Clone()));
+            }
+
+            if (bucket.HasScope)
+            {
+                reachableState.Lookup.ApplyHardenedScopeSnapshot(bucket.State.Lookup);
+            }
+            else
+            {
+                reachableState = CloneState(bucket.State);
+            }
+        }
+
+        return failureStates;
+    }
+
+    private static ValidatorState CompleteLegacyCallTargetScope(FailureState failureState)
+    {
+        LegacyCallTargetScope? callTargetScope = failureState.CallTargetScope;
+        if (callTargetScope is null || !callTargetScope.WasInvoked)
+        {
+            return CloneState(failureState.State);
+        }
+
+        ValidatorState mergedState = CloneState(callTargetScope.CalledState);
+        foreach (string propertyName in callTargetScope.CallerAssignedProperties)
+        {
+            mergedState.Context.CopyPropertyFrom(failureState.State.Context, propertyName);
+        }
+
+        foreach (string itemType in callTargetScope.CallerAssignedItemTypes)
+        {
+            mergedState.Context.CopyItemFrom(failureState.State.Context, itemType);
+        }
+
+        return mergedState;
+    }
+
+    private static ValidatorState JoinStates(
+        IReadOnlyList<ValidatorState> states,
+        string description)
+    {
+        if (states.Count == 0)
+        {
+            throw new ArgumentException("At least one state is required.", nameof(states));
+        }
+
+        ValidatorState joined = CloneState(states[0]);
+        if (states.Count == 1)
+        {
+            return joined;
+        }
+
+        var propertyNames = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        var itemTypes = new HashSet<string>(MSBuildNameIgnoreCaseComparer.Default);
+        foreach (ValidatorState state in states)
+        {
+            state.Context.CollectTrackedNames(propertyNames, itemTypes);
+        }
+
+        foreach (string propertyName in propertyNames)
+        {
+            HardenedValue<string> first = states[0].Context.GetProperty(propertyName);
+            ValueState combinedState = first.State;
+            bool staticValuesMatch = first.TryGetStaticValue(out string? staticValue);
+
+            for (int i = 1; i < states.Count; i++)
+            {
+                HardenedValue<string> value = states[i].Context.GetProperty(propertyName);
+                combinedState = ValueState.Combine(combinedState, value.State);
+                staticValuesMatch =
+                    staticValuesMatch &&
+                    value.TryGetStaticValue(out string? candidate) &&
+                    string.Equals(staticValue, candidate, StringComparison.Ordinal);
+            }
+
+            if (staticValuesMatch)
+            {
+                continue;
+            }
+
+            ValueState joinedState = combinedState.IsStatic
+                ? ValueState.Deferred(
+                    new ValueOrigin(
+                        $"property '{propertyName}' may have different values across {description}"))
+                : combinedState.WithOrigin(description);
+            joined.Context.SetProperty(
+                propertyName,
+                HardenedValue<string>.NonStatic(joinedState),
+                overwrite: true);
+        }
+
+        foreach (string itemType in itemTypes)
+        {
+            ValueState combinedState = states[0].Context.GetItemValue(itemType, includeMetadata: true);
+            bool concreteItemsMatch = true;
+            for (int i = 1; i < states.Count; i++)
+            {
+                combinedState = ValueState.Combine(
+                    combinedState,
+                    states[i].Context.GetItemValue(itemType, includeMetadata: true));
+                concreteItemsMatch &=
+                    HaveEquivalentItems(states[0].Lookup, states[i].Lookup, itemType);
+            }
+
+            if (!concreteItemsMatch)
+            {
+                joined.Context.SetItemMembershipNonStatic(
+                    itemType,
+                    ValueState.Deferred(
+                        new ValueOrigin(
+                            $"item '{itemType}' may have different values across {description}")),
+                    description);
+            }
+            else if (!combinedState.IsStatic)
+            {
+                joined.Context.SetItemMembershipNonStatic(
+                    itemType,
+                    combinedState,
+                    description);
+            }
+        }
+
+        return joined;
+    }
+
+    private static bool HaveEquivalentItems(Lookup left, Lookup right, string itemType)
+    {
+        ICollection<ProjectItemInstance> leftItems = left.GetItems(itemType);
+        ICollection<ProjectItemInstance> rightItems = right.GetItems(itemType);
+        if (leftItems.Count != rightItems.Count)
+        {
+            return false;
+        }
+
+        using IEnumerator<ProjectItemInstance> leftEnumerator = leftItems.GetEnumerator();
+        using IEnumerator<ProjectItemInstance> rightEnumerator = rightItems.GetEnumerator();
+        while (leftEnumerator.MoveNext())
+        {
+            if (!rightEnumerator.MoveNext() ||
+                !HaveEquivalentItem(leftEnumerator.Current, rightEnumerator.Current))
+            {
+                return false;
+            }
+        }
+
+        return !rightEnumerator.MoveNext();
+    }
+
+    private static bool HaveEquivalentItem(
+        ProjectItemInstance left,
+        ProjectItemInstance right)
+    {
+        if (!string.Equals(left.EvaluatedInclude, right.EvaluatedInclude, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        IDictionary leftMetadata = ((ITaskItem)left).CloneCustomMetadata();
+        IDictionary rightMetadata = ((ITaskItem)right).CloneCustomMetadata();
+        if (leftMetadata.Count != rightMetadata.Count)
+        {
+            return false;
+        }
+
+        foreach (DictionaryEntry metadata in leftMetadata)
+        {
+            if (!rightMetadata.Contains(metadata.Key) ||
+                !string.Equals(
+                    metadata.Value as string,
+                    rightMetadata[metadata.Key] as string,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private void ValidateOnErrorTargets(
@@ -901,7 +1456,7 @@ internal sealed class HardenedTargetValidator
     {
         foreach (ProjectOnErrorInstance onError in target.OnErrorChildren)
         {
-            ValidateExpression(
+            ExpressionValidationResult conditionResult = ValidateExpression(
                 onError,
                 onError.Condition,
                 onError.ConditionLocation,
@@ -909,6 +1464,16 @@ internal sealed class HardenedTargetValidator
                 requireStatic: true,
                 isCondition: true,
                 allowTaskStatus: true);
+            if (TryEvaluateCondition(
+                    onError,
+                    onError.Condition,
+                    onError.ConditionLocation,
+                    conditionResult,
+                    out bool conditionValue) &&
+                !conditionValue)
+            {
+                continue;
+            }
 
             ExpressionValidationResult targetsResult = ValidateExpression(
                 onError,
@@ -929,7 +1494,12 @@ internal sealed class HardenedTargetValidator
             {
                 foreach (string errorTarget in ExpressionShredder.SplitSemiColonSeparatedList(expandedTargets))
                 {
-                    ValidateTarget(project, errorTarget, onError.ExecuteTargetsLocation, visitedTargets);
+                    ValidateTarget(
+                        project,
+                        errorTarget,
+                        onError.ExecuteTargetsLocation,
+                        visitedTargets,
+                        isFailureContext: true);
                 }
             }
         }
@@ -1891,6 +2461,59 @@ internal sealed class HardenedTargetValidator
         }
     }
 
+    private List<ValidatedBucket<T>> ValidateInBucketsWithResults<T>(
+        BatchingValidationResult batchingResult,
+        Func<ValueState, T> validate)
+    {
+        if (batchingResult.Buckets is null)
+        {
+            T result = validate(batchingResult.State);
+            return [new ValidatedBucket<T>(CaptureBranchState(), result, HasScope: false)];
+        }
+
+        List<ValidatedBucket<T>> results = new(batchingResult.Buckets.Count);
+        Lookup parentLookup = ValidationLookup;
+        Expander<ProjectPropertyInstance, ProjectItemInstance> parentExpander = ConcreteExpander;
+        IMetadataTable? parentMetadata = _activeMetadata;
+        int initializedBucketCount = 0;
+        try
+        {
+            for (int i = 0; i < batchingResult.Buckets.Count; i++)
+            {
+                ItemBucket bucket = batchingResult.Buckets[i];
+                bucket.Initialize(loggingContext: null);
+                initializedBucketCount++;
+                _validationLookup = bucket.Lookup;
+                _activeMetadata = bucket.Expander.Metadata;
+                _concreteExpander = bucket.Expander;
+                try
+                {
+                    T result = validate(batchingResult.State);
+                    results.Add(new ValidatedBucket<T>(CaptureBranchState(), result, HasScope: true));
+                }
+                finally
+                {
+                    _validationLookup = parentLookup;
+                    _activeMetadata = parentMetadata;
+                    _concreteExpander = parentExpander;
+                }
+            }
+        }
+        finally
+        {
+            for (int i = 0; i < initializedBucketCount; i++)
+            {
+                batchingResult.Buckets[i].LeaveScope();
+            }
+
+            _validationLookup = parentLookup;
+            _activeMetadata = parentMetadata;
+            _concreteExpander = parentExpander;
+        }
+
+        return results;
+    }
+
     private BatchingValidationResult ValidateBatching(
         object owner,
         IReadOnlyList<string?> expressions,
@@ -2731,12 +3354,40 @@ internal sealed class HardenedTargetValidator
             new(MSBuildNameIgnoreCaseComparer.Default);
 
         internal bool WasInvoked { get; set; }
+
+        internal LegacyCallTargetScope Clone()
+        {
+            var clone = new LegacyCallTargetScope(CloneState(CalledState))
+            {
+                WasInvoked = WasInvoked,
+            };
+            clone.CallerAssignedProperties.UnionWith(CallerAssignedProperties);
+            clone.CallerAssignedItemTypes.UnionWith(CallerAssignedItemTypes);
+            return clone;
+        }
     }
 
     private sealed record ValidatorState(Lookup Lookup)
     {
         internal HardenedLookupState Context => Lookup.HardenedState;
     }
+
+    private readonly record struct TargetBodyValidationResult(
+        List<FailureState> FailureStates);
+
+    private readonly record struct TaskValidationResult(
+        bool CanStopOnFailure,
+        bool Executed,
+        LegacyCallTargetScope? CallTargetScope);
+
+    private sealed record FailureState(
+        ValidatorState State,
+        LegacyCallTargetScope? CallTargetScope);
+
+    private readonly record struct ValidatedBucket<T>(
+        ValidatorState State,
+        T Result,
+        bool HasScope);
 
     private readonly record struct BatchingValidationResult(
         ValueState State,
