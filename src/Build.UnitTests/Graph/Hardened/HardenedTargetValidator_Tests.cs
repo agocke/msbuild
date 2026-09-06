@@ -1420,6 +1420,165 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             });
     }
 
+    [Theory]
+    [InlineData("false And '$(Deferred)' != ''")]
+    [InlineData("true Or '$(Deferred)' != ''")]
+    public void ShortCircuitSkipsDeferredConditionBranch(string condition)
+    {
+        ValidateSuccess(
+            $$"""
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <PropertyGroup Condition="{{condition}}">
+                  <Observed>static</Observed>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void FalseDesignTimeItemGroupSkipsDeferredItems()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" ItemName="DeduplicatedCompileItems" />
+                </Generate>
+                <ItemGroup Condition="'$(DesignTimeBuild)' == 'true' And '@(DeduplicatedCompileItems)' != ''">
+                  <Compile Remove="@(Compile)" />
+                  <Compile Include="@(DeduplicatedCompileItems)" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+    }
+
+    [Fact]
+    public void EmptyItemOperationAllowsMetadataConditionSyntax()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <PackageReference Publish="false"
+                                    Condition="('%(PackageReference.PrivateAssets)' == 'All') And ('%(PackageReference.Publish)' == '')" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Theory]
+    [InlineData("false And Exists('input.txt')")]
+    [InlineData("true Or Exists('input.txt')")]
+    [InlineData("false And (1 &lt; 'not-a-number')")]
+    public void ShortCircuitSkipsProhibitedOrErroringConditionBranch(string condition)
+    {
+        ValidateSuccess(
+            $$"""
+            <Project>
+              <Target Name="Build">
+                <PropertyGroup Condition="{{condition}}">
+                  <Observed>static</Observed>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+    }
+
+    [Fact]
+    public void DeferredAndFalseFoldsToKnownFalse()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <PropertyGroup Condition="'$(Deferred)' != '' And false">
+                  <Observed>unreachable</Observed>
+                </PropertyGroup>
+                <PureConsume Input="$(Observed)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
+    public void DeferredOrTrueFoldsToKnownTrue()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <PropertyGroup Condition="'$(Deferred)' != '' Or true">
+                  <Observed>static</Observed>
+                </PropertyGroup>
+                <PureConsume Input="$(Observed)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Theory]
+    [InlineData("'$(Deferred)' != '' And true")]
+    [InlineData("'$(Deferred)' != '' Or false")]
+    [InlineData("!('$(Deferred)' != '')")]
+    public void ConditionWithoutDecisiveStaticBranchRemainsDeferred(string condition)
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            $$"""
+            <Project>
+              <Target Name="Build">
+                <Generate>
+                  <Output TaskParameter="Result" PropertyName="Deferred" />
+                </Generate>
+                <PropertyGroup Condition="{{condition}}">
+                  <Observed>static</Observed>
+                </PropertyGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("Deferred");
+    }
+
     [Fact]
     public void FalseTaskConditionDoesNotSetTaskStatus()
     {

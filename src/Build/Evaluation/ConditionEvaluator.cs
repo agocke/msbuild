@@ -14,6 +14,13 @@ using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 
 namespace Microsoft.Build.Evaluation
 {
+    internal enum ConditionEvaluationResult
+    {
+        KnownFalse,
+        KnownTrue,
+        Deferred,
+    }
+
     internal static class ConditionEvaluator
     {
         /// <summary>
@@ -237,6 +244,85 @@ namespace Microsoft.Build.Evaluation
             // If the condition wasn't empty, there must be a location for it
             ArgumentNullException.ThrowIfNull(elementLocation);
 
+            var state = new ConditionEvaluationState<P, I>(
+                condition,
+                expander,
+                expanderOptions,
+                conditionedPropertiesTable,
+                evaluationDirectory,
+                elementLocation,
+                fileSystem,
+                projectRootElementCache);
+
+            return EvaluateConditionCore(
+                condition,
+                options,
+                state,
+                expander.PropertiesUseTracker,
+                loggingContext,
+                partiallyEvaluate: false,
+                canExpandExpression: null,
+                canEvaluateFunction: null) == ConditionEvaluationResult.KnownTrue;
+        }
+
+        internal static ConditionEvaluationResult EvaluateConditionPartially<P, I>(
+            string condition,
+            ParserOptions options,
+            Expander<P, I> expander,
+            ExpanderOptions expanderOptions,
+            string evaluationDirectory,
+            ElementLocation elementLocation,
+            IFileSystem fileSystem,
+            Func<string, bool> canExpandExpression,
+            Func<string, bool> canEvaluateFunction,
+            ProjectRootElementCacheBase? projectRootElementCache = null)
+            where P : class, IProperty
+            where I : class, IItem
+        {
+            ArgumentNullException.ThrowIfNull(condition);
+            ArgumentNullException.ThrowIfNull(expander);
+            ArgumentException.ThrowIfNullOrEmpty(evaluationDirectory);
+            ArgumentNullException.ThrowIfNull(canExpandExpression);
+            ArgumentNullException.ThrowIfNull(canEvaluateFunction);
+
+            if (condition.Length == 0)
+            {
+                return ConditionEvaluationResult.KnownTrue;
+            }
+
+            ArgumentNullException.ThrowIfNull(elementLocation);
+
+            var state = new ConditionEvaluationState<P, I>(
+                condition,
+                expander,
+                expanderOptions,
+                conditionedPropertiesInProject: null,
+                evaluationDirectory,
+                elementLocation,
+                fileSystem,
+                projectRootElementCache);
+
+            return EvaluateConditionCore(
+                condition,
+                options,
+                state,
+                expander.PropertiesUseTracker,
+                loggingContext: null,
+                partiallyEvaluate: true,
+                canExpandExpression,
+                canEvaluateFunction);
+        }
+
+        private static ConditionEvaluationResult EvaluateConditionCore(
+            string condition,
+            ParserOptions options,
+            IConditionEvaluationState state,
+            PropertiesUseTracker propertiesUseTracker,
+            LoggingContext? loggingContext,
+            bool partiallyEvaluate,
+            Func<string, bool>? canExpandExpression,
+            Func<string, bool>? canEvaluateFunction)
+        {
             // Get the expression tree cache for the current parsing options.
             var cachedExpressionTreesForCurrentOptions = s_cachedExpressionTrees.GetOrAdd(
                 (int)options,
@@ -261,33 +347,33 @@ namespace Microsoft.Build.Evaluation
                     conditionParser.LogBuildEventContext = loggingContext?.BuildEventContext ?? BuildEventContext.Invalid;
                     #endregion
 
-                    parsedExpression = conditionParser.Parse(condition, options, elementLocation);
+                    parsedExpression = conditionParser.Parse(condition, options, state.ElementLocation);
                 }
                 else
                 {
                     parsedExpression = expressionPool.Pop();
                 }
 
-                bool result;
-
-                var state = new ConditionEvaluationState<P, I>(
-                    condition,
-                    expander,
-                    expanderOptions,
-                    conditionedPropertiesTable,
-                    evaluationDirectory,
-                    elementLocation,
-                    fileSystem,
-                    projectRootElementCache);
-
-                expander.PropertiesUseTracker.PropertyReadContext = PropertyReadContext.ConditionEvaluation;
+                propertiesUseTracker.PropertyReadContext = PropertyReadContext.ConditionEvaluation;
                 // We are evaluating this expression now and it can cache some state for the duration,
                 // so we don't want multiple threads working on the same expression
                 lock (parsedExpression)
                 {
                     try
                     {
-                        result = parsedExpression.Evaluate(state);
+                        if (partiallyEvaluate)
+                        {
+                            return EvaluateConditionPartially(
+                                parsedExpression,
+                                new PartialConditionEvaluationState(
+                                    state,
+                                    canExpandExpression!),
+                                canEvaluateFunction!);
+                        }
+
+                        return parsedExpression.Evaluate(state)
+                            ? ConditionEvaluationResult.KnownTrue
+                            : ConditionEvaluationResult.KnownFalse;
                     }
                     finally
                     {
@@ -297,12 +383,123 @@ namespace Microsoft.Build.Evaluation
                             // Finished using the expression tree. Add it back to the pool so other threads can use it.
                             expressionPool.Push(parsedExpression);
                         }
-                        expander.PropertiesUseTracker.ResetPropertyReadContext();
+                        propertiesUseTracker.ResetPropertyReadContext();
+                    }
+                }
+            }
+        }
+
+        private static ConditionEvaluationResult EvaluateConditionPartially(
+            GenericExpressionNode expression,
+            IConditionEvaluationState state,
+            Func<string, bool> canEvaluateFunction)
+        {
+            switch (expression)
+            {
+                case AndExpressionNode and:
+                {
+                    ConditionEvaluationResult left = EvaluateConditionPartially(
+                        and.LeftChild,
+                        state,
+                        canEvaluateFunction);
+                    if (left == ConditionEvaluationResult.KnownFalse)
+                    {
+                        return ConditionEvaluationResult.KnownFalse;
+                    }
+
+                    ConditionEvaluationResult right = EvaluateConditionPartially(
+                        and.RightChild,
+                        state,
+                        canEvaluateFunction);
+                    return left == ConditionEvaluationResult.KnownTrue
+                        ? right
+                        : right == ConditionEvaluationResult.KnownFalse
+                            ? ConditionEvaluationResult.KnownFalse
+                            : ConditionEvaluationResult.Deferred;
+                }
+
+                case OrExpressionNode or:
+                {
+                    ConditionEvaluationResult left = EvaluateConditionPartially(
+                        or.LeftChild,
+                        state,
+                        canEvaluateFunction);
+                    if (left == ConditionEvaluationResult.KnownTrue)
+                    {
+                        return ConditionEvaluationResult.KnownTrue;
+                    }
+
+                    ConditionEvaluationResult right = EvaluateConditionPartially(
+                        or.RightChild,
+                        state,
+                        canEvaluateFunction);
+                    return left == ConditionEvaluationResult.KnownFalse
+                        ? right
+                        : right == ConditionEvaluationResult.KnownTrue
+                            ? ConditionEvaluationResult.KnownTrue
+                            : ConditionEvaluationResult.Deferred;
+                }
+
+                case NotExpressionNode not:
+                    return EvaluateConditionPartially(
+                        not.LeftChild,
+                        state,
+                        canEvaluateFunction) switch
+                    {
+                        ConditionEvaluationResult.KnownFalse => ConditionEvaluationResult.KnownTrue,
+                        ConditionEvaluationResult.KnownTrue => ConditionEvaluationResult.KnownFalse,
+                        _ => ConditionEvaluationResult.Deferred,
+                    };
+            }
+
+            if (!CanEvaluateFunctions(expression, canEvaluateFunction))
+            {
+                return ConditionEvaluationResult.Deferred;
+            }
+
+            try
+            {
+                return expression.Evaluate(state)
+                    ? ConditionEvaluationResult.KnownTrue
+                    : ConditionEvaluationResult.KnownFalse;
+            }
+            catch (DeferredConditionEvaluationException)
+            {
+                return ConditionEvaluationResult.Deferred;
+            }
+        }
+
+        private static bool CanEvaluateFunctions(
+            GenericExpressionNode expression,
+            Func<string, bool> canEvaluateFunction)
+        {
+            if (expression is FunctionCallExpressionNode function)
+            {
+                if (!canEvaluateFunction(function.FunctionName))
+                {
+                    return false;
+                }
+
+                foreach (GenericExpressionNode argument in function.Arguments)
+                {
+                    if (!CanEvaluateFunctions(argument, canEvaluateFunction))
+                    {
+                        return false;
                     }
                 }
 
-                return result;
+                return true;
             }
+
+            if (expression is OperatorExpressionNode operation)
+            {
+                return (operation.LeftChild is null ||
+                        CanEvaluateFunctions(operation.LeftChild, canEvaluateFunction)) &&
+                    (operation.RightChild is null ||
+                        CanEvaluateFunctions(operation.RightChild, canEvaluateFunction));
+            }
+
+            return true;
         }
 
         private static ExpressionTreeForCurrentOptionsWithSize FlushCacheIfLargerThanThreshold(
@@ -383,6 +580,56 @@ namespace Microsoft.Build.Evaluation
             ProjectRootElementCacheBase? LoadedProjectsCache { get; }
 
             IFileSystem FileSystem { get; }
+        }
+
+        private sealed class PartialConditionEvaluationState(
+            IConditionEvaluationState inner,
+            Func<string, bool> canExpandExpression) : IConditionEvaluationState
+        {
+            public string Condition => inner.Condition;
+
+            public string EvaluationDirectory => inner.EvaluationDirectory;
+
+            public ElementLocation ElementLocation => inner.ElementLocation;
+
+            public PropertiesUseTracker PropertiesUseTracker => inner.PropertiesUseTracker;
+
+            public Dictionary<string, List<string>>? ConditionedPropertiesInProject =>
+                inner.ConditionedPropertiesInProject;
+
+            public ProjectRootElementCacheBase? LoadedProjectsCache => inner.LoadedProjectsCache;
+
+            public IFileSystem FileSystem => inner.FileSystem;
+
+            public string ExpandIntoStringBreakEarly(string expression)
+            {
+                EnsureCanExpand(expression);
+                return inner.ExpandIntoStringBreakEarly(expression);
+            }
+
+            public IList<TaskItem> ExpandIntoTaskItems(string expression)
+            {
+                EnsureCanExpand(expression);
+                return inner.ExpandIntoTaskItems(expression);
+            }
+
+            public string ExpandIntoString(string expression)
+            {
+                EnsureCanExpand(expression);
+                return inner.ExpandIntoString(expression);
+            }
+
+            private void EnsureCanExpand(string expression)
+            {
+                if (!canExpandExpression(expression))
+                {
+                    throw new DeferredConditionEvaluationException();
+                }
+            }
+        }
+
+        private sealed class DeferredConditionEvaluationException : Exception
+        {
         }
 
         /// <summary>

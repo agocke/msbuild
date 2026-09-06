@@ -27,6 +27,10 @@ namespace Microsoft.Build.Evaluation
             _arguments = arguments;
         }
 
+        internal string FunctionName => _functionName;
+
+        internal IReadOnlyList<GenericExpressionNode> Arguments => _arguments;
+
         /// <summary>
         /// Evaluate node as boolean
         /// </summary>

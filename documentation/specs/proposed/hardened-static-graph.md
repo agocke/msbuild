@@ -134,9 +134,18 @@ points are not consulted unless explicitly represented as graph inputs.
 
 `Condition` is permitted wherever the MSBuild schema permits it.
 
-A condition evaluated during graph construction MUST be a pure expression over
-static properties and static item values. Its evaluation point and batching
-context MUST match ordinary MSBuild semantics.
+A condition that controls graph construction MUST partially evaluate to a known
+Boolean result before execution. Static subexpressions are evaluated using
+ordinary MSBuild conversions, evaluation order, errors, and `And`/`Or`
+short-circuit rules. A subexpression whose value is deferred produces an
+unknown intermediate result; branches that ordinary short-circuiting makes
+unreachable do not contribute deferred values or ambient observations.
+
+The condition's evaluation point and batching context MUST match ordinary
+MSBuild semantics. A deferred intermediate is permitted only when the complete
+condition still folds to a known result, such as `Deferred And false` or
+`Deferred Or true`. A prohibited ambient observation on any feasible branch
+remains an error even when another branch determines the final Boolean result.
 
 ### G3. Property and item functions
 

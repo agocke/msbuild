@@ -202,33 +202,30 @@ internal sealed class HardenedTargetValidator
         List<FailureState>? preBodyFailureStates =
             target.OnErrorChildren.Count == 0 ? null : [];
         ValueState targetResult = ValueState.Static;
-        if (preBodyFailureStates is not null &&
-            MayThrowDuringExpansion(target.Condition))
-        {
-            preBodyFailureStates.Add(new FailureState(CaptureBranchState(), CallTargetScope: null));
-        }
 
-        bool targetConditionMetadataValidated = RejectTargetMetadata(
+        bool targetConditionMetadataRejected = RejectTargetMetadata(
             target.Condition,
             target.ConditionLocation,
             $"the condition of target '{target.Name}'");
-        ExpressionValidationResult targetConditionResult = ValidateExpression(
+        ConditionValidationResult targetConditionResult = ValidateCondition(
             target,
             target.Condition,
             target.ConditionLocation,
             $"the condition of target '{target.Name}'",
-            requireStatic: true,
-            isCondition: true,
-            metadataBatchingValidated: targetConditionMetadataValidated);
+            metadataBatchingValidated: targetConditionMetadataRejected,
+            conditionSyntaxValid: !targetConditionMetadataRejected);
+        if (preBodyFailureStates is not null &&
+            targetConditionResult.MayThrow)
+        {
+            preBodyFailureStates.Add(new FailureState(CaptureBranchState(), CallTargetScope: null));
+        }
+
         ValidateExpression(target, target.BeforeTargets, target.BeforeTargetsLocation, $"the BeforeTargets attribute of target '{target.Name}'", requireStatic: true, isCondition: false);
         ValidateExpression(target, target.AfterTargets, target.AfterTargetsLocation, $"the AfterTargets attribute of target '{target.Name}'", requireStatic: true, isCondition: false);
 
-        bool targetExecutes = !TryEvaluateCondition(
-            target,
-            target.Condition,
-            target.ConditionLocation,
-            targetConditionResult,
-            out bool conditionValue) || conditionValue;
+        bool targetExecutes =
+            !targetConditionResult.IsKnown ||
+            targetConditionResult.Value;
 
         if (targetExecutes)
         {
@@ -475,25 +472,17 @@ internal sealed class HardenedTargetValidator
         LegacyCallTargetScope? callTargetScope,
         List<FailureState>? failureStates)
     {
-        if (MayThrowDuringExpansion(propertyGroup.Condition))
+        ConditionValidationResult groupConditionResult = ValidateCondition(
+            propertyGroup,
+            propertyGroup.Condition,
+            propertyGroup.ConditionLocation,
+            $"the condition of a PropertyGroup in target '{targetName}'");
+        if (groupConditionResult.MayThrow)
         {
             failureStates?.Add(CaptureFailureState(callTargetScope));
         }
 
-        ExpressionValidationResult groupConditionResult = ValidateExpression(
-            propertyGroup,
-            propertyGroup.Condition,
-            propertyGroup.ConditionLocation,
-            $"the condition of a PropertyGroup in target '{targetName}'",
-            requireStatic: true,
-            isCondition: true);
-        bool groupConditionKnown = TryEvaluateCondition(
-            propertyGroup,
-            propertyGroup.Condition,
-            propertyGroup.ConditionLocation,
-            groupConditionResult,
-            out bool groupConditionValue);
-        if (groupConditionKnown && !groupConditionValue)
+        if (groupConditionResult.IsKnown && !groupConditionResult.Value)
         {
             return;
         }
@@ -517,8 +506,8 @@ internal sealed class HardenedTargetValidator
                 batchingResult,
                 batchingState => ValidateProperty(
                     property,
-                    groupConditionKnown,
-                    groupConditionValue,
+                    groupConditionResult.IsKnown,
+                    groupConditionResult.Value,
                     callTargetScope,
                     batchingState));
         }
@@ -531,21 +520,13 @@ internal sealed class HardenedTargetValidator
         LegacyCallTargetScope? callTargetScope,
         ValueState batchingState)
     {
-        ExpressionValidationResult conditionResult = ValidateExpression(
+        ConditionValidationResult conditionResult = ValidateCondition(
             property,
             property.Condition,
             property.ConditionLocation,
             $"the condition of property '{property.Name}'",
-            requireStatic: true,
-            isCondition: true,
             metadataBatchingValidated: true);
-        bool propertyConditionKnown = TryEvaluateCondition(
-            property,
-            property.Condition,
-            property.ConditionLocation,
-            conditionResult,
-            out bool propertyConditionValue);
-        if (propertyConditionKnown && !propertyConditionValue)
+        if (conditionResult.IsKnown && !conditionResult.Value)
         {
             return;
         }
@@ -569,8 +550,8 @@ internal sealed class HardenedTargetValidator
 
         bool overwrites = groupConditionKnown &&
             groupConditionValue &&
-            propertyConditionKnown &&
-            propertyConditionValue;
+            conditionResult.IsKnown &&
+            conditionResult.Value;
         callTargetScope?.CallerAssignedProperties.Add(property.Name);
         HardenedValue<string> propertyValue;
         if (overwrites &&
@@ -603,25 +584,17 @@ internal sealed class HardenedTargetValidator
         LegacyCallTargetScope? callTargetScope,
         List<FailureState>? failureStates)
     {
-        if (MayThrowDuringExpansion(itemGroup.Condition))
+        ConditionValidationResult groupConditionResult = ValidateCondition(
+            itemGroup,
+            itemGroup.Condition,
+            itemGroup.ConditionLocation,
+            $"the condition of an ItemGroup in target '{targetName}'");
+        if (groupConditionResult.MayThrow)
         {
             failureStates?.Add(CaptureFailureState(callTargetScope));
         }
 
-        ExpressionValidationResult groupConditionResult = ValidateExpression(
-            itemGroup,
-            itemGroup.Condition,
-            itemGroup.ConditionLocation,
-            $"the condition of an ItemGroup in target '{targetName}'",
-            requireStatic: true,
-            isCondition: true);
-        if (TryEvaluateCondition(
-                itemGroup,
-                itemGroup.Condition,
-                itemGroup.ConditionLocation,
-                groupConditionResult,
-                out bool groupConditionValue) &&
-            !groupConditionValue)
+        if (groupConditionResult.IsKnown && !groupConditionResult.Value)
         {
             return;
         }
@@ -724,22 +697,14 @@ internal sealed class HardenedTargetValidator
         HardenedTaskClassification classification,
         ValueState taskBatchingState)
     {
-        ExpressionValidationResult taskConditionResult = ValidateExpression(
+        ConditionValidationResult taskConditionResult = ValidateCondition(
             task,
             task.Condition,
             task.ConditionLocation,
             $"the condition of task '{task.Name}'",
-            requireStatic: true,
-            isCondition: true,
             metadataBatchingValidated: true);
 
-        if (TryEvaluateCondition(
-            task,
-            task.Condition,
-            task.ConditionLocation,
-            taskConditionResult,
-            out bool taskConditionValue) &&
-            !taskConditionValue)
+        if (taskConditionResult.IsKnown && !taskConditionResult.Value)
         {
             return new TaskValidationResult(
                 CanStopOnFailure: false,
@@ -815,22 +780,14 @@ internal sealed class HardenedTargetValidator
                 $"condition of output '{outputTaskParameter}' from task '{task.Name}'",
                 reportDiagnostics: false).State;
 
-            ExpressionValidationResult outputConditionResult = ValidateExpression(
+            ConditionValidationResult outputConditionResult = ValidateCondition(
                 output,
                 output.Condition,
                 output.ConditionLocation,
                 $"the condition of output '{GetTaskParameter(output)}' from task '{task.Name}'",
-                requireStatic: true,
-                isCondition: true,
                 metadataBatchingValidated: true);
 
-            if (TryEvaluateCondition(
-                    output,
-                    output.Condition,
-                    output.ConditionLocation,
-                    outputConditionResult,
-                    out bool outputConditionValue) &&
-                !outputConditionValue)
+            if (outputConditionResult.IsKnown && !outputConditionResult.Value)
             {
                 continue;
             }
@@ -1472,21 +1429,13 @@ internal sealed class HardenedTargetValidator
     {
         foreach (ProjectOnErrorInstance onError in target.OnErrorChildren)
         {
-            ExpressionValidationResult conditionResult = ValidateExpression(
+            ConditionValidationResult conditionResult = ValidateCondition(
                 onError,
                 onError.Condition,
                 onError.ConditionLocation,
                 $"the condition of OnError in target '{target.Name}'",
-                requireStatic: true,
-                isCondition: true,
                 allowTaskStatus: true);
-            if (TryEvaluateCondition(
-                    onError,
-                    onError.Condition,
-                    onError.ConditionLocation,
-                    conditionResult,
-                    out bool conditionValue) &&
-                !conditionValue)
+            if (conditionResult.IsKnown && !conditionResult.Value)
             {
                 continue;
             }
@@ -1576,6 +1525,124 @@ internal sealed class HardenedTargetValidator
         }
 
         return false;
+    }
+
+    private ConditionValidationResult ValidateCondition(
+        object owner,
+        string condition,
+        IElementLocation? location,
+        string context,
+        bool metadataBatchingValidated = false,
+        bool allowTaskStatus = false,
+        string? implicitItemType = null,
+        bool conditionSyntaxValid = true)
+    {
+        if (condition.Length == 0)
+        {
+            return new ConditionValidationResult(
+                ValueState.Static,
+                IsKnown: true,
+                Value: true,
+                MayThrow: false);
+        }
+
+        IElementLocation effectiveLocation = location ?? ElementLocation.EmptyLocation;
+        ElementLocation conditionLocation =
+            effectiveLocation as ElementLocation ?? ElementLocation.EmptyLocation;
+        if (!conditionSyntaxValid)
+        {
+            ExpressionValidationResult result = ValidateExpression(
+                owner,
+                condition,
+                effectiveLocation,
+                context,
+                requireStatic: false,
+                isCondition: true,
+                metadataBatchingValidated,
+                allowTaskStatus: allowTaskStatus,
+                implicitItemType: implicitItemType);
+            return new ConditionValidationResult(
+                ToBlocked(result.State, $"condition in {context} could not be evaluated"),
+                IsKnown: false,
+                Value: false,
+                MayThrowDuringExpansion(condition));
+        }
+
+        ValueState state = ValueState.Static;
+        bool canEvaluate = true;
+        bool mayThrow = false;
+
+        bool CanExpandExpression(string expression)
+        {
+            mayThrow |= MayThrowDuringExpansion(expression);
+            ExpressionValidationResult result = ValidateExpression(
+                owner,
+                expression,
+                effectiveLocation,
+                context,
+                requireStatic: false,
+                isCondition: true,
+                metadataBatchingValidated,
+                allowTaskStatus: allowTaskStatus,
+                implicitItemType: implicitItemType);
+            state = ValueState.Combine(state, result.State);
+            canEvaluate &= result.CanEvaluate;
+            return result.CanEvaluate &&
+                result.State.IsStatic &&
+                CanExpandConcreteExpression(owner, expression);
+        }
+
+        bool CanEvaluateFunction(string functionName)
+        {
+            if (!MSBuildNameIgnoreCaseComparer.Default.Equals(functionName, "Exists"))
+            {
+                return true;
+            }
+
+            ReportProhibitedFunction(effectiveLocation, "Exists", context);
+            state = ValueState.Blocked(new ValueOrigin($"unsupported expression in {context}"));
+            canEvaluate = false;
+            return false;
+        }
+
+        ConditionEvaluationResult evaluationResult;
+        try
+        {
+            ExpanderOptions expanderOptions = _activeMetadata is null
+                ? ExpanderOptions.ExpandPropertiesAndItems
+                : ExpanderOptions.ExpandAll;
+            evaluationResult = ConditionEvaluator.EvaluateConditionPartially(
+                condition,
+                ParserOptions.AllowAll,
+                ConcreteExpander,
+                expanderOptions,
+                ProjectDirectory,
+                conditionLocation,
+                FileSystems.Default,
+                CanExpandExpression,
+                CanEvaluateFunction);
+        }
+        catch (InvalidProjectFileException exception)
+        {
+            AddDiagnostic(exception);
+            state = ToBlocked(state, $"condition in {context} could not be evaluated");
+            canEvaluate = false;
+            evaluationResult = ConditionEvaluationResult.Deferred;
+        }
+
+        bool isKnown =
+            canEvaluate &&
+            evaluationResult != ConditionEvaluationResult.Deferred;
+        if (!isKnown)
+        {
+            RequireStatic(state, effectiveLocation, context, condition);
+        }
+
+        return new ConditionValidationResult(
+            isKnown ? ValueState.Static : state,
+            isKnown,
+            evaluationResult == ConditionEvaluationResult.KnownTrue,
+            mayThrow);
     }
 
     private bool TryEvaluateCondition(
@@ -1857,22 +1924,14 @@ internal sealed class HardenedTargetValidator
         ProjectItemGroupTaskItemInstance item,
         ValueState batchingState)
     {
-        ExpressionValidationResult conditionResult = ValidateExpression(
+        ConditionValidationResult conditionResult = ValidateCondition(
             item,
             item.Condition,
             item.ConditionLocation,
             $"the condition of item '{item.ItemType}'",
-            requireStatic: true,
-            isCondition: true,
             metadataBatchingValidated: true,
             implicitItemType: item.ItemType);
-        if (TryEvaluateCondition(
-                item,
-                item.Condition,
-                item.ConditionLocation,
-                conditionResult,
-                out bool conditionValue) &&
-            !conditionValue)
+        if (conditionResult.IsKnown && !conditionResult.Value)
         {
             return;
         }
@@ -2225,22 +2284,14 @@ internal sealed class HardenedTargetValidator
             new Dictionary<string, HardenedValue<string>>(MSBuildNameIgnoreCaseComparer.Default);
         foreach (ProjectItemGroupTaskMetadataInstance metadata in item.Metadata)
         {
-            ExpressionValidationResult conditionResult = ValidateExpression(
+            ConditionValidationResult conditionResult = ValidateCondition(
                 item,
                 metadata.Condition,
                 metadata.ConditionLocation,
                 $"the condition of metadata '{metadata.Name}' on item '{item.ItemType}'",
-                requireStatic: true,
-                isCondition: true,
                 metadataBatchingValidated: true,
                 implicitItemType: item.ItemType);
-            if (TryEvaluateCondition(
-                    item,
-                    metadata.Condition,
-                    metadata.ConditionLocation,
-                    conditionResult,
-                    out bool conditionValue) &&
-                !conditionValue)
+            if (conditionResult.IsKnown && !conditionResult.Value)
             {
                 continue;
             }
@@ -3459,6 +3510,12 @@ internal sealed class HardenedTargetValidator
         ValueState State,
         List<ItemBucket>? Buckets,
         object Owner);
+
+    private readonly record struct ConditionValidationResult(
+        ValueState State,
+        bool IsKnown,
+        bool Value,
+        bool MayThrow);
 
     private readonly record struct ExpressionValidationResult(ValueState State, bool CanEvaluate);
 }
