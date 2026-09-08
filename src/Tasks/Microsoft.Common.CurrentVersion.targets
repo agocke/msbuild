@@ -4934,6 +4934,10 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <CopyDocumentationFileToOutputDirectory Condition="'$(CopyDocumentationFileToOutputDirectory)'==''">true</CopyDocumentationFileToOutputDirectory>
     </PropertyGroup>
 
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true' and '$(CopyBuildOutputToOutputDirectory)' == 'true' and '$(SkipCopyBuildProduct)' != 'true'">
+      <FileWrites Include="@(IntermediateAssembly->'$(OutDir)%(Filename)%(Extension)')" />
+    </ItemGroup>
+
     <!-- Copy the build product (.dll or .exe). -->
     <Copy
         SourceFiles="@(IntermediateAssembly)"
@@ -4949,10 +4953,17 @@ Copyright (C) Microsoft Corporation. All rights reserved.
             >
 
       <Output TaskParameter="DestinationFiles" ItemName="MainAssembly"/>
-      <Output TaskParameter="DestinationFiles" ItemName="FileWrites"/>
+      <Output TaskParameter="DestinationFiles" ItemName="FileWrites" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
       <Output TaskParameter="WroteAtLeastOneFile" PropertyName="_WroteMainAssemblyToOutputDirectory"/>
 
     </Copy>
+
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true'
+      and '$(ProduceReferenceAssembly)' == 'true'
+      and '$(CopyBuildOutputToOutputDirectory)' == 'true'
+      and '$(SkipCopyBuildProduct)' != 'true'">
+      <FileWrites Include="$(TargetRefPath)" />
+    </ItemGroup>
 
     <!-- Copy the reference assembly build product (.dll or .exe). -->
     <CopyRefAssembly
@@ -4962,7 +4973,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
             >
 
       <Output TaskParameter="DestinationPath" ItemName="ReferenceAssembly"/>
-      <Output TaskParameter="DestinationPath" ItemName="FileWrites"/>
+      <Output TaskParameter="DestinationPath" ItemName="FileWrites" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
 
     </CopyRefAssembly>
 
@@ -5671,13 +5682,13 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
     <!--Record the main compile outputs.-->
     <ItemGroup>
-      <FileWrites Include="@(IntermediateAssembly)" Condition="Exists('@(IntermediateAssembly)')"/>
-      <FileWrites Include="@(IntermediateRefAssembly)" Condition="'$(ProduceReferenceAssembly)' == 'true' and Exists('@(IntermediateRefAssembly)')"/>
+      <FileWrites Include="@(IntermediateAssembly)" Condition="'$(MSBuildHardenedGraph)' == 'true' or Exists('@(IntermediateAssembly)')"/>
+      <FileWrites Include="@(IntermediateRefAssembly)" Condition="'$(ProduceReferenceAssembly)' == 'true' and ('$(MSBuildHardenedGraph)' == 'true' or Exists('@(IntermediateRefAssembly)'))"/>
     </ItemGroup>
 
     <!-- Record the .xml if one was produced. -->
     <PropertyGroup>
-      <_DocumentationFileProduced Condition="!Exists('@(DocFileItem)')">false</_DocumentationFileProduced>
+      <_DocumentationFileProduced Condition="'$(MSBuildHardenedGraph)' != 'true' and !Exists('@(DocFileItem)')">false</_DocumentationFileProduced>
     </PropertyGroup>
 
     <ItemGroup>
@@ -5686,7 +5697,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
     <!-- Record the .pdb if one was produced. -->
     <PropertyGroup>
-      <_DebugSymbolsProduced Condition="!Exists('@(_DebugSymbolsIntermediatePath)')">false</_DebugSymbolsProduced>
+      <_DebugSymbolsProduced Condition="'$(MSBuildHardenedGraph)' != 'true' and !Exists('@(_DebugSymbolsIntermediatePath)')">false</_DebugSymbolsProduced>
     </PropertyGroup>
 
     <ItemGroup>
