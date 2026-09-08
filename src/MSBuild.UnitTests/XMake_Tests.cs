@@ -2972,6 +2972,79 @@ $@"<Project>
             logContents.ShouldContain("MSBuildHardenedGraph=[true]");
         }
 
+        [Fact]
+        public void HardenedGraphRestoreRunsOrdinarilyWithBuiltInProperty()
+        {
+            string projectContents = """
+                <Project DefaultTargets="Build">
+                  <PropertyGroup>
+                    <EnableSourceControlFetchManifest
+                      Condition="'$(EnableSourceControlFetchManifest)' == '' and '$(MSBuildHardenedGraph)' == 'true'">true</EnableSourceControlFetchManifest>
+                  </PropertyGroup>
+                  <Target Name="Restore">
+                    <PropertyGroup>
+                      <RestoreValue>$([System.Guid]::NewGuid())</RestoreValue>
+                    </PropertyGroup>
+                    <Error Text="Source-control fetch manifest was not enabled."
+                           Condition="'$(EnableSourceControlFetchManifest)' != 'true'" />
+                    <Message Text="RestoreHardened=[$(MSBuildHardenedGraph)]" Importance="High" />
+                  </Target>
+                  <Target Name="Build">
+                    <Message Text="Build ran" Importance="High" />
+                  </Target>
+                </Project>
+                """;
+
+            string logContents =
+                ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "/restore --hardened-graph");
+
+            logContents.ShouldContain("RestoreHardened=[true]");
+            logContents.ShouldContain("Build ran");
+        }
+
+        [Fact]
+        public void HardenedGraphBuildAfterRestoreStillRunsValidation()
+        {
+            string projectContents = """
+                <Project DefaultTargets="Build">
+                  <Target Name="Restore">
+                    <Message Text="Restore ran" Importance="High" />
+                  </Target>
+                  <Target Name="Build">
+                    <PropertyGroup>
+                      <Value>$([System.Guid]::NewGuid())</Value>
+                    </PropertyGroup>
+                  </Target>
+                </Project>
+                """;
+
+            string logContents =
+                ExecuteMSBuildExeExpectFailure(projectContents, arguments: "/restore --hardened-graph");
+
+            logContents.ShouldContain("Restore ran");
+            logContents.ShouldContain("MSB4287");
+        }
+
+        [Fact]
+        public void HardenedGraphValidationCannotBeDisabledWithRestoreProperty()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build">
+                    <PropertyGroup>
+                      <Value>$([System.Guid]::NewGuid())</Value>
+                    </PropertyGroup>
+                  </Target>
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectFailure(
+                projectContents,
+                arguments: "--hardened-graph -p:MSBuildIsRestoring=true");
+
+            logContents.ShouldContain("MSB4287");
+        }
+
         [Theory]
         [InlineData("")]
         [InlineData("--hardened-graph:false")]

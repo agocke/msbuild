@@ -876,6 +876,12 @@ mode is disabled. Targets may use it to short-circuit compatibility checks
 that observe ambient state while preserving their existing behavior on
 ordinary and older MSBuild versions.
 
+For a command-line build that performs restore first, the restore submission
+receives `MSBuildHardenedGraph=true` so restore-time fetch targets can emit
+their imported graph inputs, but restore target execution is not yet hardened
+validated. The fresh post-restore build evaluation consumes those imports and
+runs hardened validation before ordinary build execution.
+
 The initial command-line surface may be experimental. Programmatic hosts use
 `BuildParameters.HardenedGraphValidation` to enable the same mode.
 

@@ -1146,6 +1146,10 @@ namespace Microsoft.Build.BackEnd
 
             // We consider this the entrypoint for the project build for purposes of BuildCheck processing
             bool isRestoring = _requestEntry.RequestConfiguration.GlobalProperties[MSBuildConstants.MSBuildIsRestoring] is not null;
+            bool isRestoreSubmission =
+                isRestoring &&
+                _requestEntry.Request.BuildRequestDataFlags.HasFlag(
+                    BuildRequestDataFlags.IgnoreMissingEmptyAndInvalidImports);
 
             var buildCheckManager = isRestoring
                 ? null
@@ -1246,44 +1250,50 @@ namespace Microsoft.Build.BackEnd
                             ReservedPropertyNames.hardenedGraph,
                             "true",
                             mayBeReserved: true));
-                    HardenedItemOperationPlan itemOperationPlan = new(
-                        GetHardenedWorkspaceRoot(project));
-                    ITaskBuilder pureTaskBuilder =
-                        (ITaskBuilder)_componentHost.GetComponent(BuildComponentType.TaskBuilder);
-                    IReadOnlyList<InvalidProjectFileException> diagnostics;
-                    try
-                    {
-                        HardenedTargetValidator validator = new(
-                            (task, taskIdentityParameters) =>
-                                HardenedTaskClassificationResolver.Classify(
-                                    project,
-                                    _projectLoggingContext,
-                                    task,
-                                    taskIdentityParameters),
-                            (target, task, lookup) =>
-                                ExecuteHardenedPureTask(pureTaskBuilder, target, task, lookup));
-                        diagnostics = validator.Validate(
-                                project,
-                                baseLookup,
-                                allTargets.Select(target => target.name),
-                                itemOperationPlan);
-                    }
-                    finally
-                    {
-                        ((IBuildComponent)pureTaskBuilder).ShutdownComponent();
-                    }
 
-                    if (diagnostics.Count > 0)
+                    // Restore produces imported graph inputs for the subsequent hardened build.
+                    // Until restore itself is modeled, expose the hardened property but execute restore ordinarily.
+                    if (!isRestoreSubmission)
                     {
-                        foreach (InvalidProjectFileException diagnostic in diagnostics)
+                        HardenedItemOperationPlan itemOperationPlan = new(
+                            GetHardenedWorkspaceRoot(project));
+                        ITaskBuilder pureTaskBuilder =
+                            (ITaskBuilder)_componentHost.GetComponent(BuildComponentType.TaskBuilder);
+                        IReadOnlyList<InvalidProjectFileException> diagnostics;
+                        try
                         {
-                            _projectLoggingContext.LogInvalidProjectFileError(diagnostic);
+                            HardenedTargetValidator validator = new(
+                                (task, taskIdentityParameters) =>
+                                    HardenedTaskClassificationResolver.Classify(
+                                        project,
+                                        _projectLoggingContext,
+                                        task,
+                                        taskIdentityParameters),
+                                (target, task, lookup) =>
+                                    ExecuteHardenedPureTask(pureTaskBuilder, target, task, lookup));
+                            diagnostics = validator.Validate(
+                                    project,
+                                    baseLookup,
+                                    allTargets.Select(target => target.name),
+                                    itemOperationPlan);
+                        }
+                        finally
+                        {
+                            ((IBuildComponent)pureTaskBuilder).ShutdownComponent();
                         }
 
-                        throw diagnostics[0];
-                    }
+                        if (diagnostics.Count > 0)
+                        {
+                            foreach (InvalidProjectFileException diagnostic in diagnostics)
+                            {
+                                _projectLoggingContext.LogInvalidProjectFileError(diagnostic);
+                            }
 
-                    baseLookup.ConfigureHardenedItemOperationPlan(itemOperationPlan);
+                            throw diagnostics[0];
+                        }
+
+                        baseLookup.ConfigureHardenedItemOperationPlan(itemOperationPlan);
+                    }
                 }
 
                 // Set the current directory to that required by the project.
