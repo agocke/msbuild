@@ -672,12 +672,42 @@ Downstream hardened targets do not parse `project.assets.json`.
 The generated `.props` and `.targets` files contain these declarative items.
 They are not an additional discovery language.
 
+The files are ordinary MSBuild source that remains executable by older MSBuild
+engines under their existing evaluation and execution rules. Hardened mode
+validates the same imports, targets, items, and task invocations; it does not
+select a parallel dependency implementation or require a second scheduler.
+The imported-item path may replace `project.assets.json` ingestion for ordinary
+builds as well as hardened builds.
+
 NuGet packages containing executable `build`, `buildMultiTargeting`, or
 `buildTransitive` logic are outside the initial items-only model. Supporting
 them requires either admitting exact package source files as ordinary graph
 inputs or defining a later normalization model.
 
 ## R - Resolution placement
+
+### R0. Initial framework-only profile
+
+The first dependency-resolution profile is the pinned SDK-style hello-world
+case:
+
+- one target framework;
+- one implicit `Microsoft.NETCore.App` `FrameworkReference`;
+- no `PackageReference`, user-authored `Reference`, `ProjectReference`, or
+  explicit runtime identifier.
+
+Fetch resolves that framework reference to the exact targeting pack, compile
+reference assemblies, framework metadata, and any apphost input required by
+the ordinary build. It emits those facts through the fixed generated imports.
+Build graph construction selects from those exact items and supplies concrete
+paths to the existing compiler and apphost targets.
+
+This profile does not require generalized package-override, duplicate
+framework-reference, or assembly-reference search semantics. Operations that
+are no-ops for an empty package list or a single framework reference are
+bypassed when the fetched model already supplies the canonical result.
+Projects outside the profile fail hardened validation until a later profile
+defines their dependency semantics.
 
 ### R1. Framework references
 
@@ -719,6 +749,10 @@ Hardened mode must use one of these models:
 
 Ambient GAC, AssemblyFolders, and other machine search modes are not part of
 the pre-resolved model unless explicitly represented in fetch inputs.
+The initial framework-only profile does not support user-authored
+`Reference` items or invoke generalized assembly search. Exact reference
+assemblies emitted by fetch may use ordinary MSBuild items as carriers without
+becoming ambient RAR search requests.
 
 ## E - Engine checks
 

@@ -486,6 +486,44 @@ framework or package resolution tasks Pure. `ProcessFrameworkReferences` and
 `ResolvePackageAssets` are not candidates for Pure annotations in their current
 forms.
 
+#### First vertical slice - framework-only hello world
+
+Start with the literal dependency surface of the pinned SDK-style hello-world
+project:
+
+- one implicit `Microsoft.NETCore.App` `FrameworkReference`;
+- no `PackageReference`, evaluated `Reference`, `ProjectReference`, or explicit
+  runtime identifier;
+- one target framework and the ordinary executable-build defaults.
+
+Fetch resolves the framework reference to an exact targeting pack, compile
+reference assemblies, framework metadata, and any required apphost pack and
+template. It writes those facts as ordinary items in fixed generated
+`.props` and `.targets` files. The build imports the files during fresh
+evaluation and passes exact paths through the existing compiler, apphost, and
+copy targets.
+
+Do not implement generalized duplicate-reference or assembly-search behavior
+for this slice. The package-override operation is a no-op for the empty package
+list, and duplicate-framework handling is a no-op for the single framework
+reference. Bypass those operations when the fetched result already represents
+the canonical inputs. User-authored `Reference` and ambient RAR search remain
+unsupported; ordinary item types may carry fetched exact assembly paths
+without implying generalized `Reference` resolution.
+
+The generated imports and migrated SDK targets must also execute under older
+MSBuild engines using ordinary evaluation and target execution. Hardened mode
+validates that same implementation. Do not add hardened-only XML constructs,
+task-result handles, scheduling behavior, or a permanent parallel path that
+continues parsing `project.assets.json` for ordinary builds.
+
+Completion requires the same generated imports to build the pinned project
+under ordinary legacy execution and hardened validation with equivalent
+outputs. Projects outside the initial profile must fail explicitly rather
+than falling back to ambient dependency discovery.
+
+#### Broader migration
+
 1. Make restore/fetch emit fixed, exactly named `.props` and `.targets` files
    containing the complete resolved item model.
 2. Import those files during the fresh post-restore evaluation. The imported
@@ -1030,9 +1068,18 @@ new execution engine.
 
 - Run fetch through ordinary MSBuild with hardened validation enabled.
 - Require locked restore with explicit project-local configuration.
+- First support one implicit `Microsoft.NETCore.App` framework reference for
+  the pinned single-target hello-world project. Reject package, project, user
+  assembly-reference, explicit-RID, and multi-targeting inputs until their
+  profiles are defined.
+- Resolve the exact targeting pack, compile references, framework metadata,
+  and required apphost inputs during fetch.
 - Emit fixed `.props` and `.targets` containing the complete resolved item
-  model; `project.assets.json` is not a downstream hardened input.
+  model for the supported profile; `project.assets.json` is not a downstream
+  semantic input.
 - Start a fresh evaluation that consumes those files as ordinary source.
+- Build the same generated project under an older MSBuild engine using
+  ordinary execution and under hardened validation using the same SDK targets.
 - Validate SDK and pack index generation inputs.
 - Replace `ResolvePackageAssets` parsing with pure projections over imported
   restore items.
