@@ -2535,6 +2535,28 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void HardenedModePropertyShortCircuitsExistsForPreEvaluatedProject()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <FileWrites Include="missing.output"
+                              Condition="'$(MSBuildHardenedGraph)' == 'true' Or Exists('missing.output')" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+
+        ProjectInstance result = BuildHardenedProject(project);
+
+        DescribeItemSpecs(result.GetItems("FileWrites")).ShouldBe(["missing.output"]);
+    }
+
+    [Fact]
     public void HardenedGlobExecutionRejectsMissingPreResolution()
     {
         using TestEnvironment environment = TestEnvironment.Create(_output);

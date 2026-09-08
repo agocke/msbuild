@@ -159,6 +159,11 @@ internal sealed class HardenedTargetValidator
         _validationLookup.EnableHardenedState();
         _validationLookup.ConfigureHardenedItemOperationPlan(itemOperationPlan);
         _validationLookup.EnterScope("HardenedTargetValidator");
+        _validationLookup.SetProperty(
+            ProjectPropertyInstance.Create(
+                ReservedPropertyNames.hardenedGraph,
+                "true",
+                mayBeReserved: true));
         _activeMetadata = null;
         _project = project;
         _projectDirectory = project.Directory;

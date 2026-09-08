@@ -2957,6 +2957,106 @@ $@"<Project>
         }
 
         [Fact]
+        public void HardenedGraphSwitchSetsBuiltInProperty()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build">
+                    <Message Text="MSBuildHardenedGraph=[$(MSBuildHardenedGraph)]" />
+                  </Target>
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "--hardened-graph");
+
+            logContents.ShouldContain("MSBuildHardenedGraph=[true]");
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("--hardened-graph:false")]
+        public void HardenedGraphBuiltInPropertyIsEmptyWhenDisabled(string arguments)
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build">
+                    <Message Text="MSBuildHardenedGraph=[$(MSBuildHardenedGraph)]" />
+                  </Target>
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectSuccess(projectContents, arguments: arguments);
+
+            logContents.ShouldContain("MSBuildHardenedGraph=[]");
+        }
+
+        [Fact]
+        public void HardenedGraphBuiltInPropertyCannotBeOverriddenByProject()
+        {
+            string projectContents = """
+                <Project>
+                  <PropertyGroup>
+                    <MSBuildHardenedGraph>false</MSBuildHardenedGraph>
+                  </PropertyGroup>
+                  <Target Name="Build" />
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectFailure(projectContents, arguments: "--hardened-graph");
+
+            logContents.ShouldContain("MSBuildHardenedGraph");
+            logContents.ShouldContain("MSB4004");
+        }
+
+        [Fact]
+        public void HardenedGraphBuiltInPropertyShortCircuitsOutputExistenceChecks()
+        {
+            string projectContents = """
+                <Project>
+                  <PropertyGroup>
+                    <OutputPath>missing.output</OutputPath>
+                  </PropertyGroup>
+                  <Target Name="Build">
+                    <ItemGroup>
+                      <FileWrites Include="$(OutputPath)"
+                                  Condition="'$(MSBuildHardenedGraph)' == 'true' Or Exists('$(OutputPath)')" />
+                      <FileWrites Include="$(OptionalOutputPath)"
+                                  Condition="'$(OptionalOutputPath)' != '' And ('$(MSBuildHardenedGraph)' == 'true' Or Exists('$(OptionalOutputPath)'))" />
+                    </ItemGroup>
+                    <Message Text="FileWrites=[@(FileWrites)]" />
+                  </Target>
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "--hardened-graph");
+
+            logContents.ShouldContain("FileWrites=[missing.output]");
+        }
+
+        [Fact]
+        public void HardenedGraphOutputExistenceChecksPreserveOrdinaryBehavior()
+        {
+            string projectContents = """
+                <Project>
+                  <Target Name="Build">
+                    <WriteLinesToFile File="existing.output" Lines="content" Overwrite="true" />
+                    <ItemGroup>
+                      <FileWrites Include="existing.output"
+                                  Condition="'$(MSBuildHardenedGraph)' == 'true' Or Exists('existing.output')" />
+                      <FileWrites Include="missing.output"
+                                  Condition="'$(MSBuildHardenedGraph)' == 'true' Or Exists('missing.output')" />
+                    </ItemGroup>
+                    <Message Text="FileWrites=[@(FileWrites)]" />
+                  </Target>
+                </Project>
+                """;
+
+            string logContents = ExecuteMSBuildExeExpectSuccess(projectContents);
+
+            logContents.ShouldContain("FileWrites=[existing.output]");
+        }
+
+        [Fact]
         public void HardenedGraphSwitchRejectsInvalidBoolean()
         {
             string projectContents = """

@@ -868,8 +868,14 @@ in-process build node so no unversioned field is added to the worker-node
 protocol. Validation runs after the project is loaded and requested targets
 are selected, but before `TargetBuilder` begins ordinary target execution.
 
-The initial command-line surface may be experimental. A public
-`BuildParameters` API should wait until the contract is stable.
+When validation is enabled, the hardened build exposes the reserved built-in property
+`MSBuildHardenedGraph` with the value `true`. The property is empty when the
+mode is disabled. Targets may use it to short-circuit compatibility checks
+that observe ambient state while preserving their existing behavior on
+ordinary and older MSBuild versions.
+
+The initial command-line surface may be experimental. Programmatic hosts use
+`BuildParameters.HardenedGraphValidation` to enable the same mode.
 
 Likely locations:
 

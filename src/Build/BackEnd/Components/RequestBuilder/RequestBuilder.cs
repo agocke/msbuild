@@ -1240,6 +1240,12 @@ namespace Microsoft.Build.BackEnd
                 if (_componentHost.BuildParameters.HardenedGraphValidation)
                 {
                     ProjectInstance project = _requestEntry.RequestConfiguration.Project;
+                    Lookup baseLookup = _requestEntry.RequestConfiguration.BaseLookup;
+                    baseLookup.SetBuiltInProperty(
+                        ProjectPropertyInstance.Create(
+                            ReservedPropertyNames.hardenedGraph,
+                            "true",
+                            mayBeReserved: true));
                     HardenedItemOperationPlan itemOperationPlan = new(
                         GetHardenedWorkspaceRoot(project));
                     ITaskBuilder pureTaskBuilder =
@@ -1258,7 +1264,7 @@ namespace Microsoft.Build.BackEnd
                                 ExecuteHardenedPureTask(pureTaskBuilder, target, task, lookup));
                         diagnostics = validator.Validate(
                                 project,
-                                _requestEntry.RequestConfiguration.BaseLookup,
+                                baseLookup,
                                 allTargets.Select(target => target.name),
                                 itemOperationPlan);
                     }
@@ -1277,8 +1283,7 @@ namespace Microsoft.Build.BackEnd
                         throw diagnostics[0];
                     }
 
-                    _requestEntry.RequestConfiguration.BaseLookup.ConfigureHardenedItemOperationPlan(
-                        itemOperationPlan);
+                    baseLookup.ConfigureHardenedItemOperationPlan(itemOperationPlan);
                 }
 
                 // Set the current directory to that required by the project.

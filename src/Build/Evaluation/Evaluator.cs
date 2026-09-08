@@ -218,6 +218,8 @@ namespace Microsoft.Build.Evaluation
 
         private readonly bool _interactive;
 
+        private readonly bool _hardenedGraphValidation;
+
         private readonly bool _isRunningInVisualStudio;
 
         /// <summary>
@@ -240,6 +242,7 @@ namespace Microsoft.Build.Evaluation
             EvaluationContext evaluationContext,
             bool profileEvaluation,
             bool interactive,
+            bool hardenedGraphValidation,
             ILoggingService loggingService,
             BuildEventContext buildEventContext,
             ProjectEvaluationStage evaluationStage)
@@ -296,6 +299,7 @@ namespace Microsoft.Build.Evaluation
             // In 15.9 we added support for the global property "NuGetInteractive" to allow SDK resolvers to be interactive.
             // In 16.0 we added the /interactive command-line argument so the line below keeps back-compat
             _interactive = interactive || string.Equals("true", _data.GlobalPropertiesDictionary.GetProperty("NuGetInteractive")?.EvaluatedValue, StringComparison.OrdinalIgnoreCase);
+            _hardenedGraphValidation = hardenedGraphValidation;
 
             // The last modified project is the project itself unless its an in-memory project
             if (projectRootElement.FullPath != null)
@@ -346,6 +350,7 @@ namespace Microsoft.Build.Evaluation
             int submissionId,
             EvaluationContext evaluationContext,
             bool interactive = false,
+            bool hardenedGraphValidation = false,
             ProjectEvaluationStage evaluationStage = ProjectEvaluationStage.Full)
         {
             MSBuildEventSource.Log.EvaluateStart(root.ProjectFileLocation.File);
@@ -367,6 +372,7 @@ namespace Microsoft.Build.Evaluation
                 evaluationContext,
                 profileEvaluation,
                 interactive,
+                hardenedGraphValidation,
                 loggingService,
                 buildEventContext,
                 evaluationStage);
@@ -696,6 +702,11 @@ namespace Microsoft.Build.Evaluation
                     if (_interactive)
                     {
                         SetBuiltInProperty(ReservedPropertyNames.interactive, "true");
+                    }
+
+                    if (_hardenedGraphValidation)
+                    {
+                        SetBuiltInProperty(ReservedPropertyNames.hardenedGraph, "true");
                     }
                 }
 

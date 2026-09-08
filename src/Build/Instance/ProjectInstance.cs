@@ -3365,6 +3365,7 @@ namespace Microsoft.Build.Execution
                 submissionId,
                 evaluationContext,
                 interactive: buildParameters.Interactive,
+                hardenedGraphValidation: buildParameters.HardenedGraphValidation,
                 evaluationStage: evaluationStage);
 
             _evaluationStage = evaluationStage;

@@ -847,6 +847,18 @@ namespace Microsoft.Build.BackEnd
         }
 
         /// <summary>
+        /// Applies an engine-owned property to the outer scope for the lifetime of this lookup.
+        /// </summary>
+        internal void SetBuiltInProperty(ProjectPropertyInstance property)
+        {
+            Assumed.Null(_lookupScopes.Parent, "Built-in properties must be set before entering lookup scopes.");
+
+            PrimaryPropertySets ??= new PropertyDictionary<ProjectPropertyInstance>();
+            PrimaryPropertySets.Set(property);
+            _hardenedState?.SetConcreteProperty(property.Name, property.EvaluatedValue);
+        }
+
+        /// <summary>
         /// Implements a true add, an item that has been created in a batch.
         /// </summary>
         internal ICollection<ProjectItemInstance> AddNewItemsOfItemType(string itemType, ICollection<ProjectItemInstance> group, bool doNotAddDuplicates = false, Action<IList> logFunction = null)

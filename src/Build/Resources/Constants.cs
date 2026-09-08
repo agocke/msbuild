@@ -60,6 +60,7 @@ namespace Microsoft.Build.Internal
         internal const string osName = "OS";
         internal const string frameworkToolsRoot = "MSBuildFrameworkToolsRoot";
         internal const string interactive = "MSBuildInteractive";
+        internal const string hardenedGraph = "MSBuildHardenedGraph";
         internal const string msbuilddisablefeaturesfromversion = "MSBuildDisableFeaturesFromVersion";
 
         /// <summary>
@@ -93,6 +94,7 @@ namespace Microsoft.Build.Internal
             assemblyVersion,
             version,
             interactive,
+            hardenedGraph,
             msbuilddisablefeaturesfromversion,
         };
 
