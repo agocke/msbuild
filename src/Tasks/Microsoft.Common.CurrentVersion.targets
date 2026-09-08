@@ -5897,7 +5897,11 @@ Copyright (C) Microsoft Corporation. All rights reserved.
         Convert the list of references to the absolute paths so we can make valid comparisons
         across two lists
          -->
-    <ConvertToAbsolutePath Paths="@(_ResolveAssemblyReferenceResolvedFiles)">
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <_ResolveAssemblyReferenceResolvedFilesAbsolute Include="@(_ResolveAssemblyReferenceResolvedFiles->'%(FullPath)')" />
+    </ItemGroup>
+
+    <ConvertToAbsolutePath Paths="@(_ResolveAssemblyReferenceResolvedFiles)" Condition="'$(MSBuildHardenedGraph)' != 'true'">
       <Output TaskParameter="AbsolutePaths" ItemName="_ResolveAssemblyReferenceResolvedFilesAbsolute"/>
     </ConvertToAbsolutePath>
 
