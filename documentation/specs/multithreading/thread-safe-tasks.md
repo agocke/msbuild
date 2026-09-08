@@ -136,6 +136,36 @@ public class TaskEnvironment
 
 The `TaskEnvironment` class that MSBuild provides is not thread-safe. Task authors who spawn multiple threads within their task implementation must provide their own synchronization when accessing the task environment from multiple threads. However, each task receives its own isolated environment object, so synchronization with other concurrent tasks is not required.
 
+## PureTaskEnvironment API
+
+Pure tasks can opt into the immutable subset of the execution environment by
+implementing `IPureTask`. Implementing the interface does not classify the task
+as Pure; the concrete type must also have `[MSBuildPureTask]`.
+
+```csharp
+namespace Microsoft.Build.Framework;
+
+public interface IPureTask : ITask
+{
+    PureTaskEnvironment PureTaskEnvironment { get; set; }
+}
+
+public sealed class PureTaskEnvironment
+{
+    public AbsolutePath ProjectDirectory { get; }
+    public bool UsesWindowsPathSemantics { get; }
+
+    public AbsolutePath GetAbsolutePath(string path);
+}
+```
+
+`PureTaskEnvironment` is an implicit task input: MSBuild snapshots it before
+execution in both the in-process and task-host paths, and graph construction
+knows the same values. The project directory comes from the invoking project,
+independently of whether MSBuild preserves the process operating environment.
+It deliberately does not expose environment variables, process creation,
+filesystem contents, or other mutable state available through `TaskEnvironment`.
+
 ### Path Handling
 
 To prevent common thread-safety issues related to path handling, we introduce path type that is implicitly convertible to string:

@@ -1542,6 +1542,7 @@ namespace Microsoft.Build.CommandLine
                     taskConfiguration.ColumnNumberOfTask,
                     taskConfiguration.TargetName,
                     taskConfiguration.ProjectFile,
+                    GetProjectDirectory(taskConfiguration),
 #if FEATURE_APPDOMAIN
                     taskConfiguration.AppDomainSetup,
 #endif
@@ -1645,6 +1646,19 @@ namespace Microsoft.Build.CommandLine
                     }
                 }
             }
+        }
+
+        private static string GetProjectDirectory(TaskHostConfiguration taskConfiguration)
+        {
+            if (string.IsNullOrEmpty(taskConfiguration.ProjectFile))
+            {
+                return taskConfiguration.StartupDirectory;
+            }
+
+            string projectDirectory = Path.GetDirectoryName(taskConfiguration.ProjectFile);
+            return string.IsNullOrEmpty(projectDirectory)
+                ? taskConfiguration.StartupDirectory
+                : projectDirectory;
         }
 
         /// <summary>

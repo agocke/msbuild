@@ -34,6 +34,7 @@ namespace Microsoft.Build.UnitTests
                 taskColumn: 1,
                 targetName: "TestTarget",
                 projectFile: "test.proj",
+                projectDirectory: BuildEnvironmentHelper.Instance.CurrentMSBuildToolsDirectory,
 #if FEATURE_APPDOMAIN
                 appDomainSetup: null,
 #endif

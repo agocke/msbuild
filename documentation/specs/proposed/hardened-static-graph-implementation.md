@@ -958,7 +958,14 @@ Pure-task execution during graph construction reuses the existing
 `TaskBuilder` and `TaskExecutionHost` path after the invocation condition,
 batching, and parameters are static. The validator applies the concrete
 outputs to its existing `Lookup` state and continues partial evaluation from
-those values. Initial `[MSBuildPureTask]` use is intentionally narrow;
+those values. `TaskExecutionHost` supplies tasks implementing `IPureTask` with
+an immutable `PureTaskEnvironment` snapshot containing the project directory
+and host path semantics. The project directory comes from immutable project
+state rather than the mutable task operating environment. For task-host
+execution, the host derives the same directory from the invoking project
+configuration and injects the snapshot into the real task instance. This
+environment is part of the Pure invocation's input even though it is not
+represented as an XML task parameter. Initial `[MSBuildPureTask]` use is intentionally narrow;
 sidecar emission and reuse of graph-construction results by the later
 execution phase remain separate work.
 

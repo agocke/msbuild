@@ -309,11 +309,20 @@ batch.
 ### T1. Pure
 
 A Pure annotation asserts that the task's observable result is a deterministic
-function of its parameter values.
+function of its parameter values and its immutable `PureTaskEnvironment`.
 
 A correctly annotated Pure task does not observe filesystem, network, clock,
-environment, process execution, or other state not supplied through its
-parameters.
+environment variables, process execution, or other state not supplied through
+its parameters or `PureTaskEnvironment`.
+
+`PureTaskEnvironment` is an engine-supplied input containing the project
+directory and host path semantics. These values are fixed for the invocation
+and known during graph construction. The project directory means the captured
+project execution directory, never the process current directory. Defining
+project paths are part of item provenance rather than ambient process state.
+
+Any retained or serialized partial-evaluation result must include the
+`PureTaskEnvironment` values that can affect the task in its identity.
 
 A Pure task may execute during graph construction or ordinary execution. Its
 property and item outputs are static.

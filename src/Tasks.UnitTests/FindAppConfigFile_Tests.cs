@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.IO;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Tasks;
@@ -120,13 +121,19 @@ namespace Microsoft.Build.UnitTests
             string hostOS,
             bool shouldFind)
         {
+            bool usesWindowsPathSemantics = String.Equals(
+                hostOS,
+                "Windows_NT",
+                StringComparison.OrdinalIgnoreCase);
             FindAppConfigFileWithDeterministicSemantics task = new()
             {
                 BuildEngine = new MockEngine(),
                 PrimaryList = [new TaskItem(itemSpec, treatAsFilePath: false)],
                 SecondaryList = [],
                 TargetPath = "targetpath",
-                HostOS = hostOS,
+                PureTaskEnvironment = PureTaskEnvironment.Create(
+                    new AbsolutePath(Path.GetTempPath()),
+                    usesWindowsPathSemantics),
             };
 
             task.Execute().ShouldBeTrue();
@@ -152,7 +159,7 @@ namespace Microsoft.Build.UnitTests
                 PrimaryList = [input],
                 SecondaryList = [],
                 TargetPath = "targetpath",
-                HostOS = "Unix",
+                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(Path.GetTempPath()),
             };
 
             task.Execute().ShouldBeTrue();

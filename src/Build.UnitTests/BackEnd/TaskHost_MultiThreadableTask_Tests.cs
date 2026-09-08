@@ -102,6 +102,61 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             // Verify the task was able to read ProjectDirectory without NRE
             logger.FullLog.ShouldContain("TaskEnvironment.ProjectDirectory=");
         }
+
+        [Theory]
+        [InlineData(false, true, true)]
+        [InlineData(true, true, true)]
+        [InlineData(false, false, false)]
+        [InlineData(true, false, false)]
+        public void PureTaskReceivesProjectScopedEnvironment(
+            bool useTaskHost,
+            bool multiThreaded,
+            bool saveOperatingEnvironment)
+        {
+            _env.SetCurrentDirectory(_env.CreateFolder().Path);
+
+            string taskFactoryAttribute = useTaskHost ? """ TaskFactory="TaskHostFactory" """ : string.Empty;
+            string projectContent = $"""
+                <Project>
+                    <UsingTask TaskName="PureEnvironmentTask"
+                               AssemblyFile="{Assembly.GetExecutingAssembly().Location}"{taskFactoryAttribute} />
+
+                    <Target Name="TestTarget">
+                        <PureEnvironmentTask />
+                    </Target>
+                </Project>
+                """;
+
+            string projectFile = Path.Combine(_testProjectsDir, $"PureEnvironment_{useTaskHost}.proj");
+            File.WriteAllText(projectFile, projectContent);
+
+            MockLogger logger = new(_output);
+            BuildParameters buildParameters = new()
+            {
+                MultiThreaded = multiThreaded,
+                SaveOperatingEnvironment = saveOperatingEnvironment,
+                Loggers = [logger],
+                DisableInProcNode = false,
+                EnableNodeReuse = false,
+            };
+            BuildRequestData buildRequestData = new(
+                projectFile,
+                new Dictionary<string, string?>(),
+                null,
+                ["TestTarget"],
+                null);
+
+            BuildResult result = BuildManager.DefaultBuildManager.Build(buildParameters, buildRequestData);
+
+            _output.WriteLine(logger.FullLog);
+            result.OverallResult.ShouldBe(BuildResultCode.Success);
+            logger.FullLog.ShouldContain($"PureTaskEnvironment.ProjectDirectory={_testProjectsDir}");
+
+            if (useTaskHost)
+            {
+                TaskRouterTestHelper.AssertTaskUsedTaskHost(logger, "PureEnvironmentTask");
+            }
+        }
     }
 
     /// <summary>
@@ -115,6 +170,24 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         {
             string projectDir = TaskEnvironment.ProjectDirectory;
             Log.LogMessage(MessageImportance.High, $"TaskEnvironment.ProjectDirectory={projectDir}");
+            return true;
+        }
+    }
+
+#pragma warning disable CS0436 // Type conflicts with imported type - intentional for routing detection.
+    [MSBuildMultiThreadableTask]
+#pragma warning restore CS0436
+    [MSBuildPureTask]
+    public sealed class PureEnvironmentTask : Task, IPureTask
+    {
+        public PureTaskEnvironment PureTaskEnvironment { get; set; } = null!;
+
+        public override bool Execute()
+        {
+            PureTaskEnvironment.ShouldNotBeNull();
+            Log.LogMessage(
+                MessageImportance.High,
+                $"PureTaskEnvironment.ProjectDirectory={PureTaskEnvironment.ProjectDirectory}");
             return true;
         }
     }

@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Utilities;
 
@@ -14,8 +15,11 @@ namespace Microsoft.Build.Tasks
     /// Task to assign a reasonable "Link" metadata to the provided items.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    public class AssignLinkMetadata : TaskExtension
+    [MSBuildPureTask]
+    public class AssignLinkMetadata : TaskExtension, IPureTask
     {
+        private PureTaskEnvironment _pureTaskEnvironment;
+
         /// <summary>
         /// The set of items to assign metadata to
         /// </summary>
@@ -26,6 +30,13 @@ namespace Microsoft.Build.Tasks
         /// </summary>
         [Output]
         public ITaskItem[] OutputItems { get; set; }
+
+        /// <inheritdoc />
+        public PureTaskEnvironment PureTaskEnvironment
+        {
+            get => _pureTaskEnvironment ??= Microsoft.Build.Framework.PureTaskEnvironment.Fallback;
+            set => _pureTaskEnvironment = value;
+        }
 
         /// <summary>
         /// Sets "Link" metadata on any item where the project file in which they
@@ -45,8 +56,8 @@ namespace Microsoft.Build.Tasks
                     try
                     {
                         string definingProject = item.GetMetadata(ItemSpecModifiers.DefiningProjectFullPath);
-                        string definingProjectDirectory = item.GetMetadata(ItemSpecModifiers.DefiningProjectDirectory);
-                        string fullPath = item.GetMetadata(ItemSpecModifiers.FullPath);
+                        string definingProjectDirectory = GetDirectory(definingProject);
+                        string fullPath = GetFullPath(item.ItemSpec);
 
                         if (
                                 String.IsNullOrEmpty(item.GetMetadata("Link"))
@@ -70,6 +81,36 @@ namespace Microsoft.Build.Tasks
 
             OutputItems = outputItems.ToArray();
             return !Log.HasLoggedErrors;
+        }
+
+        private string GetDirectory(string path)
+        {
+            int separator = path.LastIndexOf('/');
+            if (PureTaskEnvironment.UsesWindowsPathSemantics)
+            {
+                separator = Math.Max(separator, path.LastIndexOf('\\'));
+            }
+
+            return separator < 0
+                ? String.Empty
+                : path.Substring(0, separator + 1);
+        }
+
+        private string GetFullPath(string path)
+        {
+            try
+            {
+                if (PureTaskEnvironment.UsesWindowsPathSemantics)
+                {
+                    path = path.Replace('/', '\\');
+                }
+
+                return Path.GetFullPath(PureTaskEnvironment.GetAbsolutePath(path));
+            }
+            catch (Exception e) when (ExceptionHandling.IsIoRelatedException(e))
+            {
+                throw new InvalidOperationException(e.Message, e);
+            }
         }
     }
 }

@@ -93,6 +93,8 @@ namespace Microsoft.Build.CommandLine
         /// <param name="taskLine">The line in the project file where the task invocation is located.</param>
         /// <param name="taskColumn">The column in the project file where the task invocation is located.</param>
         /// <param name="targetName">The target name that invokes this task.</param>
+        /// <param name="projectFile">The project path that invokes the task.</param>
+        /// <param name="projectDirectory">The directory against which the task resolves project-relative paths.</param>
         /// <param name="appDomainSetup">The AppDomainSetup that we want to use to launch our AppDomainIsolated tasks</param>
         /// <param name="taskParams">Parameters that will be passed to the task when created</param>
         /// <returns>Task completion result showing success, failure or if there was a crash</returns>
@@ -105,6 +107,7 @@ namespace Microsoft.Build.CommandLine
                 int taskColumn,
                 string targetName,
                 string projectFile,
+                string projectDirectory,
 #if FEATURE_APPDOMAIN
                 AppDomainSetup appDomainSetup,
 #endif
@@ -170,6 +173,7 @@ namespace Microsoft.Build.CommandLine
                     taskColumn,
                     targetName,
                     projectFile,
+                    projectDirectory,
 #if FEATURE_APPDOMAIN
                     appDomainSetup,
 #endif
@@ -194,6 +198,7 @@ namespace Microsoft.Build.CommandLine
                     taskColumn,
                     targetName,
                     projectFile,
+                    projectDirectory,
 #if FEATURE_APPDOMAIN
                     appDomainSetup,
 #endif
@@ -239,6 +244,7 @@ namespace Microsoft.Build.CommandLine
                 int taskColumn,
                 string targetName,
                 string projectFile,
+                string projectDirectory,
 #if FEATURE_APPDOMAIN
                 AppDomainSetup appDomainSetup,
 #endif
@@ -264,6 +270,7 @@ namespace Microsoft.Build.CommandLine
                                                 taskColumn,
                                                 targetName,
                                                 projectFile,
+                                                projectDirectory,
 #if FEATURE_APPDOMAIN
                                                 appDomainSetup,
 #endif
@@ -318,6 +325,7 @@ namespace Microsoft.Build.CommandLine
                 int taskColumn,
                 string targetName,
                 string projectFile,
+                string projectDirectory,
 #if FEATURE_APPDOMAIN
                 AppDomainSetup appDomainSetup,
 #endif
@@ -360,6 +368,12 @@ namespace Microsoft.Build.CommandLine
                 }
 
                 wrappedTask.BuildEngine = oopTaskHostNode;
+
+                if (wrappedTask is IPureTask pureTask)
+                {
+                    pureTask.PureTaskEnvironment = PureTaskEnvironment.Create(
+                        new AbsolutePath(projectDirectory));
+                }
             }
             catch (Exception e) when (!ExceptionHandling.IsCriticalException(e))
             {

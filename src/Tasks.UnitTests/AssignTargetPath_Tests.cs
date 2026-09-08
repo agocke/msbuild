@@ -131,14 +131,12 @@ namespace Microsoft.Build.UnitTests
         public void ExplicitProjectDirectoryControlsRelativePathResolution()
         {
             string explicitProjectDirectory = NativeMethodsShared.IsWindows ? @"c:\project" : "/project";
-            string environmentProjectDirectory = NativeMethodsShared.IsWindows ? @"c:\other" : "/other";
             AssignTargetPathWithProjectDirectory task = new()
             {
-                TaskEnvironment = TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(environmentProjectDirectory),
+                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(explicitProjectDirectory),
                 BuildEngine = new MockEngine(),
                 Files = [new TaskItem(Path.Combine("subdirectory", "file.txt"))],
                 RootFolder = explicitProjectDirectory,
-                ProjectDirectory = explicitProjectDirectory,
             };
 
             task.Execute().ShouldBeTrue();

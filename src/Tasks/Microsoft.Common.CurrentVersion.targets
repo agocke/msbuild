@@ -1217,7 +1217,6 @@ Copyright (C) Microsoft Corporation. All rights reserved.
         PrimaryList="@(None)"
         SecondaryList="@(Content)"
         TargetPath="$(TargetFileName).config"
-        HostOS="$(OS)"
         Condition="'$(AppConfig)'==''">
       <Output TaskParameter="AppConfigFile" ItemName="AppConfigWithTargetPath"/>
       <Output TaskParameter="AppConfigFile" PropertyName="AppConfig"/>
@@ -3254,7 +3253,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- AssignTargetPath generates TargetPath metadata that is consumed by CreateManifestResourceNames target for manifest name generation -->
-    <AssignTargetPathWithProjectDirectory Files="@(EmbeddedResource)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(EmbeddedResource)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_Temporary" />
     </AssignTargetPathWithProjectDirectory>
 
@@ -3265,19 +3264,19 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_Temporary Remove="@(_Temporary)" />
     </ItemGroup>
 
-    <AssignTargetPathWithProjectDirectory Files="@(Content)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(Content)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="ContentWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPathWithProjectDirectory Files="@(None)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(None)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_NoneWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPathWithProjectDirectory Files="@(BaseApplicationManifest)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(BaseApplicationManifest)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_DeploymentBaseManifestWithTargetPath"/>
     </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPathWithProjectDirectory Files="@(None)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)" Condition="'@(_DeploymentBaseManifestWithTargetPath)'=='' and '%(None.Extension)'=='.manifest'">
+    <AssignTargetPathWithProjectDirectory Files="@(None)" RootFolder="$(MSBuildProjectDirectory)" Condition="'@(_DeploymentBaseManifestWithTargetPath)'=='' and '%(None.Extension)'=='.manifest'">
       <Output TaskParameter="AssignedFiles" ItemName="_DeploymentBaseManifestWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
@@ -5340,7 +5339,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_CompileItemsToCopy Include="@(Compile->'%(FullPath)')" Condition="('%(Compile.CopyToOutputDirectory)'=='Always' or '%(Compile.CopyToOutputDirectory)'=='PreserveNewest' or '%(Compile.CopyToOutputDirectory)'=='IfDifferent') AND '%(Compile.MSBuildSourceProjectFile)'!=''"/>
     </ItemGroup>
 
-    <AssignTargetPathWithProjectDirectory Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileItemsToCopyWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
@@ -5379,7 +5378,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_CompileItemsToCopy Include="@(Compile->'%(FullPath)')" Condition="('%(Compile.CopyToOutputDirectory)'=='Always' or '%(Compile.CopyToOutputDirectory)'=='PreserveNewest' or '%(Compile.CopyToOutputDirectory)'=='IfDifferent') AND '%(Compile.MSBuildSourceProjectFile)'==''"/>
     </ItemGroup>
 
-    <AssignTargetPathWithProjectDirectory Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileItemsToCopyWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
@@ -6710,7 +6709,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       Returns="@(SourceFilesProjectOutputGroupOutput)"
       DependsOnTargets="$(SourceFilesProjectOutputGroupDependsOn)">
 
-    <AssignTargetPathWithProjectDirectory Files="@(Compile)" RootFolder="$(MSBuildProjectDirectory)" ProjectDirectory="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory Files="@(Compile)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 

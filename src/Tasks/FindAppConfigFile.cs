@@ -161,22 +161,26 @@ namespace Microsoft.Build.Tasks
     }
 
     /// <summary>
-    /// Finds the app.config file using explicit host-OS path semantics without mutating input items.
+    /// Finds the app.config file using host path semantics from the engine-supplied Pure task environment
+    /// without mutating input items.
     /// </summary>
     [MSBuildMultiThreadableTask]
     [MSBuildPureTask]
-    public sealed class FindAppConfigFileWithDeterministicSemantics : FindAppConfigFile
+    public sealed class FindAppConfigFileWithDeterministicSemantics : FindAppConfigFile, IPureTask
     {
-        /// <summary>
-        /// The operating system hosting the local source filesystem.
-        /// </summary>
-        [Required]
-        public string HostOS { get; set; }
+        private PureTaskEnvironment _pureTaskEnvironment;
+
+        /// <inheritdoc />
+        public PureTaskEnvironment PureTaskEnvironment
+        {
+            get => _pureTaskEnvironment ??= Microsoft.Build.Framework.PureTaskEnvironment.Fallback;
+            set => _pureTaskEnvironment = value;
+        }
 
         private protected override string GetFileName(string itemSpec)
         {
             int fileNameStart = itemSpec.LastIndexOf('/');
-            if (String.Equals(HostOS, "Windows_NT", StringComparison.OrdinalIgnoreCase))
+            if (PureTaskEnvironment.UsesWindowsPathSemantics)
             {
                 fileNameStart = Math.Max(fileNameStart, itemSpec.LastIndexOf('\\'));
             }

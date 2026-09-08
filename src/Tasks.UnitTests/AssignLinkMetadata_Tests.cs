@@ -9,6 +9,7 @@ using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Tasks;
 using Microsoft.Build.Utilities;
+using Shouldly;
 using Xunit;
 
 #nullable disable
@@ -17,7 +18,85 @@ namespace Microsoft.Build.UnitTests
 {
     public sealed class AssignLinkMetadata_Tests
     {
+        private readonly ITestOutputHelper _output;
         private readonly string _defaultItemSpec = Path.Combine(Path.GetTempPath(), "SubFolder", "a.cs");
+
+        public AssignLinkMetadata_Tests(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Fact]
+        public void AssignLinkMetadataIsMarkedPure()
+        {
+            Attribute.IsDefined(
+                typeof(AssignLinkMetadata),
+                typeof(MSBuildPureTaskAttribute),
+                inherit: false).ShouldBeTrue();
+        }
+
+        [Fact]
+        public void PureTaskEnvironmentControlsRelativePathsAndOutputIsCloned()
+        {
+            using TestEnvironment env = TestEnvironment.Create(_output);
+            TransientTestFolder projectDirectory = env.CreateFolder();
+            TransientTestFolder unrelatedWorkingDirectory = env.CreateFolder();
+            env.SetCurrentDirectory(unrelatedWorkingDirectory.Path);
+
+            ITaskItem parentedItem = GetParentedTaskItem(
+                Path.Combine("Imported", "SubFolder", "a.cs"),
+                projectFullPath: Path.Combine(projectDirectory.Path, "Imported", "Items.props"));
+            TaskItem input = new(parentedItem);
+            input.SetMetadata("CustomMetadata", "value");
+            AssignLinkMetadata task = new()
+            {
+                BuildEngine = new MockEngine(),
+                Items = [input],
+                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(projectDirectory.Path),
+            };
+
+            task.Execute().ShouldBeTrue();
+            task.OutputItems.Length.ShouldBe(1);
+            task.OutputItems[0].ShouldNotBeSameAs(input);
+            task.OutputItems[0].ItemSpec.ShouldBe(input.ItemSpec);
+            task.OutputItems[0].GetMetadata("Link").ShouldBe(Path.Combine("SubFolder", "a.cs"));
+            task.OutputItems[0].GetMetadata("CustomMetadata").ShouldBe("value");
+            input.GetMetadata("Link").ShouldBeEmpty();
+        }
+
+        [Fact]
+        public void PureTaskAcceptsMissingDefiningProject()
+        {
+            AssignLinkMetadata task = new()
+            {
+                BuildEngine = new MockEngine(),
+                Items = [new TaskItem(Path.Combine("SubFolder", "a.cs"), treatAsFilePath: false)],
+                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(Path.GetTempPath()),
+            };
+
+            task.Execute().ShouldBeTrue();
+            task.OutputItems.ShouldBeEmpty();
+        }
+
+        [Fact]
+        public void PureTaskIgnoresInvalidItemPath()
+        {
+            AssignLinkMetadata task = new()
+            {
+                BuildEngine = new MockEngine(),
+                Items =
+                [
+                    new TaskItem(
+                        GetParentedTaskItem(
+                            "invalid\0path",
+                            projectFullPath: Path.Combine(Path.GetTempPath(), "Items.props")))
+                ],
+                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(Path.GetTempPath()),
+            };
+
+            task.Execute().ShouldBeTrue();
+            task.OutputItems.ShouldBeEmpty();
+        }
 
         /// <summary>
         /// AssignLinkMetadata should behave nicely when no items are set to it
@@ -171,12 +250,15 @@ namespace Microsoft.Build.UnitTests
         /// <summary>
         /// Helper function creating a task item that is associated with a parent project
         /// </summary>
-        private ITaskItem GetParentedTaskItem(string itemSpec, string linkMetadata = null)
+        private ITaskItem GetParentedTaskItem(
+            string itemSpec,
+            string linkMetadata = null,
+            string projectFullPath = null)
         {
             using var collection = new ProjectCollection();
             Project p = new Project(collection)
             {
-                FullPath = Path.Combine(Path.GetTempPath(), "a.proj")
+                FullPath = projectFullPath ?? Path.Combine(Path.GetTempPath(), "a.proj")
             };
             ProjectInstance pi = p.CreateProjectInstance();
 

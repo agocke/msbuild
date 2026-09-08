@@ -8,7 +8,8 @@ using System;
 namespace Microsoft.Build.Framework;
 
 /// <summary>
-/// Marks a task class whose outputs and observable behavior are determined entirely by its parameters.
+/// Marks a task class whose outputs and observable behavior are determined entirely by its parameters
+/// and, for an <see cref="IPureTask"/>, its <see cref="IPureTask.PureTaskEnvironment"/>.
 /// </summary>
 /// <remarks>
 /// MSBuild detects this attribute by its namespace and name only, ignoring the defining assembly.

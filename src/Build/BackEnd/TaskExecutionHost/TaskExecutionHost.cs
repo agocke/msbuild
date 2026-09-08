@@ -547,6 +547,12 @@ namespace Microsoft.Build.BackEnd
                 multiThreadableTask.TaskEnvironment = TaskEnvironment;
             }
 
+            if (TaskInstance is IPureTask pureTask)
+            {
+                pureTask.PureTaskEnvironment = PureTaskEnvironment.Create(
+                    new AbsolutePath(_projectInstance.Directory));
+            }
+
             return true;
         }
 

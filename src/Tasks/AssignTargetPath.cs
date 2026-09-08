@@ -181,21 +181,24 @@ namespace Microsoft.Build.Tasks
     }
 
     /// <summary>
-    /// Assigns TargetPath metadata using an explicitly supplied project directory.
+    /// Assigns TargetPath metadata using the engine-supplied Pure task environment.
     /// </summary>
     [MSBuildMultiThreadableTask]
     [MSBuildPureTask]
-    public sealed class AssignTargetPathWithProjectDirectory : AssignTargetPath
+    public sealed class AssignTargetPathWithProjectDirectory : AssignTargetPath, IPureTask
     {
-        /// <summary>
-        /// The directory against which relative item paths are resolved.
-        /// </summary>
-        [Required]
-        public string ProjectDirectory { get; set; }
+        private PureTaskEnvironment _pureTaskEnvironment;
+
+        /// <inheritdoc />
+        public PureTaskEnvironment PureTaskEnvironment
+        {
+            get => _pureTaskEnvironment ??= Microsoft.Build.Framework.PureTaskEnvironment.Fallback;
+            set => _pureTaskEnvironment = value;
+        }
 
         protected override AbsolutePath GetProjectDirectory()
         {
-            return new AbsolutePath(ProjectDirectory);
+            return PureTaskEnvironment.ProjectDirectory;
         }
 
         protected override bool UseCanonicalPathSemantics => true;
