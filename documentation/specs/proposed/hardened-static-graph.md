@@ -45,11 +45,11 @@ short form.
 
 A **deferred task invocation** is an invocation waiting for property or item
 values from earlier task invocations. Its task, parameter expressions,
-declared-I/O path parameters, outputs, and predecessor edges are already known.
+declared inputs and outputs, output mappings, and predecessor edges are
+already known.
 
 A **ready task invocation** has received all values required from earlier task
-invocations. Its declared inputs and outputs can be calculated and it can
-execute.
+invocations and can execute.
 
 A **workspace** is the declared root within which projects may read source
 files and evaluate globs. Its contents form the conservative hashed input
@@ -332,32 +332,60 @@ annotated task are outside the static guarantee.
 
 ### T2. Declared-IO
 
-A Declared-IO annotation identifies task parameters whose fully expanded
-values are the complete finite sets of external paths read or written by the
-task. The paths are canonicalized during graph construction; the annotation
-does not encode path-composition recipes.
+A Declared-IO task exposes conventional `DeclaredInputs` and
+`DeclaredOutputs` parameters that carry the complete finite input and output
+path lists for an invocation. These declaration-list parameters are separate
+from the task's operational parameters. This allows the same operational path
+to appear in the input list, the output list, both lists, or neither list
+without assigning a fixed filesystem role to that operational parameter.
 
-For example, a parameter annotated with
-`[MSBuildDeclaredIOInput(nameof(Sources))]` may be bound from `@(Sources)`.
-Its expanded items are the exact read set. Binding that parameter to
-`$(ObjDir)/**` does not qualify because the wildcard is not an enumerated file
-path.
+Both declaration-list parameters must be supplied explicitly for the contract
+to apply to an invocation. An explicit empty value is an empty list. If either
+parameter is absent, that invocation is Unaudited.
+
+For example:
+
+```csharp
+[MSBuildDeclaredIOTask]
+```
+
+```xml
+<WriteFile File="$(Ledger)"
+           DeclaredInputs="$(Ledger)"
+           DeclaredOutputs="$(Ledger)" />
+```
+
+The declaration-list expressions may use static properties, items, metadata,
+and outputs from Pure tasks. They must be statically enumerable during graph
+construction and are then canonicalized and stored on the invocation.
+Binding a declaration list to `$(ObjDir)/**` does not qualify because the
+wildcard is not an enumerated file list.
 
 Invocation constraints may require another parameter to be unset before the
 declared-I/O contract applies. This permits a task annotation to exclude modes
 in which the task chooses its own output path.
 
-A Declared-IO task executes only as a task invocation in the execution graph.
-Its declared input and output path parameters are expanded and canonicalized
-during graph construction, and the resulting exact paths are stored on the
-invocation. If a declared output path parameter is also emitted through an
-MSBuild `<Output>` element, a successful task invocation must return the same
-path values. Those already-bound values may flow to later MSBuild items or
-properties even though the files themselves are materialized only when the
-task executes. Other task outputs remain deferred.
+Declared inputs are paths whose pre-invocation contents or metadata may affect
+the invocation's observable result. Declared outputs are persistent paths that
+a successful invocation may create, modify, or delete. A path may appear in
+both lists. Output lists may be empty.
 
-The engine validates the declared paths after the task invocation becomes
-ready. It trusts that the task does not perform undeclared I/O.
+Temporary files whose useful lifetime is contained within one invocation,
+whose names and contents do not escape through task outputs, and which do not
+remain after successful execution are implementation details. They are not
+declared outputs. Creating parent directories needed to materialize a declared
+output is likewise part of materializing that output.
+
+A Declared-IO task executes only as a task invocation in the execution graph.
+Its `DeclaredInputs` and `DeclaredOutputs` parameters are expanded and canonicalized
+during graph construction, and the resulting exact paths are stored on the
+invocation. They are precomputed task inputs, not task outputs. Ordinary task
+outputs remain deferred; when a declared path must also flow through MSBuild
+items or properties during graph construction, the target must add that
+already-known value through static property or item operations.
+
+The engine validates the declared paths during graph construction. It trusts
+that the task does not perform undeclared externally observable I/O.
 
 ### T3. Unaudited
 
@@ -466,10 +494,10 @@ A static value is available during graph construction. A deferred value is
 available only after an earlier task invocation executes.
 
 Pure tasks produce static properties and items. Unaudited tasks produce
-deferred properties and items. Declared-IO task outputs are deferred except
-for declared path parameters whose values were already bound and canonicalized
-during graph construction; the path value may be static while the declared
-filesystem effect remains deferred.
+deferred properties and items. Declared-IO task invocations may not expose
+task outputs: execution can observe declared filesystem inputs, so those
+values are not available during graph construction. Precomputed declared
+paths flow through separate static property and item operations.
 
 Item metadata is independently static or deferred. A static item list may
 therefore have known membership and identities while one of its metadata
@@ -779,8 +807,8 @@ The engine performs statically decidable checks in this order:
 10. Reject deferred values in static contexts and report their dependency
     chain.
 11. Make task invocations ready when earlier values become available.
-12. Validate each ready T2 declared read set against the project's hashed
-    superset.
+12. Validate each T2 declared read set against the project's hashed superset
+    during graph construction.
 13. Validate the supported declared-output update rules.
 14. Emit the complete execution graph.
 15. Mark task invocations and projects as cacheable or not cacheable.

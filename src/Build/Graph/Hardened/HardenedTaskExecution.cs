@@ -61,6 +61,8 @@ internal sealed class HardenedTaskDescriptor
 
 internal static class HardenedTaskClassificationResolver
 {
+    private static readonly IReadOnlyList<string> s_declaredIOInputPathParameters = ["DeclaredInputs"];
+    private static readonly IReadOnlyList<string> s_declaredIOOutputPathParameters = ["DeclaredOutputs"];
     private static readonly ConditionalWeakTable<LoadedType, HardenedTaskDescriptor> s_descriptors = new();
 
     internal static HardenedTaskDescriptor Classify(
@@ -119,33 +121,10 @@ internal static class HardenedTaskClassificationResolver
             return HardenedTaskDescriptor.Unaudited;
         }
 
-        IReadOnlyList<DeclaredIOPathParameter> loadedInputs =
-            loadedType.DeclaredIOInputPathParameters;
-        IReadOnlyList<DeclaredIOPathParameter> loadedOutputs =
-            loadedType.DeclaredIOOutputPathParameters;
-        if (loadedInputs.Count == 0 &&
-            loadedOutputs.Count == 0 &&
-            loadedType.DeclaredIORequiredUnsetParameters.Count == 0)
-        {
-            return new HardenedTaskDescriptor(HardenedTaskClassification.DeclaredIO);
-        }
-
-        var inputs = new string[loadedInputs.Count];
-        for (int i = 0; i < loadedInputs.Count; i++)
-        {
-            inputs[i] = loadedInputs[i].ParameterName;
-        }
-
-        var outputs = new string[loadedOutputs.Count];
-        for (int i = 0; i < loadedOutputs.Count; i++)
-        {
-            outputs[i] = loadedOutputs[i].ParameterName;
-        }
-
         return new HardenedTaskDescriptor(
             HardenedTaskClassification.DeclaredIO,
             loadedType.DeclaredIORequiredUnsetParameters,
-            inputs,
-            outputs);
+            s_declaredIOInputPathParameters,
+            s_declaredIOOutputPathParameters);
     }
 }

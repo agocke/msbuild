@@ -8,12 +8,15 @@ using System;
 namespace Microsoft.Build.Framework;
 
 /// <summary>
-/// Marks a task class whose external filesystem effects are completely described by its declared-I/O annotations.
+/// Marks a task class whose externally observable filesystem inputs and outputs are completely described
+/// by its <c>DeclaredInputs</c> and <c>DeclaredOutputs</c> parameters.
 /// </summary>
 /// <remarks>
-/// Input and output paths are described with <see cref="MSBuildDeclaredIOInputAttribute"/> and
-/// <see cref="MSBuildDeclaredIOOutputAttribute"/>.
+/// Each invocation governed by this contract must explicitly supply both parameters. Their expressions
+/// must be statically enumerable during graph construction. Explicit empty values represent empty lists.
 /// Invocation constraints are described with <see cref="MSBuildDeclaredIORequiresUnsetAttribute"/>.
+/// Temporary files whose useful lifetime is contained within one invocation and which do not remain after
+/// successful execution are implementation details rather than declared outputs.
 /// MSBuild detects this attribute by its namespace and name only, ignoring the defining assembly.
 /// This allows task authors to define a compatible attribute alongside tasks that target older versions
 /// of Microsoft.Build.Framework. Compatible definitions must also specify <c>Inherited = false</c>.

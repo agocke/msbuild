@@ -3800,11 +3800,18 @@ Copyright (C) Microsoft Corporation. All rights reserved.
           Condition="'@(AssemblyAttributes)' != '' and '$(GenerateAdditionalSources)' == 'true'">
     <WriteCodeFragment
           AssemblyAttributes="@(AssemblyAttributes)"
+          DeclaredInputs=""
+          DeclaredOutputs="$(AssemblyAttributesPath)"
           OutputFile="$(AssemblyAttributesPath)"
           Language="$(Language)">
-      <Output TaskParameter="OutputFile" ItemName="Compile"/>
-      <Output TaskParameter="OutputFile" ItemName="FileWrites"/>
+      <Output TaskParameter="OutputFile" ItemName="Compile" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
+      <Output TaskParameter="OutputFile" ItemName="FileWrites" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
     </WriteCodeFragment>
+
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <Compile Include="$(AssemblyAttributesPath)"/>
+      <FileWrites Include="$(AssemblyAttributesPath)"/>
+    </ItemGroup>
   </Target>
 
   <!--
@@ -5849,8 +5856,17 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     <WriteLinesToFile
         File="$(IntermediateOutputPath)$(CleanFile)"
         Lines="@(_CleanUniqueRemainingFileWritesAfterIncrementalClean)"
-        Condition="'@(_CleanUnfilteredPriorFileWrites)'!='@(_CleanUniqueRemainingFileWritesAfterIncrementalClean)'"
+        Condition="'$(MSBuildHardenedGraph)' != 'true' and '@(_CleanUnfilteredPriorFileWrites)'!='@(_CleanUniqueRemainingFileWritesAfterIncrementalClean)'"
         Overwrite="true"/>
+
+    <WriteLinesToFile
+        File="$(IntermediateOutputPath)$(CleanFile)"
+        Lines="@(_CleanUniqueRemainingFileWritesAfterIncrementalClean)"
+        DeclaredInputs="$(IntermediateOutputPath)$(CleanFile)"
+        DeclaredOutputs="$(IntermediateOutputPath)$(CleanFile)"
+        Condition="'$(MSBuildHardenedGraph)' == 'true'"
+        Overwrite="true"
+        WriteOnlyWhenDifferent="true"/>
 
   </Target>
 

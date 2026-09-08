@@ -32,7 +32,6 @@ namespace Microsoft.Build.Tasks
     /// </comment>
     [MSBuildDeclaredIOTask]
     [MSBuildDeclaredIORequiresUnset(nameof(OutputDirectory))]
-    [MSBuildDeclaredIOOutput(nameof(OutputFile))]
     [MSBuildMultiThreadableTask]
     public class WriteCodeFragment : TaskExtension, IMultiThreadableTask
     {
@@ -78,6 +77,18 @@ namespace Microsoft.Build.Tasks
         /// </summary>
         [Output]
         public ITaskItem OutputFile { get; set; }
+
+        /// <summary>
+        /// Exact file paths whose pre-invocation state may affect this invocation.
+        /// This declaration does not affect task execution.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; }
+
+        /// <summary>
+        /// Exact persistent file paths that this invocation may create or modify.
+        /// This declaration does not affect task execution.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; }
 
         /// <summary>
         /// Main entry point.

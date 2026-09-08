@@ -747,11 +747,10 @@ loading is a later milestone.
    parameters, batching expressions, and output destinations.
 11. Require every Pure-task parameter to be static.
 12. Classify Pure-task outputs as values that would be static during full graph
-   construction, and Unaudited task outputs as deferred. Resolve every
-   Declared-IO path parameter to exact canonical paths. When a declared output
-   path parameter is emitted through an MSBuild `<Output>` element, apply its
-   already-bound value to validation state without executing the task. Other
-   Declared-IO outputs remain deferred.
+   construction, and Unaudited task outputs as deferred. Reject `<Output>`
+   elements on Declared-IO task invocations. Resolve every Declared-IO path
+   parameter to exact canonical paths; precomputed paths flow through separate
+   static property and item operations.
 13. Permit deferred parameters on Declared-IO and Unaudited task invocations
    when the parameter itself is not needed to determine graph structure.
 14. When a static context reads a deferred value, report an error containing
@@ -828,9 +827,9 @@ Required scenarios:
 1. Initial evaluated properties and items are static.
 2. Static property and item assignments remain static.
 3. A Pure-task output is classified as static.
-4. A Declared-IO property output is classified as deferred.
-5. A Declared-IO item output is classified as deferred.
-6. A deferred output may be passed to a later Declared-IO task parameter.
+4. A Declared-IO property output is rejected.
+5. A Declared-IO item output is rejected.
+6. A deferred Unaudited-task output may be passed to a later Declared-IO task parameter.
 7. A deferred value supplied to a Pure task is rejected.
 8. A deferred value used in a condition is rejected.
 9. A deferred value used to determine item membership or batching is rejected.
@@ -952,9 +951,11 @@ the packaged form used to avoid loading task code.
 
 - Define non-inherited task attributes and inspect them through metadata-only
   loading without constructing attributes, factories, or tasks.
-- Represent Declared-IO classification and exact path-bearing parameters with
-  `MSBuildDeclaredIOTaskAttribute`, `MSBuildDeclaredIOInputAttribute`, and
-  `MSBuildDeclaredIOOutputAttribute`.
+- Represent Declared-IO classification with
+  `MSBuildDeclaredIOTaskAttribute`; annotated tasks use the conventional
+  `DeclaredInputs` and `DeclaredOutputs` list parameters.
+- Treat an annotated task invocation with missing declaration-list parameters
+  as Unaudited; explicit empty parameters represent empty lists.
 - Represent invocation modes in which that contract applies with
   `MSBuildDeclaredIORequiresUnsetAttribute`.
 - Honor task overrides and runtime/architecture identity when selecting the
@@ -964,7 +965,8 @@ the packaged form used to avoid loading task code.
 - Bind the annotation to the selected task assembly content hash.
 - Record the annotation manifest hash.
 - Classify each invoked task as Pure, Declared-IO, or Unaudited.
-- Parse declared read and write expressions without evaluating task code.
+- Resolve declared read and write lists from static properties, items,
+  metadata, and Pure task outputs without evaluating the Declared-IO task.
 - Report malformed manifests, assembly-hash mismatches, and illegal
   declarations as resource-backed errors.
 

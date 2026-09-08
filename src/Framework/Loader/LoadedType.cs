@@ -14,11 +14,6 @@ using Microsoft.Build.Framework;
 namespace Microsoft.Build.Shared
 {
     /// <summary>
-    /// Identifies a task parameter whose values are declared filesystem paths.
-    /// </summary>
-    internal sealed record DeclaredIOPathParameter(string ParameterName);
-
-    /// <summary>
     /// This class packages information about a type loaded from an assembly: for example,
     /// the GenerateResource task class type or the ConsoleLogger logger class type.
     /// </summary>
@@ -58,14 +53,10 @@ namespace Microsoft.Build.Shared
             ReadMSBuildDeclaredIOAttributes(
                 out bool hasMSBuildDeclaredIOTaskAttribute,
                 out bool hasValidMSBuildDeclaredIOAttributes,
-                out IReadOnlyList<string> declaredIORequiredUnsetParameters,
-                out IReadOnlyList<DeclaredIOPathParameter> declaredIOInputPathParameters,
-                out IReadOnlyList<DeclaredIOPathParameter> declaredIOOutputPathParameters);
+                out IReadOnlyList<string> declaredIORequiredUnsetParameters);
             HasMSBuildDeclaredIOTaskAttribute = hasMSBuildDeclaredIOTaskAttribute;
             HasValidMSBuildDeclaredIOAttributes = hasValidMSBuildDeclaredIOAttributes;
             DeclaredIORequiredUnsetParameters = declaredIORequiredUnsetParameters;
-            DeclaredIOInputPathParameters = declaredIOInputPathParameters;
-            DeclaredIOOutputPathParameters = declaredIOOutputPathParameters;
             LoadedAssemblyName = loadedAssembly.GetName();
             LoadedViaMetadataLoadContext = loadedViaMetadataLoadContext;
             Architecture = architecture;
@@ -314,16 +305,6 @@ namespace Microsoft.Build.Shared
         internal IReadOnlyList<string> DeclaredIORequiredUnsetParameters { get; }
 
         /// <summary>
-        /// Gets task parameters containing declared filesystem input paths.
-        /// </summary>
-        internal IReadOnlyList<DeclaredIOPathParameter> DeclaredIOInputPathParameters { get; }
-
-        /// <summary>
-        /// Gets task parameters containing declared filesystem output paths.
-        /// </summary>
-        internal IReadOnlyList<DeclaredIOPathParameter> DeclaredIOOutputPathParameters { get; }
-
-        /// <summary>
         /// Determines if the task has a hardcoded requirement for STA thread usage.
         /// </summary>
         private bool CheckForHardcodedSTARequirement()
@@ -489,20 +470,14 @@ namespace Microsoft.Build.Shared
         private void ReadMSBuildDeclaredIOAttributes(
             out bool hasTaskAttribute,
             out bool hasValidAttributes,
-            out IReadOnlyList<string> requiredUnsetParameters,
-            out IReadOnlyList<DeclaredIOPathParameter> inputPathParameters,
-            out IReadOnlyList<DeclaredIOPathParameter> outputPathParameters)
+            out IReadOnlyList<string> requiredUnsetParameters)
         {
             const string taskAttributeFullName = "Microsoft.Build.Framework.MSBuildDeclaredIOTaskAttribute";
             const string requiresUnsetAttributeFullName = "Microsoft.Build.Framework.MSBuildDeclaredIORequiresUnsetAttribute";
-            const string inputAttributeFullName = "Microsoft.Build.Framework.MSBuildDeclaredIOInputAttribute";
-            const string outputAttributeFullName = "Microsoft.Build.Framework.MSBuildDeclaredIOOutputAttribute";
 
             hasTaskAttribute = false;
             hasValidAttributes = true;
             List<string>? unsetParameters = null;
-            List<DeclaredIOPathParameter>? inputs = null;
-            List<DeclaredIOPathParameter>? outputs = null;
 
             foreach (CustomAttributeData attribute in CustomAttributeData.GetCustomAttributes(Type))
             {
@@ -524,69 +499,35 @@ namespace Microsoft.Build.Shared
 
                 if (attributeTypeName == requiresUnsetAttributeFullName)
                 {
-                    if (!TryReadDeclaredIOPathParameter(
+                    if (!TryReadDeclaredIOParameterName(
                             attribute,
-                            out DeclaredIOPathParameter? unsetParameter))
+                            out string? unsetParameter))
                     {
                         hasValidAttributes = false;
                         continue;
                     }
 
                     unsetParameters ??= [];
-                    unsetParameters.Add(unsetParameter.ParameterName);
-                    continue;
+                    unsetParameters.Add(unsetParameter);
                 }
-
-                if (attributeTypeName == inputAttributeFullName)
-                {
-                    if (!TryReadDeclaredIOPathParameter(
-                            attribute,
-                            out DeclaredIOPathParameter? input))
-                    {
-                        hasValidAttributes = false;
-                        continue;
-                    }
-
-                    inputs ??= [];
-                    inputs.Add(input);
-                    continue;
-                }
-
-                if (attributeTypeName != outputAttributeFullName)
-                {
-                    continue;
-                }
-
-                if (!TryReadDeclaredIOPathParameter(
-                        attribute,
-                        out DeclaredIOPathParameter? output))
-                {
-                    hasValidAttributes = false;
-                    continue;
-                }
-
-                outputs ??= [];
-                outputs.Add(output);
             }
 
             requiredUnsetParameters = unsetParameters ?? [];
-            inputPathParameters = inputs ?? [];
-            outputPathParameters = outputs ?? [];
         }
 
-        private static bool TryReadDeclaredIOPathParameter(
+        private static bool TryReadDeclaredIOParameterName(
             CustomAttributeData attribute,
-            [NotNullWhen(true)] out DeclaredIOPathParameter? pathParameter)
+            [NotNullWhen(true)] out string? parameterName)
         {
-            pathParameter = null;
+            parameterName = null;
             if (attribute.ConstructorArguments.Count != 1 ||
-                attribute.ConstructorArguments[0].Value is not string parameterName ||
-                string.IsNullOrEmpty(parameterName))
+                attribute.ConstructorArguments[0].Value is not string candidate ||
+                string.IsNullOrEmpty(candidate))
             {
                 return false;
             }
 
-            pathParameter = new DeclaredIOPathParameter(parameterName);
+            parameterName = candidate;
             return true;
         }
     }

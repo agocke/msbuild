@@ -15,6 +15,7 @@ namespace Microsoft.Build.Tasks
     /// <summary>
     /// Appends a list of items to a file. One item per line with carriage returns in-between.
     /// </summary>
+    [MSBuildDeclaredIOTask]
     [MSBuildMultiThreadableTask]
     public class WriteLinesToFile : TaskExtension, IIncrementalTask, IMultiThreadableTask
     {
@@ -48,6 +49,18 @@ namespace Microsoft.Build.Tasks
         /// </summary>
         [Required]
         public ITaskItem File { get; set; }
+
+        /// <summary>
+        /// Exact file paths whose pre-invocation state may affect this invocation.
+        /// This declaration does not affect task execution.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; }
+
+        /// <summary>
+        /// Exact persistent file paths that this invocation may create or modify.
+        /// This declaration does not affect task execution.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; }
 
         /// <summary>
         /// Write each item as a line in the file.

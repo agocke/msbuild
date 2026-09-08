@@ -42,8 +42,6 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
     [MSBuildDeclaredIOTask]
     [MSBuildDeclaredIORequiresUnset("LegacyDirectory")]
-    [MSBuildDeclaredIOInput("Source")]
-    [MSBuildDeclaredIOOutput("Destination")]
     public class DeclaredIOTestTask : Task
     {
         public override bool Execute() => true;
@@ -153,12 +151,6 @@ namespace Microsoft.Build.UnitTests.BackEnd
             loadedType.HasMSBuildDeclaredIOTaskAttribute.ShouldBeTrue();
             loadedType.HasValidMSBuildDeclaredIOAttributes.ShouldBeTrue();
             loadedType.DeclaredIORequiredUnsetParameters.ShouldBe(["LegacyDirectory"]);
-            loadedType.DeclaredIOInputPathParameters
-                .ShouldHaveSingleItem()
-                .ParameterName.ShouldBe("Source");
-            loadedType.DeclaredIOOutputPathParameters
-                .ShouldHaveSingleItem()
-                .ParameterName.ShouldBe("Destination");
         }
 
         [Fact]
