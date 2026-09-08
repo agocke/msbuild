@@ -747,9 +747,11 @@ loading is a later milestone.
    parameters, batching expressions, and output destinations.
 11. Require every Pure-task parameter to be static.
 12. Classify Pure-task outputs as values that would be static during full graph
-   construction, and Declared-IO or Unaudited task outputs as deferred. The
-   first slice validates availability only and does not execute the task to
-   obtain a concrete output value.
+   construction, and Unaudited task outputs as deferred. Resolve every
+   Declared-IO path parameter to exact canonical paths. When a declared output
+   path parameter is emitted through an MSBuild `<Output>` element, apply its
+   already-bound value to validation state without executing the task. Other
+   Declared-IO outputs remain deferred.
 13. Permit deferred parameters on Declared-IO and Unaudited task invocations
    when the parameter itself is not needed to determine graph structure.
 14. When a static context reads a deferred value, report an error containing
@@ -944,6 +946,11 @@ the packaged form used to avoid loading task code.
 
 - Define non-inherited task attributes and inspect them through metadata-only
   loading without constructing attributes, factories, or tasks.
+- Represent Declared-IO classification and exact path-bearing parameters with
+  `MSBuildDeclaredIOTaskAttribute`, `MSBuildDeclaredIOInputAttribute`, and
+  `MSBuildDeclaredIOOutputAttribute`.
+- Represent invocation modes in which that contract applies with
+  `MSBuildDeclaredIORequiresUnsetAttribute`.
 - Honor task overrides and runtime/architecture identity when selecting the
   annotated implementation.
 - Define sidecar discovery, schema, and versioning.
@@ -1021,12 +1028,17 @@ Validate T2 declarations without executing or monitoring the task.
 
 ### Work
 
-- Require every declared path to be derived from task parameters by the
-  allowed literal-composition expression language.
-- Require destination names and declared path-expression structure to be
-  static.
-- Permit deferred parameter values where the declaration remains structurally
-  valid and does not affect graph topology.
+- Require every declared path parameter to expand to statically enumerable
+  exact paths.
+- Require output destination names and conditions to be static before
+  publishing an already-bound path value.
+- Resolve declared input and output parameters to exact canonical paths and
+  retain those paths as the invocation's I/O footprint.
+- Apply an already-bound declared output path parameter to matching concrete
+  MSBuild output properties or items without materializing the filesystem
+  output.
+- Permit other task parameter values to remain deferred when they do not
+  determine the declared path set or graph topology.
 - Validate that the declared read set is contained in the conservative
   project input set.
 - Detect overlapping declared outputs when statically decidable.

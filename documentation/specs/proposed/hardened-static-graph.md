@@ -45,7 +45,7 @@ short form.
 
 A **deferred task invocation** is an invocation waiting for property or item
 values from earlier task invocations. Its task, parameter expressions,
-declared-I/O expressions, outputs, and predecessor edges are already known.
+declared-I/O path parameters, outputs, and predecessor edges are already known.
 
 A **ready task invocation** has received all values required from earlier task
 invocations. Its declared inputs and outputs can be calculated and it can
@@ -332,30 +332,29 @@ annotated task are outside the static guarantee.
 
 ### T2. Declared-IO
 
-A Declared-IO annotation describes every external path read or written by the
-task through expressions derived from task parameter values by literal
-composition.
+A Declared-IO annotation identifies task parameters whose fully expanded
+values are the complete finite sets of external paths read or written by the
+task. The paths are canonicalized during graph construction; the annotation
+does not encode path-composition recipes.
 
-For example:
+For example, a parameter annotated with
+`[MSBuildDeclaredIOInput(nameof(Sources))]` may be bound from `@(Sources)`.
+Its expanded items are the exact read set. Binding that parameter to
+`$(ObjDir)/**` does not qualify because the wildcard is not an enumerated file
+path.
 
-```xml
-Reads="@(Sources)"
-```
-
-may qualify, while:
-
-```xml
-Reads="$(ObjDir)/**"
-```
-
-does not qualify as a finite parameter-derived read set.
-
-The shape of each declared-I/O expression is known during graph construction.
-Its concrete value MAY depend on earlier task outputs. In that case, the task
-invocation remains deferred until those outputs are available.
+Invocation constraints may require another parameter to be unset before the
+declared-I/O contract applies. This permits a task annotation to exclude modes
+in which the task chooses its own output path.
 
 A Declared-IO task executes only as a task invocation in the execution graph.
-Its property and item outputs are deferred.
+Its declared input and output path parameters are expanded and canonicalized
+during graph construction, and the resulting exact paths are stored on the
+invocation. If a declared output path parameter is also emitted through an
+MSBuild `<Output>` element, a successful task invocation must return the same
+path values. Those already-bound values may flow to later MSBuild items or
+properties even though the files themselves are materialized only when the
+task executes. Other task outputs remain deferred.
 
 The engine validates the declared paths after the task invocation becomes
 ready. It trusts that the task does not perform undeclared I/O.
@@ -377,8 +376,10 @@ task invocations elsewhere in the graph from being cacheable.
 
 ### T4. Annotation matching
 
-Annotations live in a sidecar manifest and bind to the task assembly's content
-hash.
+Non-inherited class attributes are the annotation authoring surface. Packaged
+annotations may live in a sidecar manifest so graph construction can inspect
+them without loading executable task code. A sidecar binds to the task
+assembly's content hash.
 
 The manifest hash is recorded on every task invocation governed by that
 manifest. Any change to the task assembly invalidates the audit because the
@@ -464,8 +465,11 @@ Every property value and item list is either **static** or **deferred**.
 A static value is available during graph construction. A deferred value is
 available only after an earlier task invocation executes.
 
-Pure tasks produce static properties and items. Declared-IO and Unaudited
-tasks produce deferred properties and items.
+Pure tasks produce static properties and items. Unaudited tasks produce
+deferred properties and items. Declared-IO task outputs are deferred except
+for declared path parameters whose values were already bound and canonicalized
+during graph construction; the path value may be static while the declared
+filesystem effect remains deferred.
 
 Item metadata is independently static or deferred. A static item list may
 therefore have known membership and identities while one of its metadata
@@ -769,7 +773,7 @@ The engine performs statically decidable checks in this order:
 6. Resolve each invoked task assembly and its bound sidecar annotation, or
    classify the task as T3.
 7. Validate that a T1 annotation declares no I/O.
-8. Validate that each T2 declared-I/O expression is parameter-derived.
+8. Validate that each T2 declared path parameter is statically enumerable.
 9. Partially evaluate target bodies, execute Pure tasks, emit cuts, and
    mark properties, item lists, and metadata as static or deferred.
 10. Reject deferred values in static contexts and report their dependency

@@ -30,6 +30,9 @@ namespace Microsoft.Build.Tasks
     /// <comment>
     /// Currently only supports writing .NET attributes.
     /// </comment>
+    [MSBuildDeclaredIOTask]
+    [MSBuildDeclaredIORequiresUnset(nameof(OutputDirectory))]
+    [MSBuildDeclaredIOOutput(nameof(OutputFile))]
     [MSBuildMultiThreadableTask]
     public class WriteCodeFragment : TaskExtension, IMultiThreadableTask
     {
@@ -102,10 +105,10 @@ namespace Microsoft.Build.Tasks
                 return false;
             }
 
-            if (code.Length == 0)
+            // An explicitly named output is part of the task contract even when its contents are empty.
+            if (code.Length == 0 && OutputFile == null)
             {
                 Log.LogMessageFromResources(MessageImportance.Low, "WriteCodeFragment.NoWorkToDo");
-                OutputFile = null;
                 return true;
             }
 

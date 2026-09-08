@@ -2,8 +2,9 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
-using System.Reflection;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 #if NET
 using System.Runtime.CompilerServices;
 #endif
@@ -12,6 +13,11 @@ using Microsoft.Build.Framework;
 
 namespace Microsoft.Build.Shared
 {
+    /// <summary>
+    /// Identifies a task parameter whose values are declared filesystem paths.
+    /// </summary>
+    internal sealed record DeclaredIOPathParameter(string ParameterName);
+
     /// <summary>
     /// This class packages information about a type loaded from an assembly: for example,
     /// the GenerateResource task class type or the ConsoleLogger logger class type.
@@ -49,6 +55,17 @@ namespace Microsoft.Build.Shared
 
             HasSTAThreadAttribute = CheckForHardcodedSTARequirement();
             HasMSBuildPureTaskAttribute = CheckForMSBuildPureTaskAttribute();
+            ReadMSBuildDeclaredIOAttributes(
+                out bool hasMSBuildDeclaredIOTaskAttribute,
+                out bool hasValidMSBuildDeclaredIOAttributes,
+                out IReadOnlyList<string> declaredIORequiredUnsetParameters,
+                out IReadOnlyList<DeclaredIOPathParameter> declaredIOInputPathParameters,
+                out IReadOnlyList<DeclaredIOPathParameter> declaredIOOutputPathParameters);
+            HasMSBuildDeclaredIOTaskAttribute = hasMSBuildDeclaredIOTaskAttribute;
+            HasValidMSBuildDeclaredIOAttributes = hasValidMSBuildDeclaredIOAttributes;
+            DeclaredIORequiredUnsetParameters = declaredIORequiredUnsetParameters;
+            DeclaredIOInputPathParameters = declaredIOInputPathParameters;
+            DeclaredIOOutputPathParameters = declaredIOOutputPathParameters;
             LoadedAssemblyName = loadedAssembly.GetName();
             LoadedViaMetadataLoadContext = loadedViaMetadataLoadContext;
             Architecture = architecture;
@@ -282,6 +299,31 @@ namespace Microsoft.Build.Shared
         internal bool HasMSBuildPureTaskAttribute { get; }
 
         /// <summary>
+        /// Gets whether the exact task type is marked with MSBuildDeclaredIOTaskAttribute.
+        /// </summary>
+        internal bool HasMSBuildDeclaredIOTaskAttribute { get; }
+
+        /// <summary>
+        /// Gets whether every recognized declared-I/O annotation has the expected shape.
+        /// </summary>
+        internal bool HasValidMSBuildDeclaredIOAttributes { get; }
+
+        /// <summary>
+        /// Gets task parameters that must be unset for the declared-I/O contract to apply.
+        /// </summary>
+        internal IReadOnlyList<string> DeclaredIORequiredUnsetParameters { get; }
+
+        /// <summary>
+        /// Gets task parameters containing declared filesystem input paths.
+        /// </summary>
+        internal IReadOnlyList<DeclaredIOPathParameter> DeclaredIOInputPathParameters { get; }
+
+        /// <summary>
+        /// Gets task parameters containing declared filesystem output paths.
+        /// </summary>
+        internal IReadOnlyList<DeclaredIOPathParameter> DeclaredIOOutputPathParameters { get; }
+
+        /// <summary>
         /// Determines if the task has a hardcoded requirement for STA thread usage.
         /// </summary>
         private bool CheckForHardcodedSTARequirement()
@@ -442,6 +484,110 @@ namespace Microsoft.Build.Shared
             }
 
             return false;
+        }
+
+        private void ReadMSBuildDeclaredIOAttributes(
+            out bool hasTaskAttribute,
+            out bool hasValidAttributes,
+            out IReadOnlyList<string> requiredUnsetParameters,
+            out IReadOnlyList<DeclaredIOPathParameter> inputPathParameters,
+            out IReadOnlyList<DeclaredIOPathParameter> outputPathParameters)
+        {
+            const string taskAttributeFullName = "Microsoft.Build.Framework.MSBuildDeclaredIOTaskAttribute";
+            const string requiresUnsetAttributeFullName = "Microsoft.Build.Framework.MSBuildDeclaredIORequiresUnsetAttribute";
+            const string inputAttributeFullName = "Microsoft.Build.Framework.MSBuildDeclaredIOInputAttribute";
+            const string outputAttributeFullName = "Microsoft.Build.Framework.MSBuildDeclaredIOOutputAttribute";
+
+            hasTaskAttribute = false;
+            hasValidAttributes = true;
+            List<string>? unsetParameters = null;
+            List<DeclaredIOPathParameter>? inputs = null;
+            List<DeclaredIOPathParameter>? outputs = null;
+
+            foreach (CustomAttributeData attribute in CustomAttributeData.GetCustomAttributes(Type))
+            {
+                string? attributeTypeName;
+                try
+                {
+                    attributeTypeName = attribute.AttributeType?.FullName;
+                }
+                catch (Exception e) when (!ExceptionHandling.IsCriticalException(e))
+                {
+                    continue;
+                }
+
+                if (attributeTypeName == taskAttributeFullName)
+                {
+                    hasTaskAttribute = true;
+                    continue;
+                }
+
+                if (attributeTypeName == requiresUnsetAttributeFullName)
+                {
+                    if (!TryReadDeclaredIOPathParameter(
+                            attribute,
+                            out DeclaredIOPathParameter? unsetParameter))
+                    {
+                        hasValidAttributes = false;
+                        continue;
+                    }
+
+                    unsetParameters ??= [];
+                    unsetParameters.Add(unsetParameter.ParameterName);
+                    continue;
+                }
+
+                if (attributeTypeName == inputAttributeFullName)
+                {
+                    if (!TryReadDeclaredIOPathParameter(
+                            attribute,
+                            out DeclaredIOPathParameter? input))
+                    {
+                        hasValidAttributes = false;
+                        continue;
+                    }
+
+                    inputs ??= [];
+                    inputs.Add(input);
+                    continue;
+                }
+
+                if (attributeTypeName != outputAttributeFullName)
+                {
+                    continue;
+                }
+
+                if (!TryReadDeclaredIOPathParameter(
+                        attribute,
+                        out DeclaredIOPathParameter? output))
+                {
+                    hasValidAttributes = false;
+                    continue;
+                }
+
+                outputs ??= [];
+                outputs.Add(output);
+            }
+
+            requiredUnsetParameters = unsetParameters ?? [];
+            inputPathParameters = inputs ?? [];
+            outputPathParameters = outputs ?? [];
+        }
+
+        private static bool TryReadDeclaredIOPathParameter(
+            CustomAttributeData attribute,
+            [NotNullWhen(true)] out DeclaredIOPathParameter? pathParameter)
+        {
+            pathParameter = null;
+            if (attribute.ConstructorArguments.Count != 1 ||
+                attribute.ConstructorArguments[0].Value is not string parameterName ||
+                string.IsNullOrEmpty(parameterName))
+            {
+                return false;
+            }
+
+            pathParameter = new DeclaredIOPathParameter(parameterName);
+            return true;
         }
     }
 }

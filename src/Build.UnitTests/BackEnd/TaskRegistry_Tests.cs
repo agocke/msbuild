@@ -40,6 +40,15 @@ namespace Microsoft.Build.UnitTests.BackEnd
         public override bool Execute() => true;
     }
 
+    [MSBuildDeclaredIOTask]
+    [MSBuildDeclaredIORequiresUnset("LegacyDirectory")]
+    [MSBuildDeclaredIOInput("Source")]
+    [MSBuildDeclaredIOOutput("Destination")]
+    public class DeclaredIOTestTask : Task
+    {
+        public override bool Execute() => true;
+    }
+
     /// <summary>
     /// Test the task registry
     /// </summary>
@@ -119,6 +128,37 @@ namespace Microsoft.Build.UnitTests.BackEnd
             loadedType.ShouldNotBeNull();
             loadedType.LoadedViaMetadataLoadContext.ShouldBeTrue();
             loadedType.HasMSBuildPureTaskAttribute.ShouldBeTrue();
+        }
+
+        [Fact]
+        public void MetadataResolutionFindsDeclaredIOAttributesWithoutExecutionLoading()
+        {
+            ProjectRootElement project = ProjectRootElement.Create();
+            ProjectUsingTaskElement element = project.AddUsingTask(
+                nameof(DeclaredIOTestTask),
+                _testTaskLocation,
+                null);
+            TaskRegistry registry = CreateTaskRegistryAndRegisterTasks([element]);
+
+            bool resolved = registry.TryGetRegisteredTaskTypeForMetadata(
+                nameof(DeclaredIOTestTask),
+                TaskHostParameters.Empty,
+                exactMatchRequired: true,
+                _targetLoggingContext,
+                out LoadedType loadedType);
+
+            resolved.ShouldBeTrue();
+            loadedType.ShouldNotBeNull();
+            loadedType.LoadedViaMetadataLoadContext.ShouldBeTrue();
+            loadedType.HasMSBuildDeclaredIOTaskAttribute.ShouldBeTrue();
+            loadedType.HasValidMSBuildDeclaredIOAttributes.ShouldBeTrue();
+            loadedType.DeclaredIORequiredUnsetParameters.ShouldBe(["LegacyDirectory"]);
+            loadedType.DeclaredIOInputPathParameters
+                .ShouldHaveSingleItem()
+                .ParameterName.ShouldBe("Source");
+            loadedType.DeclaredIOOutputPathParameters
+                .ShouldHaveSingleItem()
+                .ParameterName.ShouldBe("Destination");
         }
 
         [Fact]

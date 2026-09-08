@@ -195,11 +195,10 @@ namespace Microsoft.Build.UnitTests
         }
 
         /// <summary>
-        /// Given nothing to write, should succeed but
-        /// produce no output file
+        /// Given an explicit output path and nothing to write, should emit an empty file.
         /// </summary>
         [Fact]
-        public void NoAttributesShouldEmitNoFile()
+        public void NoAttributesShouldEmitEmptyExplicitOutputFile()
         {
             string file = Path.Combine(Path.GetTempPath(), "NoAttributesShouldEmitNoFile.tmp");
 
@@ -215,19 +214,26 @@ namespace Microsoft.Build.UnitTests
             task.Language = "c#";
             task.AssemblyAttributes = Array.Empty<TaskItem>(); // MSBuild sets an empty array
             task.OutputFile = new TaskItem(file);
-            bool result = task.Execute();
+            try
+            {
+                bool result = task.Execute();
 
-            Assert.True(result);
-            Assert.False(File.Exists(file));
-            Assert.Null(task.OutputFile);
+                Assert.True(result);
+                Assert.True(File.Exists(file));
+                Assert.Empty(File.ReadAllText(file));
+                Assert.Equal(file, task.OutputFile.ItemSpec);
+            }
+            finally
+            {
+                FileUtilities.DeleteNoThrow(file);
+            }
         }
 
         /// <summary>
-        /// Given nothing to write, should succeed but
-        /// produce no output file
+        /// Given an explicit output path and null attributes, should emit an empty file.
         /// </summary>
         [Fact]
-        public void NoAttributesShouldEmitNoFile2()
+        public void NullAttributesShouldEmitEmptyExplicitOutputFile()
         {
             string file = Path.Combine(Path.GetTempPath(), "NoAttributesShouldEmitNoFile.tmp");
 
@@ -243,11 +249,19 @@ namespace Microsoft.Build.UnitTests
             task.Language = "c#";
             task.AssemblyAttributes = null; // null this time
             task.OutputFile = new TaskItem(file);
-            bool result = task.Execute();
+            try
+            {
+                bool result = task.Execute();
 
-            Assert.True(result);
-            Assert.False(File.Exists(file));
-            Assert.Null(task.OutputFile);
+                Assert.True(result);
+                Assert.True(File.Exists(file));
+                Assert.Empty(File.ReadAllText(file));
+                Assert.Equal(file, task.OutputFile.ItemSpec);
+            }
+            finally
+            {
+                FileUtilities.DeleteNoThrow(file);
+            }
         }
 
         /// <summary>

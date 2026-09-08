@@ -47,6 +47,35 @@ namespace Microsoft.Build.UnitTests
             typeof(PureTask).GetCustomAttribute<MSBuildPureTaskAttribute>().ShouldNotBeNull();
             typeof(DerivedTask).GetCustomAttribute<MSBuildPureTaskAttribute>().ShouldBeNull();
         }
+
+        [Fact]
+        public void MSBuildDeclaredIOAttributesDescribePaths()
+        {
+            MSBuildDeclaredIOTaskAttribute task =
+                typeof(DeclaredIOTask).GetCustomAttribute<MSBuildDeclaredIOTaskAttribute>();
+            MSBuildDeclaredIORequiresUnsetAttribute requiresUnset =
+                typeof(DeclaredIOTask).GetCustomAttribute<MSBuildDeclaredIORequiresUnsetAttribute>();
+            MSBuildDeclaredIOInputAttribute input =
+                typeof(DeclaredIOTask).GetCustomAttribute<MSBuildDeclaredIOInputAttribute>();
+            MSBuildDeclaredIOOutputAttribute output =
+                typeof(DeclaredIOTask).GetCustomAttribute<MSBuildDeclaredIOOutputAttribute>();
+
+            task.ShouldNotBeNull();
+            requiresUnset.ShouldNotBeNull();
+            requiresUnset.ParameterName.ShouldBe("LegacyDirectory");
+            input.ShouldNotBeNull();
+            input.ParameterName.ShouldBe("Source");
+            output.ShouldNotBeNull();
+            output.ParameterName.ShouldBe("Destination");
+            typeof(DerivedDeclaredIOTask).GetCustomAttribute<MSBuildDeclaredIOTaskAttribute>()
+                .ShouldBeNull();
+            typeof(DerivedDeclaredIOTask).GetCustomAttribute<MSBuildDeclaredIORequiresUnsetAttribute>()
+                .ShouldBeNull();
+            typeof(DerivedDeclaredIOTask).GetCustomAttribute<MSBuildDeclaredIOInputAttribute>()
+                .ShouldBeNull();
+            typeof(DerivedDeclaredIOTask).GetCustomAttribute<MSBuildDeclaredIOOutputAttribute>()
+                .ShouldBeNull();
+        }
     }
 
     /// <summary>
@@ -78,4 +107,12 @@ namespace Microsoft.Build.UnitTests
     internal class PureTask;
 
     internal sealed class DerivedTask : PureTask;
+
+    [MSBuildDeclaredIOTask]
+    [MSBuildDeclaredIORequiresUnset("LegacyDirectory")]
+    [MSBuildDeclaredIOInput("Source")]
+    [MSBuildDeclaredIOOutput("Destination")]
+    internal class DeclaredIOTask;
+
+    internal sealed class DerivedDeclaredIOTask : DeclaredIOTask;
 }

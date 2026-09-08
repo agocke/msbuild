@@ -23,6 +23,12 @@ namespace Microsoft.Build.UnitTests.Graph.Hardened;
 
 public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
 {
+    private static readonly HardenedTaskDescriptor s_writeCodeFragmentDescriptor =
+        new(
+            HardenedTaskClassification.DeclaredIO,
+            requiredUnsetParameters: ["OutputDirectory"],
+            outputPathParameters: ["OutputFile"]);
+
     private readonly ITestOutputHelper _output = output;
 
     [Fact]
@@ -940,6 +946,245 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
                 ["Generate"] = HardenedTaskClassification.DeclaredIO,
                 ["Consume"] = HardenedTaskClassification.DeclaredIO,
             });
+    }
+
+    [Fact]
+    public void RecordsWriteCodeFragmentOutputWithoutExecutingTask()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder projectFolder = environment.CreateFolder(createFolder: true);
+        string generatedFile = Path.Combine(projectFolder.Path, "obj", "GeneratedAssemblyInfo.cs");
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            projectFolder,
+            """
+            <Project>
+              <PropertyGroup>
+                <GeneratedFile>$(MSBuildProjectDirectory)/obj/GeneratedAssemblyInfo.cs</GeneratedFile>
+              </PropertyGroup>
+              <Target Name="Build">
+                <WriteCodeFragment OutputFile="$(GeneratedFile)">
+                  <Output TaskParameter="OutputFile" ItemName="Compile" />
+                  <Output TaskParameter="OutputFile" ItemName="FileWrites" />
+                </WriteCodeFragment>
+                <PureConsume Input="@(Compile);@(FileWrites)" />
+              </Target>
+            </Project>
+            """);
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskDescriptor>
+            {
+                ["WriteCodeFragment"] = s_writeCodeFragmentDescriptor,
+                ["PureConsume"] = HardenedTaskDescriptor.Pure,
+            });
+
+        validator.Validate(project, "Build").ShouldBeEmpty();
+
+        File.Exists(generatedFile).ShouldBeFalse();
+        Lookup validationLookup = validator.GetValidationLookupForTesting();
+        DescribeItemSpecs(validationLookup.GetItems("Compile"))
+            .ShouldBe([generatedFile.Replace('\\', '/')]);
+        DescribeItemSpecs(validationLookup.GetItems("FileWrites"))
+            .ShouldBe([generatedFile.Replace('\\', '/')]);
+        HardenedDeclaredIOFootprint footprint =
+            validator.GetDeclaredIOFootprintsForTesting().ShouldHaveSingleItem();
+        footprint.InputPaths.ShouldBeEmpty();
+        footprint.OutputPaths.ShouldBe([FileUtilities.NormalizePath(generatedFile)]);
+    }
+
+    [Fact]
+    public void RecordsExactDeclaredInputAndOutputPaths()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder projectFolder = environment.CreateFolder(createFolder: true);
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            projectFolder,
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate Sources="src/first.txt;src/second.txt"
+                          Destination="obj/generated.txt">
+                  <Output TaskParameter="Destination" ItemName="Generated" />
+                </Generate>
+                <PureConsume Input="@(Generated)" />
+              </Target>
+            </Project>
+            """);
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskDescriptor>
+            {
+                ["Generate"] = new HardenedTaskDescriptor(
+                    HardenedTaskClassification.DeclaredIO,
+                    inputPathParameters: ["Sources"],
+                    outputPathParameters: ["Destination"]),
+                ["PureConsume"] = HardenedTaskDescriptor.Pure,
+            });
+
+        validator.Validate(project, "Build").ShouldBeEmpty();
+
+        HardenedDeclaredIOFootprint footprint =
+            validator.GetDeclaredIOFootprintsForTesting().ShouldHaveSingleItem();
+        footprint.InputPaths.ShouldBe(
+        [
+            FileUtilities.NormalizePath(projectFolder.Path, "src/first.txt"),
+            FileUtilities.NormalizePath(projectFolder.Path, "src/second.txt"),
+        ]);
+        footprint.OutputPaths.ShouldBe(
+            [FileUtilities.NormalizePath(projectFolder.Path, "obj/generated.txt")]);
+        DescribeItemSpecs(validator.GetValidationLookupForTesting().GetItems("Generated"))
+            .ShouldBe(["obj/generated.txt"]);
+    }
+
+    [Fact]
+    public void CanonicalizesRelativeWriteCodeFragmentOutput()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder projectFolder = environment.CreateFolder(createFolder: true);
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            projectFolder,
+            """
+            <Project>
+              <ItemGroup>
+                <AssemblyAttribute Include="System.Reflection.AssemblyVersionAttribute" />
+              </ItemGroup>
+              <Target Name="Build">
+                <WriteCodeFragment AssemblyAttributes="@(AssemblyAttribute)"
+                                   OutputFile="obj/generated/AssemblyInfo.cs">
+                  <Output TaskParameter="OutputFile" ItemName="Compile" />
+                </WriteCodeFragment>
+                <PureConsume Input="@(Compile)" />
+              </Target>
+            </Project>
+            """);
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskDescriptor>
+            {
+                ["WriteCodeFragment"] = s_writeCodeFragmentDescriptor,
+                ["PureConsume"] = HardenedTaskDescriptor.Pure,
+            });
+
+        validator.Validate(project, "Build").ShouldBeEmpty();
+
+        DescribeItemSpecs(validator.GetValidationLookupForTesting().GetItems("Compile"))
+            .ShouldBe(["obj/generated/AssemblyInfo.cs"]);
+        validator.GetDeclaredIOFootprintsForTesting()
+            .ShouldHaveSingleItem()
+            .OutputPaths.ShouldBe(
+                [FileUtilities.NormalizePath(projectFolder.Path, "obj/generated/AssemblyInfo.cs")]);
+    }
+
+    [Fact]
+    public void RejectsWriteCodeFragmentOutputDirectory()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <ItemGroup>
+                <AssemblyAttribute Include="System.Reflection.AssemblyVersionAttribute" />
+              </ItemGroup>
+              <Target Name="Build">
+                <WriteCodeFragment AssemblyAttributes="@(AssemblyAttribute)"
+                                   OutputDirectory="obj/generated"
+                                   OutputFile="AssemblyInfo.cs" />
+              </Target>
+            </Project>
+            """);
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskDescriptor>
+            {
+                ["WriteCodeFragment"] = s_writeCodeFragmentDescriptor,
+            });
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4286");
+        diagnostics[0].Message.ShouldContain("OutputDirectory");
+    }
+
+    [Fact]
+    public void RejectsWriteCodeFragmentWithoutEnumerableOutputFile()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <ItemGroup>
+                <AssemblyAttribute Include="System.Reflection.AssemblyVersionAttribute" />
+              </ItemGroup>
+              <Target Name="Build">
+                <WriteCodeFragment AssemblyAttributes="@(AssemblyAttribute)">
+                  <Output TaskParameter="OutputFile" ItemName="Compile" />
+                </WriteCodeFragment>
+              </Target>
+            </Project>
+            """);
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskDescriptor>
+            {
+                ["WriteCodeFragment"] = s_writeCodeFragmentDescriptor,
+            });
+
+        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4286");
+        diagnostics[0].Message.ShouldContain("OutputFile");
+        diagnostics[0].Message.ShouldContain("WriteCodeFragment");
+    }
+
+    [Fact]
+    public void HardenedBuildExecutesWriteCodeFragmentAfterDeclaringItsOutput()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        TransientTestFolder projectFolder = environment.CreateFolder(createFolder: true);
+        string generatedFile = Path.Combine(projectFolder.Path, "obj", "GeneratedAssemblyInfo.cs");
+        ProjectInstance project = CreateProjectInstanceFromFile(
+            environment,
+            projectFolder,
+            """
+            <Project>
+              <UsingTask TaskName="Microsoft.Build.Tasks.WriteCodeFragment"
+                         AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll" />
+              <UsingTask TaskName="Microsoft.Build.Tasks.AssignTargetPath"
+                         AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll" />
+              <PropertyGroup>
+                <GeneratedFile>$(MSBuildProjectDirectory)/obj/GeneratedAssemblyInfo.cs</GeneratedFile>
+              </PropertyGroup>
+              <ItemGroup>
+                <AssemblyAttribute Include="System.Reflection.AssemblyVersionAttribute">
+                  <_Parameter1>1.2.3.4</_Parameter1>
+                </AssemblyAttribute>
+              </ItemGroup>
+              <Target Name="Build">
+                <WriteCodeFragment AssemblyAttributes="@(AssemblyAttribute)"
+                                   Language="C#"
+                                   OutputFile="$(GeneratedFile)">
+                  <Output TaskParameter="OutputFile" ItemName="Compile" />
+                  <Output TaskParameter="OutputFile" ItemName="FileWrites" />
+                </WriteCodeFragment>
+                <AssignTargetPath Files="@(Compile)"
+                                  RootFolder="$(MSBuildProjectDirectory)">
+                  <Output TaskParameter="AssignedFiles" ItemName="AssignedCompile" />
+                </AssignTargetPath>
+              </Target>
+            </Project>
+            """);
+
+        ProjectInstance result = BuildHardenedProject(project);
+
+        File.Exists(generatedFile).ShouldBeTrue();
+        DescribeItemSpecs(result.GetItems("Compile"))
+            .ShouldBe([generatedFile.Replace('\\', '/')]);
+        DescribeItemSpecs(result.GetItems("FileWrites"))
+            .ShouldBe([generatedFile.Replace('\\', '/')]);
+        DescribeItemSpecs(result.GetItems("AssignedCompile"))
+            .ShouldBe([generatedFile.Replace('\\', '/')]);
     }
 
     [Fact]

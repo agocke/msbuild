@@ -15,6 +15,7 @@ using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
 using ReservedPropertyNames = Microsoft.Build.Internal.ReservedPropertyNames;
+using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 
 #nullable enable
 
@@ -26,6 +27,11 @@ internal enum HardenedTaskClassification
     DeclaredIO,
     Unaudited,
 }
+
+internal sealed record HardenedDeclaredIOFootprint(
+    string TaskName,
+    IReadOnlyList<string> InputPaths,
+    IReadOnlyList<string> OutputPaths);
 
 internal sealed class HardenedTargetValidator
 {
@@ -75,10 +81,14 @@ internal sealed class HardenedTargetValidator
         "SkipNonexistentProjects",
     ];
 
-    private readonly Dictionary<string, HardenedTaskClassification> _taskClassifications;
+    private static readonly IReadOnlyDictionary<string, string> s_emptyDeclaredIOPathMetadata =
+        new Dictionary<string, string>(MSBuildNameIgnoreCaseComparer.Default);
+
+    private readonly Dictionary<string, HardenedTaskDescriptor> _taskDescriptors;
     private readonly HardenedTaskClassifier? _taskClassifier;
     private readonly HardenedPureTaskExecutor? _pureTaskExecutor;
     private readonly List<InvalidProjectFileException> _diagnostics = [];
+    private readonly List<HardenedDeclaredIOFootprint> _declaredIOFootprints = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ValueState> _targetResults =
         new(MSBuildNameIgnoreCaseComparer.Default);
@@ -96,26 +106,43 @@ internal sealed class HardenedTargetValidator
         HardenedPureTaskExecutor? pureTaskExecutor = null)
     {
         _pureTaskExecutor = pureTaskExecutor;
-        _taskClassifications = new Dictionary<string, HardenedTaskClassification>(
+        _taskDescriptors = new Dictionary<string, HardenedTaskDescriptor>(
             taskClassifications.Count,
             MSBuildNameIgnoreCaseComparer.Default);
 
         foreach (KeyValuePair<string, HardenedTaskClassification> classification in taskClassifications)
         {
-            _taskClassifications.Add(classification.Key, classification.Value);
+            _taskDescriptors.Add(
+                classification.Key,
+                HardenedTaskDescriptor.FromClassification(classification.Value));
+        }
+    }
+
+    internal HardenedTargetValidator(
+        IReadOnlyDictionary<string, HardenedTaskDescriptor> taskDescriptors,
+        HardenedPureTaskExecutor? pureTaskExecutor = null)
+    {
+        _pureTaskExecutor = pureTaskExecutor;
+        _taskDescriptors = new Dictionary<string, HardenedTaskDescriptor>(
+            taskDescriptors.Count,
+            MSBuildNameIgnoreCaseComparer.Default);
+
+        foreach (KeyValuePair<string, HardenedTaskDescriptor> descriptor in taskDescriptors)
+        {
+            _taskDescriptors.Add(descriptor.Key, descriptor.Value);
         }
     }
 
     internal HardenedTargetValidator(
         HardenedTaskClassifier taskClassifier,
         HardenedPureTaskExecutor? pureTaskExecutor = null)
-        : this(new Dictionary<string, HardenedTaskClassification>(), pureTaskExecutor)
+        : this(new Dictionary<string, HardenedTaskDescriptor>(), pureTaskExecutor)
     {
         _taskClassifier = taskClassifier;
     }
 
     internal HardenedTargetValidator()
-        : this(new Dictionary<string, HardenedTaskClassification>())
+        : this(new Dictionary<string, HardenedTaskDescriptor>())
     {
     }
 
@@ -151,6 +178,7 @@ internal sealed class HardenedTargetValidator
         ArgumentNullException.ThrowIfNull(itemOperationPlan);
 
         _diagnostics.Clear();
+        _declaredIOFootprints.Clear();
         _diagnosticKeys.Clear();
         _targetResults.Clear();
         _activeTargets.Clear();
@@ -759,7 +787,7 @@ internal sealed class HardenedTargetValidator
                     continueOnErrorResult.State,
                     ValueState.Combine(runtimeResult.State, architectureResult.State))));
 
-        HardenedTaskClassification classification = HardenedTaskClassification.Unaudited;
+        HardenedTaskDescriptor taskDescriptor = HardenedTaskDescriptor.Unaudited;
         if (runtimeResult.State.IsStatic && architectureResult.State.IsStatic)
         {
             TaskHostParameters taskIdentityParameters =
@@ -771,17 +799,25 @@ internal sealed class HardenedTargetValidator
                         : ExpanderOptions.ExpandAll);
             if (_taskClassifier is not null)
             {
-                classification = _taskClassifier(task, taskIdentityParameters);
+                taskDescriptor = _taskClassifier(task, taskIdentityParameters);
             }
             else
             {
-                if (!_taskClassifications.TryGetValue(task.Name, out classification))
+                if (!_taskDescriptors.TryGetValue(
+                        task.Name,
+                        out HardenedTaskDescriptor? configuredDescriptor) ||
+                    configuredDescriptor is null)
                 {
-                    classification = HardenedTaskClassification.Unaudited;
+                    taskDescriptor = HardenedTaskDescriptor.Unaudited;
+                }
+                else
+                {
+                    taskDescriptor = configuredDescriptor;
                 }
             }
         }
 
+        HardenedTaskClassification classification = taskDescriptor.Classification;
         bool isCallTarget = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget");
         bool isMSBuild = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild");
 
@@ -812,6 +848,12 @@ internal sealed class HardenedTargetValidator
         {
             taskControlState = ValidateMSBuildProjectMetadata(task, taskControlState);
         }
+
+        DeclaredIOResolution declaredIOResolution =
+            classification == HardenedTaskClassification.DeclaredIO
+                ? ResolveDeclaredIO(task, taskDescriptor)
+                : DeclaredIOResolution.Empty;
+        taskControlState = ValueState.Combine(taskControlState, declaredIOResolution.State);
 
         ValueState? intrinsicTaskOutputState = null;
         if (isCallTarget)
@@ -867,6 +909,18 @@ internal sealed class HardenedTargetValidator
                 isCondition: false,
                 metadataBatchingValidated: true,
                 includeItemMetadata: true);
+            string resolvedOutputTaskParameter = outputTaskParameter;
+            if (outputTaskParameterResult.State.IsStatic &&
+                TryExpandConcreteExpression(
+                    output,
+                    outputTaskParameter,
+                    output.TaskParameterLocation,
+                    $"TaskParameter '{outputTaskParameter}' of output from task '{task.Name}'",
+                    reportUnmodeled: true,
+                    out string expandedOutputTaskParameter))
+            {
+                resolvedOutputTaskParameter = expandedOutputTaskParameter;
+            }
 
             ValueState outputDestinationBatchingState = ValidateBatching(
                 output,
@@ -921,9 +975,16 @@ internal sealed class HardenedTargetValidator
                     $"output '{GetTaskParameter(output)}' of task '{task.Name}' is unavailable");
             }
             else if (intrinsicTaskOutputState is ValueState intrinsicState &&
-                     MSBuildNameIgnoreCaseComparer.Default.Equals(outputTaskParameter, "TargetOutputs"))
+                     MSBuildNameIgnoreCaseComparer.Default.Equals(resolvedOutputTaskParameter, "TargetOutputs"))
             {
-                outputState = intrinsicState.WithOrigin($"output '{outputTaskParameter}' of task '{task.Name}'");
+                outputState = intrinsicState.WithOrigin($"output '{resolvedOutputTaskParameter}' of task '{task.Name}'");
+            }
+            else if (declaredIOResolution.OutputParameters?.TryGetValue(
+                         resolvedOutputTaskParameter,
+                         out HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>> declaredOutput) == true)
+            {
+                outputState = declaredOutput.State.WithOrigin(
+                    $"output '{resolvedOutputTaskParameter}' of task '{task.Name}'");
             }
             else if (pureTaskExecuted)
             {
@@ -937,7 +998,34 @@ internal sealed class HardenedTargetValidator
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
                     callTargetScope?.CallerAssignedProperties.Add(destination);
-                    if (pureTaskExecuted && outputState.IsStatic)
+                    if (outputState.IsStatic &&
+                        declaredIOResolution.OutputParameters?.TryGetValue(
+                            resolvedOutputTaskParameter,
+                            out HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>> declaredPropertyOutput) == true &&
+                        declaredPropertyOutput.TryGetStaticValue(out IReadOnlyList<ResolvedDeclaredIOPath>? declaredPropertyPaths))
+                    {
+                        if (declaredPropertyPaths.Count == 1)
+                        {
+                            Context.SetConcreteProperty(
+                                destination,
+                                declaredPropertyPaths[0].ItemSpec,
+                                updateLookup: true);
+                        }
+                        else
+                        {
+                            ReportUnsupported(
+                                propertyOutput.Location,
+                                $"multiple paths from declared output parameter '{resolvedOutputTaskParameter}'",
+                                $"property output '{destination}' of task '{task.Name}'");
+                            Context.SetProperty(
+                                destination,
+                                HardenedValue<string>.NonStatic(
+                                    ValueState.Blocked(
+                                        new ValueOrigin(
+                                            $"property output '{destination}' of task '{task.Name}' has multiple declared paths"))));
+                        }
+                    }
+                    else if (pureTaskExecuted && outputState.IsStatic)
                     {
                         Context.SetConcreteProperty(
                             destination,
@@ -954,7 +1042,26 @@ internal sealed class HardenedTargetValidator
 
                 case ProjectTaskOutputItemInstance itemOutput:
                     callTargetScope?.CallerAssignedItemTypes.Add(destination);
-                    Context.AddTaskOutputItems(destination, outputState);
+                    if (outputState.IsStatic &&
+                        declaredIOResolution.OutputParameters?.TryGetValue(
+                            resolvedOutputTaskParameter,
+                            out HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>> declaredItemOutput) == true &&
+                        declaredItemOutput.TryGetStaticValue(out IReadOnlyList<ResolvedDeclaredIOPath>? declaredItemPaths))
+                    {
+                        foreach (ResolvedDeclaredIOPath declaredItemPath in declaredItemPaths)
+                        {
+                            ValidationLookup.AddNewItem(
+                                CreateDeclaredTaskOutputItem(
+                                    destination,
+                                    declaredItemPath,
+                                    itemOutput.Location.File));
+                        }
+                    }
+                    else
+                    {
+                        Context.AddTaskOutputItems(destination, outputState);
+                    }
+
                     break;
             }
         }
@@ -1558,6 +1665,284 @@ internal sealed class HardenedTargetValidator
             }
         }
     }
+
+    private DeclaredIOResolution ResolveDeclaredIO(
+        ProjectTaskInstance task,
+        HardenedTaskDescriptor descriptor)
+    {
+        ValueState state = ValidateRequiredUnsetParameters(task, descriptor.RequiredUnsetParameters);
+        List<string> inputPaths = [];
+        foreach (string inputParameter in descriptor.InputPathParameters)
+        {
+            HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>> paths =
+                ResolveDeclaredIOPathParameter(task, inputParameter, requireNonEmpty: false, "input");
+            state = ValueState.Combine(state, paths.State);
+            if (paths.TryGetStaticValue(out IReadOnlyList<ResolvedDeclaredIOPath>? resolvedPaths))
+            {
+                AddCanonicalPaths(inputPaths, resolvedPaths);
+            }
+        }
+
+        Dictionary<string, HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>>? outputParameters = null;
+        List<string> outputPaths = [];
+        foreach (string outputParameter in descriptor.OutputPathParameters)
+        {
+            HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>> paths =
+                ResolveDeclaredIOPathParameter(task, outputParameter, requireNonEmpty: true, "output");
+            state = ValueState.Combine(state, paths.State);
+            outputParameters ??= new Dictionary<string, HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>>(
+                descriptor.OutputPathParameters.Count,
+                MSBuildNameIgnoreCaseComparer.Default);
+            outputParameters[outputParameter] = paths;
+            if (paths.TryGetStaticValue(out IReadOnlyList<ResolvedDeclaredIOPath>? resolvedPaths))
+            {
+                AddCanonicalPaths(outputPaths, resolvedPaths);
+            }
+        }
+
+        if (state.IsStatic &&
+            (descriptor.InputPathParameters.Count != 0 ||
+             descriptor.OutputPathParameters.Count != 0))
+        {
+            _declaredIOFootprints.Add(
+                new HardenedDeclaredIOFootprint(task.Name, inputPaths, outputPaths));
+        }
+
+        return new DeclaredIOResolution(state, outputParameters);
+    }
+
+    private ValueState ValidateRequiredUnsetParameters(
+        ProjectTaskInstance task,
+        IReadOnlyList<string> requiredUnsetParameters)
+    {
+        ValueState state = ValueState.Static;
+        foreach (string parameterName in requiredUnsetParameters)
+        {
+            if (!TryGetTaskParameter(
+                    task,
+                    parameterName,
+                    out string expression,
+                    out ElementLocation location) ||
+                string.IsNullOrEmpty(expression))
+            {
+                continue;
+            }
+
+            ExpressionValidationResult result = ValidateExpression(
+                task,
+                expression,
+                location,
+                $"parameter '{parameterName}' of Declared-IO task '{task.Name}'",
+                requireStatic: true,
+                isCondition: false,
+                metadataBatchingValidated: true,
+                includeItemMetadata: false);
+            state = ValueState.Combine(state, result.State);
+            if (!result.State.IsStatic)
+            {
+                continue;
+            }
+
+            if (!TryExpandConcreteExpression(
+                    task,
+                    expression,
+                    location,
+                    $"parameter '{parameterName}' of Declared-IO task '{task.Name}'",
+                    reportUnmodeled: true,
+                    out string expanded))
+            {
+                state = ValueState.Blocked(
+                    new ValueOrigin(
+                        $"parameter '{parameterName}' of Declared-IO task '{task.Name}' could not be resolved"));
+                continue;
+            }
+
+            if (expanded.Length != 0)
+            {
+                ReportUnsupported(
+                    location,
+                    $"a value for parameter '{parameterName}'",
+                    $"Declared-IO task '{task.Name}', which requires that parameter to be unset");
+                state = ValueState.Blocked(
+                    new ValueOrigin(
+                        $"parameter '{parameterName}' invalidates the declared-I/O contract of task '{task.Name}'"));
+            }
+        }
+
+        return state;
+    }
+
+    private HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>> ResolveDeclaredIOPathParameter(
+        ProjectTaskInstance task,
+        string parameterName,
+        bool requireNonEmpty,
+        string pathKind)
+    {
+        if (!TryGetTaskParameter(
+                task,
+                parameterName,
+                out string expression,
+                out ElementLocation location) ||
+            string.IsNullOrEmpty(expression))
+        {
+            return requireNonEmpty
+                ? ReportUnresolvableDeclaredIOPath(task, parameterName, pathKind)
+                : HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>.Static([]);
+        }
+
+        ExpressionValidationResult result = ValidateExpression(
+            task,
+            expression,
+            location,
+            $"declared {pathKind} path parameter '{parameterName}' of task '{task.Name}'",
+            requireStatic: true,
+            isCondition: false,
+            metadataBatchingValidated: true,
+            includeItemMetadata: true);
+        if (!result.State.IsStatic)
+        {
+            return HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>.NonStatic(result.State);
+        }
+
+        ExpanderOptions expanderOptions = _activeMetadata is null
+            ? ExpanderOptions.ExpandPropertiesAndItems
+            : ExpanderOptions.ExpandAll;
+        IList<TaskItem> items;
+        try
+        {
+            items = ConcreteExpander.ExpandIntoTaskItemsLeaveEscaped(
+                expression,
+                expanderOptions,
+                location);
+        }
+        catch (InvalidProjectFileException exception)
+        {
+            AddDiagnostic(exception);
+            return HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>.NonStatic(
+                ValueState.Blocked(
+                    new ValueOrigin(
+                        $"declared {pathKind} path parameter '{parameterName}' of task '{task.Name}' could not be expanded")));
+        }
+
+        if (items.Count == 0)
+        {
+            return requireNonEmpty
+                ? ReportUnresolvableDeclaredIOPath(task, parameterName, pathKind)
+                : HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>.Static([]);
+        }
+
+        var paths = new List<ResolvedDeclaredIOPath>(items.Count);
+        foreach (TaskItem item in items)
+        {
+            string canonicalPath;
+            try
+            {
+                canonicalPath = FileUtilities.NormalizePath(ProjectDirectory, item.ItemSpec);
+            }
+            catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
+            {
+                ReportUnsupported(
+                    location,
+                    $"the path '{item.ItemSpec}'",
+                    $"declared {pathKind} paths of task '{task.Name}'");
+                return HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>.NonStatic(
+                    ValueState.Blocked(
+                        new ValueOrigin(
+                            $"declared {pathKind} path '{item.ItemSpec}' of task '{task.Name}' could not be canonicalized")));
+            }
+
+            paths.Add(
+                new ResolvedDeclaredIOPath(
+                    item.ItemSpec,
+                    ((ITaskItem2)item).EvaluatedIncludeEscaped,
+                    CloneCustomMetadataEscaped(item),
+                    canonicalPath));
+        }
+
+        return HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>.Static(paths);
+    }
+
+    private HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>> ReportUnresolvableDeclaredIOPath(
+        ProjectTaskInstance task,
+        string parameterName,
+        string pathKind)
+    {
+        ValueOrigin origin = new(
+            $"declared {pathKind} path parameter '{parameterName}' of task '{task.Name}' is not statically enumerable");
+        ReportUnsupported(
+            task.Location,
+            $"a non-empty '{parameterName}' parameter",
+            $"Declared-IO task '{task.Name}'");
+
+        return HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>.NonStatic(
+            ValueState.Blocked(origin));
+    }
+
+    private static void AddCanonicalPaths(
+        List<string> destination,
+        IReadOnlyList<ResolvedDeclaredIOPath> paths)
+    {
+        foreach (ResolvedDeclaredIOPath path in paths)
+        {
+            destination.Add(path.CanonicalPath);
+        }
+    }
+
+    private static bool TryGetTaskParameter(
+        ProjectTaskInstance task,
+        string parameterName,
+        out string expression,
+        out ElementLocation location)
+    {
+        foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
+        {
+            if (MSBuildNameIgnoreCaseComparer.Default.Equals(parameter.Key, parameterName))
+            {
+                expression = parameter.Value.Item1;
+                location = parameter.Value.Item2;
+                return true;
+            }
+        }
+
+        expression = string.Empty;
+        location = task.Location;
+        return false;
+    }
+
+    private static IReadOnlyDictionary<string, string> CloneCustomMetadataEscaped(TaskItem item)
+    {
+        IDictionary customMetadata = ((ITaskItem2)item).CloneCustomMetadataEscaped();
+        if (customMetadata.Count == 0)
+        {
+            return s_emptyDeclaredIOPathMetadata;
+        }
+
+        var metadata = new Dictionary<string, string>(
+            customMetadata.Count,
+            MSBuildNameIgnoreCaseComparer.Default);
+        foreach (DictionaryEntry entry in customMetadata)
+        {
+            if (entry.Key is not string name || entry.Value is not string value)
+            {
+                throw new InvalidOperationException("Task item metadata names and values must be strings.");
+            }
+
+            metadata.Add(name, value);
+        }
+
+        return metadata;
+    }
+
+    private ProjectItemInstance CreateDeclaredTaskOutputItem(
+        string itemType,
+        ResolvedDeclaredIOPath output,
+        string definingFile)
+        => new(
+            Project,
+            itemType,
+            output.IncludeEscaped,
+            output.Metadata,
+            definingFile);
 
     private string? ValidateOutputDestination(
         ProjectTaskInstanceChild output,
@@ -3527,6 +3912,9 @@ internal sealed class HardenedTargetValidator
     internal Lookup GetValidationLookupForTesting()
         => ValidationLookup;
 
+    internal IReadOnlyList<HardenedDeclaredIOFootprint> GetDeclaredIOFootprintsForTesting()
+        => _declaredIOFootprints;
+
     private Expander<ProjectPropertyInstance, ProjectItemInstance> ConcreteExpander
         => _concreteExpander ?? throw new InvalidOperationException("Concrete expander has not been initialized.");
 
@@ -3586,6 +3974,19 @@ internal sealed class HardenedTargetValidator
         bool CanStopOnFailure,
         bool Executed,
         LegacyCallTargetScope? CallTargetScope);
+
+    private readonly record struct ResolvedDeclaredIOPath(
+        string ItemSpec,
+        string IncludeEscaped,
+        IReadOnlyDictionary<string, string> Metadata,
+        string CanonicalPath);
+
+    private readonly record struct DeclaredIOResolution(
+        ValueState State,
+        Dictionary<string, HardenedValue<IReadOnlyList<ResolvedDeclaredIOPath>>>? OutputParameters)
+    {
+        internal static DeclaredIOResolution Empty => new(ValueState.Static, OutputParameters: null);
+    }
 
     private sealed record FailureState(
         ValidatorState State,
