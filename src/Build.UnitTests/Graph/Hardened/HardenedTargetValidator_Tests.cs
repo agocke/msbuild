@@ -3657,6 +3657,26 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void AllowsMetadataItemFunctionOverEmptyItemList()
+    {
+        ValidateSuccess(
+            """
+            <Project>
+              <Target Name="Build">
+                <PropertyGroup>
+                  <Result Condition="@(Input->WithMetadataValue('Kind', 'keep')->Count()) == 0">empty</Result>
+                </PropertyGroup>
+                <PureConsume Input="$(Result)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+    }
+
+    [Fact]
     public void RejectsDeferredWithMetadataValueKey()
     {
         InvalidProjectFileException exception = ValidateFailure(

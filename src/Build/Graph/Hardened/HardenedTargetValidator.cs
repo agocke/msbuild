@@ -3199,6 +3199,7 @@ internal sealed class HardenedTargetValidator
                 includeNullEntries: false,
                 out _,
                 out entries);
+            entries ??= [];
             return true;
         }
         catch (InvalidProjectFileException exception)
