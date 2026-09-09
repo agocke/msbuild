@@ -3158,6 +3158,33 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void CommonTargetsRegistersPreserveNewestCopyDestinationsStatically()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <PropertyGroup>
+                <OutDir>out/</OutDir>
+              </PropertyGroup>
+              <ItemGroup>
+                <_SourceItemsToCopyToOutputDirectory Include="obj/apphost">
+                  <TargetPath>apphost-output</TargetPath>
+                </_SourceItemsToCopyToOutputDirectory>
+              </ItemGroup>
+              <Import Project="$(MSBuildBinPath)\Microsoft.Common.CurrentVersion.targets" />
+            </Project>
+            """);
+        HardenedTargetValidator validator = new();
+
+        validator.Validate(project, "_CopyOutOfDateSourceItemsToOutputDirectory").ShouldBeEmpty();
+
+        DescribeItemSpecs(validator.GetValidationLookupForTesting().GetItems("FileWrites"))
+            .ShouldBe(["out/apphost-output"]);
+    }
+
+    [Fact]
     public void HardenedGlobExecutionRejectsMissingPreResolution()
     {
         using TestEnvironment environment = TestEnvironment.Create(_output);

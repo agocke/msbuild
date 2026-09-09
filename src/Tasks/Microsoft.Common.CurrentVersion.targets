@@ -5528,6 +5528,10 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       Inputs="@(_SourceItemsToCopyToOutputDirectory)"
       Outputs="@(_SourceItemsToCopyToOutputDirectory->'$(OutDir)%(TargetPath)')">
 
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <FileWrites Include="@(_SourceItemsToCopyToOutputDirectory->'$(OutDir)%(TargetPath)')" />
+    </ItemGroup>
+
     <!--
         Not using SkipUnchangedFiles="true" because the items we pass in are already only those that have newer timestampts in the source (determined by _GetCopyToOutputDirectoryItemsFromThisProject).
         -->
@@ -5541,7 +5545,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
         UseSymboliclinksIfPossible="$(CreateSymbolicLinksForAdditionalFilesIfPossible)"
             >
 
-      <Output TaskParameter="DestinationFiles" ItemName="FileWrites"/>
+      <Output TaskParameter="DestinationFiles" ItemName="FileWrites" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
 
     </Copy>
 
