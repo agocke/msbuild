@@ -3031,6 +3031,48 @@ $@"<Project>
         }
 
         [Fact]
+        public void HardenedGraphWritesCopyMarkerFromStaticCopiedOutputPaths()
+        {
+            string projectContents = """
+                <Project DefaultTargets="Build">
+                  <PropertyGroup>
+                    <IntermediateOutputPath>obj/</IntermediateOutputPath>
+                    <OutDir>bin/</OutDir>
+                    <CleanFile>prior.txt</CleanFile>
+                    <CopyBuildOutputToOutputDirectory>false</CopyBuildOutputToOutputDirectory>
+                    <DebugSymbols>false</DebugSymbols>
+                    <DebugType>none</DebugType>
+                    <DocumentationFile />
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <ReferenceCopyLocalPaths Include="input.dll" />
+                  </ItemGroup>
+                  <Import Project="$(MSBuildToolsPath)\Microsoft.Common.CurrentVersion.targets" />
+                  <Target Name="ComputeIntermediateSatelliteAssemblies" />
+                  <Target Name="_CopySourceItemsToOutputDirectory" />
+                  <Target Name="_CopyAppConfigFile" />
+                  <Target Name="_CopyManifestFiles" />
+                  <Target Name="_CheckForCompileOutputs" />
+                  <Target Name="_SGenCheckForOutputs" />
+                  <Target Name="Restore">
+                    <WriteLinesToFile File="input.dll" Lines="copy-local contents" Overwrite="true" />
+                  </Target>
+                  <Target Name="Build" DependsOnTargets="CopyFilesToOutputDirectory">
+                    <ReadLinesFromFile File="@(CopyUpToDateMarker)">
+                      <Output TaskParameter="Lines" ItemName="MarkerFingerprint" />
+                    </ReadLinesFromFile>
+                    <Message Text="MarkerFingerprint=@(MarkerFingerprint)" Importance="High" />
+                  </Target>
+                </Project>
+                """;
+
+            string logContents =
+                ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "/restore --hardened-graph");
+
+            logContents.ShouldMatch(@"MarkerFingerprint=[0-9A-Fa-f]{64}");
+        }
+
+        [Fact]
         public void HardenedGraphBuildAfterRestoreStillRunsValidation()
         {
             string projectContents = """

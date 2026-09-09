@@ -711,6 +711,12 @@ The build consumes those items during evaluation instead of running
 `ReadLinesFromFile` during graph construction, then reconciles and rewrites the
 same declared ledger path during execution.
 
+Copy up-to-date markers are content fingerprints, not task-result signals. A
+single Declared-IO invocation receives the statically enumerated copied-output
+paths, reads their post-copy contents, and rewrites the statically known marker
+path only when that deterministic fingerprint changes. It exposes no task
+output.
+
 The files are ordinary MSBuild source that remains executable by older MSBuild
 engines under their existing evaluation and execution rules. Hardened mode
 validates the same imports, targets, items, and task invocations; it does not

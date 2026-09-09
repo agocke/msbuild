@@ -4969,7 +4969,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
       <Output TaskParameter="DestinationFiles" ItemName="MainAssembly"/>
       <Output TaskParameter="DestinationFiles" ItemName="FileWrites" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
-      <Output TaskParameter="WroteAtLeastOneFile" PropertyName="_WroteMainAssemblyToOutputDirectory"/>
+      <Output TaskParameter="WroteAtLeastOneFile" PropertyName="_WroteMainAssemblyToOutputDirectory" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
 
     </Copy>
 
@@ -4994,20 +4994,26 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
     <Message Importance="High" Text="$(MSBuildProjectName) -&gt; @(MainAssembly->'%(FullPath)')" Condition="'$(CopyBuildOutputToOutputDirectory)' == 'true' and '$(SkipCopyBuildProduct)'!='true'" />
 
-    <!--
-      Advance the marker considered by projects that reference this one during their up-to-date
-      checks. It must move forward when either:
-        * this project produces reference assemblies and its implementation assembly changed on
-          this build (referencing projects may need to copy the updated implementation), or
-        * copy-local (possibly transitive) references were actually copied on this build, as
-          captured by _CopyFilesMarkedCopyLocal in $(_CopyLocalReferencesCopiedInThisBuild).
-      Both signals are OR'd into this single Touch so the marker is written at most once per
-      build. _CopyFilesMarkedCopyLocal is a DependsOnTargets dependency of this target, so its
-      capture always runs before this Touch.
-    -->
+    <!-- Legacy builds advance the marker only when Copy reports an actual write. -->
     <Touch Files="@(CopyUpToDateMarker)"
       AlwaysCreate="true"
-      Condition="('$(ProduceReferenceAssembly)' == 'true' and '$(_WroteMainAssemblyToOutputDirectory)' == 'true') or '$(_CopyLocalReferencesCopiedInThisBuild)' == 'true'" />
+      Condition="'$(MSBuildHardenedGraph)' != 'true' and (('$(ProduceReferenceAssembly)' == 'true' and '$(_WroteMainAssemblyToOutputDirectory)' == 'true') or '$(_CopyLocalReferencesCopiedInThisBuild)' == 'true')" />
+
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <_CopyUpToDateMarkerInput
+          Include="@(IntermediateAssembly->'$(OutDir)%(Filename)%(Extension)')"
+          Condition="'$(ProduceReferenceAssembly)' == 'true' and '$(CopyBuildOutputToOutputDirectory)' == 'true' and '$(SkipCopyBuildProduct)' != 'true'" />
+      <_CopyUpToDateMarkerInput
+          Include="@(ReferenceCopyLocalPaths->'$(OutDir)%(DestinationSubDirectory)%(Filename)%(Extension)')"
+          Condition="'$(UseCommonOutputDirectory)' != 'true'" />
+    </ItemGroup>
+
+    <WriteFileFingerprint
+        Files="@(_CopyUpToDateMarkerInput)"
+        File="@(CopyUpToDateMarker)"
+        DeclaredInputs="@(_CopyUpToDateMarkerInput);@(CopyUpToDateMarker)"
+        DeclaredOutputs="@(CopyUpToDateMarker)"
+        Condition="'$(MSBuildHardenedGraph)' == 'true' and '@(_CopyUpToDateMarkerInput)' != ''" />
 
     <ItemGroup Condition="'$(ProduceReferenceAssembly)' == 'true'">
       <FileWrites Include="@(CopyUpToDateMarker)" />
@@ -5158,6 +5164,10 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <CreateSymbolicLinksForCopyLocalIfPossible Condition="'$(BuildingInsideVisualStudio)' == 'true' or '$(CreateSymbolicLinksForCopyLocalIfPossible)' == ''">false</CreateSymbolicLinksForCopyLocalIfPossible>
     </PropertyGroup>
 
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true' and '$(UseCommonOutputDirectory)' != 'true'">
+      <FileWritesShareable Include="@(ReferenceCopyLocalPaths->'$(OutDir)%(DestinationSubDirectory)%(Filename)%(Extension)')" />
+    </ItemGroup>
+
     <Copy
         SourceFiles="@(ReferenceCopyLocalPaths)"
         DestinationFiles="@(ReferenceCopyLocalPaths->'$(OutDir)%(DestinationSubDirectory)%(Filename)%(Extension)')"
@@ -5170,9 +5180,9 @@ Copyright (C) Microsoft Corporation. All rights reserved.
         Condition="'$(UseCommonOutputDirectory)' != 'true'"
             >
 
-      <Output TaskParameter="DestinationFiles" ItemName="FileWritesShareable"/>
-      <Output TaskParameter="CopiedFiles" ItemName="ReferencesCopiedInThisBuild"/>
-      <Output TaskParameter="WroteAtLeastOneFile" PropertyName="WroteAtLeastOneFile"/>
+      <Output TaskParameter="DestinationFiles" ItemName="FileWritesShareable" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
+      <Output TaskParameter="CopiedFiles" ItemName="ReferencesCopiedInThisBuild" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
+      <Output TaskParameter="WroteAtLeastOneFile" PropertyName="WroteAtLeastOneFile" Condition="'$(MSBuildHardenedGraph)' != 'true'"/>
 
     </Copy>
 
@@ -5180,7 +5190,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
          build. When they were, projects that depend on this one must not be considered up to date.
          The marker file that carries that signal is touched once, later, in CopyFilesToOutputDirectory
          (which depends on this target), so the same file isn't written twice in a normal build. -->
-    <PropertyGroup>
+    <PropertyGroup Condition="'$(MSBuildHardenedGraph)' != 'true'">
       <_CopyLocalReferencesCopiedInThisBuild Condition="'@(ReferencesCopiedInThisBuild)' != '' and '$(WroteAtLeastOneFile)' == 'true'">true</_CopyLocalReferencesCopiedInThisBuild>
     </PropertyGroup>
 
