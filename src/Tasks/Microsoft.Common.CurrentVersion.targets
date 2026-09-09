@@ -398,6 +398,14 @@ Copyright (C) Microsoft Corporation. All rights reserved.
   </PropertyGroup>
 
   <PropertyGroup>
+    <_HardenedCleanFileWritesImport>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', '$(CleanFile).hardened.props'))</_HardenedCleanFileWritesImport>
+  </PropertyGroup>
+
+  <Import
+      Project="$(_HardenedCleanFileWritesImport)"
+      Condition="'$(MSBuildHardenedGraph)' == 'true'" />
+
+  <PropertyGroup>
     <_GenerateBindingRedirectsIntermediateAppConfig>$(IntermediateOutputPath)$(TargetFileName).config</_GenerateBindingRedirectsIntermediateAppConfig>
   </PropertyGroup>
 
@@ -5814,6 +5822,19 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     ============================================================
     -->
   <Target
+      Name="_WriteHardenedCleanFileWritesImport"
+      AfterTargets="Restore"
+      Condition="'$(MSBuildHardenedGraph)' == 'true'">
+
+    <WriteCleanFileWritesImport
+        CleanFile="$(IntermediateOutputPath)$(CleanFile)"
+        ImportFile="$(_HardenedCleanFileWritesImport)"
+        DeclaredInputs="$(IntermediateOutputPath)$(CleanFile)"
+        DeclaredOutputs="$(_HardenedCleanFileWritesImport)" />
+
+  </Target>
+
+  <Target
        Name="IncrementalClean"
        DependsOnTargets="$(IncrementalCleanDependsOn);_CleanGetCurrentAndPriorFileWrites">
 
@@ -5905,7 +5926,9 @@ Copyright (C) Microsoft Corporation. All rights reserved.
        DependsOnTargets="_CheckForCompileOutputs;_SGenCheckForOutputs">
 
     <!-- Read the list of files produced by a prior builds from disk. -->
-    <ReadLinesFromFile File="$(IntermediateOutputPath)$(CleanFile)">
+    <ReadLinesFromFile
+        File="$(IntermediateOutputPath)$(CleanFile)"
+        Condition="'$(MSBuildHardenedGraph)' != 'true'">
       <Output TaskParameter="Lines" ItemName="_CleanUnfilteredPriorFileWrites"/>
     </ReadLinesFromFile>
 
@@ -6066,9 +6089,15 @@ Copyright (C) Microsoft Corporation. All rights reserved.
         TreatErrorsAsWarnings="true"/>
 
     <!-- Read in list of files that were written to disk in past builds. -->
-    <ReadLinesFromFile File="$(IntermediateOutputPath)$(CleanFile)">
+    <ReadLinesFromFile
+        File="$(IntermediateOutputPath)$(CleanFile)"
+        Condition="'$(MSBuildHardenedGraph)' != 'true'">
       <Output TaskParameter="Lines" ItemName="_CleanPriorFileWrites"/>
     </ReadLinesFromFile>
+
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <_CleanPriorFileWrites Include="@(_CleanUnfilteredPriorFileWrites)" />
+    </ItemGroup>
 
     <!-- Find all files in the final output directory. -->
     <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(_CleanPriorFileWrites)">
@@ -6103,7 +6132,13 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     <MakeDir Directories="$(IntermediateOutputPath)"/>
 
     <!-- Write new list of current files back to disk. -->
-    <WriteLinesToFile File="$(IntermediateOutputPath)$(CleanFile)" Lines="@(_CleanUniqueRemainingFileWrites)" WriteOnlyWhenDifferent="true" Overwrite="true" />
+    <WriteLinesToFile
+        File="$(IntermediateOutputPath)$(CleanFile)"
+        Lines="@(_CleanUniqueRemainingFileWrites)"
+        DeclaredInputs="$(IntermediateOutputPath)$(CleanFile)"
+        DeclaredOutputs="$(IntermediateOutputPath)$(CleanFile)"
+        WriteOnlyWhenDifferent="true"
+        Overwrite="true" />
 
   </Target>
 
@@ -6135,6 +6170,8 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     <WriteLinesToFile
         File="$(IntermediateOutputPath)$(CleanFile)"
         Lines="@(_CleanUniqueFileWrites)"
+        DeclaredInputs="$(IntermediateOutputPath)$(CleanFile)"
+        DeclaredOutputs="$(IntermediateOutputPath)$(CleanFile)"
         Overwrite="true"
         WriteOnlyWhenDifferent="true" />
 

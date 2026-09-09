@@ -704,6 +704,13 @@ Downstream hardened targets do not parse `project.assets.json`.
 The generated `.props` and `.targets` files contain these declarative items.
 They are not an additional discovery language.
 
+Fetch may also snapshot engine-owned persistent ledgers into fixed generated
+imports. The incremental-clean snapshot defines
+`_CleanUnfilteredPriorFileWrites` items from the previous build's clean ledger.
+The build consumes those items during evaluation instead of running
+`ReadLinesFromFile` during graph construction, then reconciles and rewrites the
+same declared ledger path during execution.
+
 The files are ordinary MSBuild source that remains executable by older MSBuild
 engines under their existing evaluation and execution rules. Hardened mode
 validates the same imports, targets, items, and task invocations; it does not

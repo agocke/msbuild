@@ -3003,6 +3003,34 @@ $@"<Project>
         }
 
         [Fact]
+        public void HardenedGraphRestoreProducesImportedPriorCleanLedger()
+        {
+            string priorFileWrite = Path.Combine("output", "a.dll");
+            string projectContents = $"""
+                <Project DefaultTargets="Build">
+                  <PropertyGroup>
+                    <IntermediateOutputPath>obj{Path.DirectorySeparatorChar}</IntermediateOutputPath>
+                    <CleanFile>prior.txt</CleanFile>
+                  </PropertyGroup>
+                  <Import Project="$(MSBuildToolsPath)\Microsoft.Common.CurrentVersion.targets" />
+                  <Target Name="Restore">
+                    <WriteLinesToFile
+                      File="$(IntermediateOutputPath)$(CleanFile)"
+                      Lines="{priorFileWrite}"
+                      Overwrite="true" />
+                  </Target>
+                  <Target Name="Build">
+                    <Error
+                      Text="Expected imported prior clean ledger item."
+                      Condition="'@(_CleanUnfilteredPriorFileWrites)' != '{priorFileWrite}'" />
+                  </Target>
+                </Project>
+                """;
+
+            ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "/restore --hardened-graph");
+        }
+
+        [Fact]
         public void HardenedGraphBuildAfterRestoreStillRunsValidation()
         {
             string projectContents = """

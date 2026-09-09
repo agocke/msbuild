@@ -172,6 +172,7 @@
     <Compile Include="FileIO\GetFileHash.cs" />
     <Compile Include="FileIO\HashEncoding.cs" />
     <Compile Include="FileIO\VerifyFileHash.cs" />
+    <Compile Include="FileIO\WriteCleanFileWritesImport.cs" />
     <Compile Include="FileState.cs" />
     <Compile Include="Copy.cs" />
     <Compile Include="CreateCSharpManifestResourceName.cs" />
