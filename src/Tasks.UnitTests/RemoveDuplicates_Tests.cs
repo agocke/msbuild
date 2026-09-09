@@ -1,8 +1,11 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System;
+using Microsoft.Build.Framework;
 using Microsoft.Build.Tasks;
 using Microsoft.Build.Utilities;
+using Shouldly;
 using Xunit;
 
 #nullable disable
@@ -11,6 +14,15 @@ namespace Microsoft.Build.UnitTests
 {
     public sealed class RemoveDuplicates_Tests
     {
+        [Fact]
+        public void RemoveDuplicatesIsMarkedPure()
+        {
+            Attribute.IsDefined(
+                typeof(RemoveDuplicates),
+                typeof(MSBuildPureTaskAttribute),
+                inherit: false).ShouldBeTrue();
+        }
+
         /// <summary>
         /// Pass one item in, get the same item back.
         /// </summary>

@@ -14,6 +14,7 @@ namespace Microsoft.Build.Tasks
     /// Given a list of items, remove duplicate items. Attributes are not considered. Case insensitive.
     /// </summary>
     [MSBuildMultiThreadableTask]
+    [MSBuildPureTask]
     public class RemoveDuplicates : TaskExtension
     {
         /// <summary>
