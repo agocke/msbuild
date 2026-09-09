@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
+using Microsoft.Build.Utilities;
 
 using Microsoft.NET.StringTools;
 
@@ -58,25 +59,22 @@ namespace Microsoft.Build.Tasks
         {
             var inPathList = new List<ITaskItem>();
             var outOfPathList = new List<ITaskItem>();
+            bool useCanonicalPathSemantics = UseCanonicalPathSemantics;
 
             string conePath;
 
             try
             {
-                if (ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_5))
-                {
-                    conePath =
-                        Strings.WeakIntern(
-                            TaskEnvironment.GetAbsolutePath(FileUtilities.FixFilePath(Path.ItemSpec)).GetCanonicalForm());
-                }
-                else
-                {
-                    conePath =
-                        Strings.WeakIntern(
+                AbsolutePath absoluteConePath =
+                    new(FileUtilities.FixFilePath(Path.ItemSpec), GetProjectDirectory());
+                conePath =
+                    Strings.WeakIntern(
+                        useCanonicalPathSemantics
+                            ? absoluteConePath.GetCanonicalForm()
+                            :
 #pragma warning disable MSBuildTask0002 // Path is already absolute from TaskEnvironment.GetAbsolutePath; GetFullPath only canonicalizes. Guarded by ChangeWave.
-                            System.IO.Path.GetFullPath(TaskEnvironment.GetAbsolutePath(FileUtilities.FixFilePath(Path.ItemSpec))));
+                            System.IO.Path.GetFullPath(absoluteConePath));
 #pragma warning restore MSBuildTask0002
-                }
 
                 conePath = FileUtilities.EnsureTrailingSlash(conePath);
             }
@@ -96,20 +94,16 @@ namespace Microsoft.Build.Tasks
                 string fullPath;
                 try
                 {
-                    if (ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_5))
-                    {
-                        fullPath =
-                            Strings.WeakIntern(
-                                TaskEnvironment.GetAbsolutePath(FileUtilities.FixFilePath(item.ItemSpec)).GetCanonicalForm());
-                    }
-                    else
-                    {
-                        fullPath =
-                            Strings.WeakIntern(
+                    AbsolutePath absolutePath =
+                        new(FileUtilities.FixFilePath(item.ItemSpec), GetProjectDirectory());
+                    fullPath =
+                        Strings.WeakIntern(
+                            useCanonicalPathSemantics
+                                ? absolutePath.GetCanonicalForm()
+                                :
 #pragma warning disable MSBuildTask0002 // Path is already absolute from TaskEnvironment.GetAbsolutePath; GetFullPath only canonicalizes. Guarded by ChangeWave.
-                                System.IO.Path.GetFullPath(TaskEnvironment.GetAbsolutePath(FileUtilities.FixFilePath(item.ItemSpec))));
+                                System.IO.Path.GetFullPath(absolutePath));
 #pragma warning restore MSBuildTask0002
-                    }
                 }
                 catch (Exception e) when (ExceptionHandling.IsIoRelatedException(e))
                 {
@@ -119,27 +113,78 @@ namespace Microsoft.Build.Tasks
                 }
 
                 // Compare the left side of both strings to see if they're equal.
-                if (String.Compare(conePath, 0, fullPath, 0, conePathLength, StringComparison.OrdinalIgnoreCase) == 0)
+                ITaskItem outputItem = CreateOutputItem(item);
+                if (String.Compare(conePath, 0, fullPath, 0, conePathLength, PathComparison) == 0)
                 {
                     // If we should use the absolute path, update the item contents
                     // Since ItemSpec, which fullPath comes from, is unescaped, re-escape when setting
                     // item.ItemSpec, since the setter for ItemSpec expects an escaped value.
                     if (UpdateToAbsolutePaths)
                     {
-                        item.ItemSpec = EscapingUtilities.Escape(fullPath);
+                        outputItem.ItemSpec = EscapingUtilities.Escape(fullPath);
                     }
 
-                    inPathList.Add(item);
+                    inPathList.Add(outputItem);
                 }
                 else
                 {
-                    outOfPathList.Add(item);
+                    outOfPathList.Add(outputItem);
                 }
             }
 
             InPath = inPathList.ToArray();
             OutOfPath = outOfPathList.ToArray();
             return true;
+        }
+
+        private protected virtual AbsolutePath GetProjectDirectory()
+        {
+            return TaskEnvironment.ProjectDirectory;
+        }
+
+        private protected virtual bool UseCanonicalPathSemantics
+            => ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_5);
+
+        private protected virtual StringComparison PathComparison
+            => StringComparison.OrdinalIgnoreCase;
+
+        private protected virtual ITaskItem CreateOutputItem(ITaskItem item)
+        {
+            return item;
+        }
+    }
+
+    /// <summary>
+    /// Finds items under a path using the engine-supplied Pure task environment and host path semantics.
+    /// </summary>
+    [MSBuildMultiThreadableTask]
+    [MSBuildPureTask]
+    public sealed class FindUnderPathWithDeterministicSemantics : FindUnderPath, IPureTask
+    {
+        private PureTaskEnvironment _pureTaskEnvironment;
+
+        /// <inheritdoc />
+        public PureTaskEnvironment PureTaskEnvironment
+        {
+            get => _pureTaskEnvironment ??= Microsoft.Build.Framework.PureTaskEnvironment.Fallback;
+            set => _pureTaskEnvironment = value;
+        }
+
+        private protected override AbsolutePath GetProjectDirectory()
+        {
+            return PureTaskEnvironment.ProjectDirectory;
+        }
+
+        private protected override bool UseCanonicalPathSemantics => true;
+
+        private protected override StringComparison PathComparison
+            => PureTaskEnvironment.UsesWindowsPathSemantics
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+
+        private protected override ITaskItem CreateOutputItem(ITaskItem item)
+        {
+            return new TaskItem(item);
         }
     }
 }

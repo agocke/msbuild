@@ -8,6 +8,7 @@ using Microsoft.Build.Shared;
 using Microsoft.Build.Tasks;
 using Microsoft.Build.UnitTests;
 using Microsoft.Build.Utilities;
+using Shouldly;
 using Xunit;
 
 
@@ -162,6 +163,51 @@ namespace Microsoft.Build.UnitTests
             Assert.Equal(testFile.Name, t.InPath[0].ItemSpec);
             Assert.Equal(NativeMethodsShared.IsWindows ? @"C:\SomeoneElsesProject\File2.txt" : "/SomeoneElsesProject/File2.txt",
                 t.OutOfPath[0].ItemSpec);
+        }
+
+        [Fact]
+        public void DeterministicSemanticsUseHostPathComparison()
+        {
+            FindUnderPathWithDeterministicSemantics task = new()
+            {
+                BuildEngine = new MockEngine(),
+                Path = new TaskItem("Root"),
+                Files = [new TaskItem("root/file.txt")],
+                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(ObjectModelHelpers.TempProjectDir),
+            };
+
+            task.Execute().ShouldBeTrue();
+
+            if (NativeMethodsShared.IsWindows)
+            {
+                task.InPath.ShouldHaveSingleItem();
+                task.OutOfPath.ShouldBeEmpty();
+            }
+            else
+            {
+                task.InPath.ShouldBeEmpty();
+                task.OutOfPath.ShouldHaveSingleItem();
+            }
+        }
+
+        [Fact]
+        public void DeterministicSemanticsDoNotMutateInputItems()
+        {
+            TaskItem input = new("file.txt");
+            FindUnderPathWithDeterministicSemantics task = new()
+            {
+                BuildEngine = new MockEngine(),
+                Path = new TaskItem("."),
+                Files = [input],
+                UpdateToAbsolutePaths = true,
+                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(ObjectModelHelpers.TempProjectDir),
+            };
+
+            task.Execute().ShouldBeTrue();
+
+            task.InPath.ShouldHaveSingleItem().ShouldNotBeSameAs(input);
+            task.InPath[0].ItemSpec.ShouldBe(Path.Combine(ObjectModelHelpers.TempProjectDir, "file.txt"));
+            input.ItemSpec.ShouldBe("file.txt");
         }
     }
 }

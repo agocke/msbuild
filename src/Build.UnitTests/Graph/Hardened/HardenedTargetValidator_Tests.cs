@@ -1677,6 +1677,83 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void OnErrorUnionsFileWritesAcrossFailurePaths()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <FileWrites Include="first.output" />
+                </ItemGroup>
+                <Generate />
+                <ItemGroup>
+                  <FileWrites Include="second.output" />
+                </ItemGroup>
+                <Generate />
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="@(FileWrites)" />
+              </Target>
+            </Project>
+            """);
+        List<string[]> observedFileWrites = [];
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            },
+            (target, task, lookup) =>
+            {
+                if (task.Name == "PureConsume")
+                {
+                    observedFileWrites.Add(DescribeItemSpecs(lookup.GetItems("FileWrites")));
+                }
+            });
+
+        validator.Validate(project, "Build").ShouldBeEmpty();
+
+        observedFileWrites.ShouldHaveSingleItem()
+            .ShouldBe(["first.output", "second.output"]);
+    }
+
+    [Fact]
+    public void OnErrorStillRequiresOtherItemsToMatchAcrossFailurePaths()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <OtherWrites Include="first.output" />
+                </ItemGroup>
+                <Generate />
+                <ItemGroup>
+                  <OtherWrites Include="second.output" />
+                </ItemGroup>
+                <Generate />
+                <OnError ExecuteTargets="Cleanup" />
+              </Target>
+              <Target Name="Cleanup">
+                <PureConsume Input="@(OtherWrites)" />
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["PureConsume"] = HardenedTaskClassification.Pure,
+            });
+
+        exception.ErrorCode.ShouldBe("MSB4288");
+        exception.Message.ShouldContain("failure paths of target 'Build'");
+    }
+
+    [Fact]
     public void FalseTaskConditionDoesNotContributeOnErrorFailureState()
     {
         ValidateSuccess(

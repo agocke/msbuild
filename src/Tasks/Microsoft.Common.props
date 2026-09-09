@@ -129,6 +129,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
   <PropertyGroup Condition=" '$(MSBuildLogVerboseTaskParameters)' != 'true' ">
     <DisableLogTaskParameter_ConvertToAbsolutePath_Path>true</DisableLogTaskParameter_ConvertToAbsolutePath_Path>
     <DisableLogTaskParameter_FindUnderPath_OutOfPath>true</DisableLogTaskParameter_FindUnderPath_OutOfPath>
+    <DisableLogTaskParameter_FindUnderPathWithDeterministicSemantics_OutOfPath>true</DisableLogTaskParameter_FindUnderPathWithDeterministicSemantics_OutOfPath>
     <DisableLogTaskParameter_RemoveDuplicates_Inputs>true</DisableLogTaskParameter_RemoveDuplicates_Inputs>
     <DisableLogTaskParameterItemMetadata_ConvertToAbsolutePath_AbsolutePaths>true</DisableLogTaskParameterItemMetadata_ConvertToAbsolutePath_AbsolutePaths>
     <DisableLogTaskParameterItemMetadata_Copy_CopiedFiles>true</DisableLogTaskParameterItemMetadata_Copy_CopiedFiles>
@@ -136,6 +137,8 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     <DisableLogTaskParameterItemMetadata_Copy_SourceFiles>true</DisableLogTaskParameterItemMetadata_Copy_SourceFiles>
     <DisableLogTaskParameterItemMetadata_FindUnderPath_Files>true</DisableLogTaskParameterItemMetadata_FindUnderPath_Files>
     <DisableLogTaskParameterItemMetadata_FindUnderPath_InPath>true</DisableLogTaskParameterItemMetadata_FindUnderPath_InPath>
+    <DisableLogTaskParameterItemMetadata_FindUnderPathWithDeterministicSemantics_Files>true</DisableLogTaskParameterItemMetadata_FindUnderPathWithDeterministicSemantics_Files>
+    <DisableLogTaskParameterItemMetadata_FindUnderPathWithDeterministicSemantics_InPath>true</DisableLogTaskParameterItemMetadata_FindUnderPathWithDeterministicSemantics_InPath>
     <DisableLogTaskParameterItemMetadata_GenerateResource_FilesWritten>true</DisableLogTaskParameterItemMetadata_GenerateResource_FilesWritten>
     <DisableLogTaskParameterItemMetadata_Hash_ItemsToHash>true</DisableLogTaskParameterItemMetadata_Hash_ItemsToHash>
     <DisableLogTaskParameterItemMetadata_RemoveDuplicates_Filtered>true</DisableLogTaskParameterItemMetadata_RemoveDuplicates_Filtered>

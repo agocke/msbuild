@@ -420,7 +420,8 @@ internal sealed class HardenedTargetValidator
                     RestoreState(
                         JoinStates(
                             completedFailureStates,
-                            $"failure paths of target '{target.Name}'"));
+                            $"failure paths of target '{target.Name}'",
+                            unionFileWrites: true));
                     ValidateOnErrorTargets(
                         project,
                         target,
@@ -1463,7 +1464,8 @@ internal sealed class HardenedTargetValidator
 
     private static ValidatorState JoinStates(
         IReadOnlyList<ValidatorState> states,
-        string description)
+        string description,
+        bool unionFileWrites = false)
     {
         if (states.Count == 0)
         {
@@ -1528,6 +1530,21 @@ internal sealed class HardenedTargetValidator
                     HaveEquivalentItems(states[0].Lookup, states[i].Lookup, itemType);
             }
 
+            if (unionFileWrites &&
+                MSBuildNameIgnoreCaseComparer.Default.Equals(itemType, "FileWrites"))
+            {
+                UnionConcreteItems(joined.Lookup, states, itemType);
+                if (!combinedState.IsStatic)
+                {
+                    joined.Context.SetItemMembershipNonStatic(
+                        itemType,
+                        combinedState,
+                        description);
+                }
+
+                continue;
+            }
+
             if (!concreteItemsMatch)
             {
                 joined.Context.SetItemMembershipNonStatic(
@@ -1547,6 +1564,33 @@ internal sealed class HardenedTargetValidator
         }
 
         return joined;
+    }
+
+    private static void UnionConcreteItems(
+        Lookup destination,
+        IReadOnlyList<ValidatorState> states,
+        string itemType)
+    {
+        var union = new HashSet<ProjectItemInstance>(
+            destination.GetItems(itemType),
+            ProjectItemInstance.EqualityComparer);
+        List<ProjectItemInstance>? itemsToAdd = null;
+        for (int i = 1; i < states.Count; i++)
+        {
+            foreach (ProjectItemInstance item in states[i].Lookup.GetItems(itemType))
+            {
+                if (union.Add(item))
+                {
+                    itemsToAdd ??= [];
+                    itemsToAdd.Add(item.DeepClone());
+                }
+            }
+        }
+
+        if (itemsToAdd is not null)
+        {
+            destination.AddNewItemsOfItemType(itemType, itemsToAdd);
+        }
     }
 
     private static bool HaveEquivalentItems(Lookup left, Lookup right, string itemType)

@@ -5823,14 +5823,14 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- Find all files in the final output directory. -->
-    <FindUnderPath Path="$(OutDir)" Files="@(_CleanOrphanFileWrites)">
+    <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(_CleanOrphanFileWrites)">
       <Output TaskParameter="InPath" ItemName="_CleanOrphanFileWritesInOutput"/>
-    </FindUnderPath>
+    </FindUnderPathWithDeterministicSemantics>
 
     <!-- Find all files in the intermediate output directory. -->
-    <FindUnderPath Path="$(IntermediateOutputPath)"    Files="@(_CleanOrphanFileWrites)">
+    <FindUnderPathWithDeterministicSemantics Path="$(IntermediateOutputPath)"    Files="@(_CleanOrphanFileWrites)">
       <Output TaskParameter="InPath" ItemName="_CleanOrphanFileWritesInIntermediate"/>
-    </FindUnderPath>
+    </FindUnderPathWithDeterministicSemantics>
 
     <!-- Delete the orphaned files. -->
     <Delete
@@ -5930,26 +5930,26 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
     
     <!-- Even if we don't allow cleaning filewrites from outside of the project bubble, we should still include FileWritesShareable that are inside the bubble -->
-    <FindUnderPath Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)" Path="$(MSBuildProjectDirectory)" Files="@(FileWritesShareable)" UpdateToAbsolutePaths="true">
+    <FindUnderPathWithDeterministicSemantics Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)" Path="$(MSBuildProjectDirectory)" Files="@(FileWritesShareable)" UpdateToAbsolutePaths="true">
       <Output TaskParameter="InPath" ItemName="FileWrites"/>
-    </FindUnderPath>
+    </FindUnderPathWithDeterministicSemantics>
 
     <!-- Find all files in the final output directory. Use separate item includes for Files based on condition so we don't create a whole new
          item list unnecessarily -->
-    <FindUnderPath Path="$(OutDir)" Files="@(FileWrites)" UpdateToAbsolutePaths="true" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)">
+    <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(FileWrites)" UpdateToAbsolutePaths="true" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)">
       <Output TaskParameter="InPath" ItemName="_CleanCurrentFileWritesInOutput"/>
-    </FindUnderPath>
-    <FindUnderPath Path="$(OutDir)" Files="@(FileWrites);@(FileWritesShareable)" UpdateToAbsolutePaths="true" Condition="$(TrackFileWritesShareableOutsideOfProjectDirectory)">
+    </FindUnderPathWithDeterministicSemantics>
+    <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(FileWrites);@(FileWritesShareable)" UpdateToAbsolutePaths="true" Condition="$(TrackFileWritesShareableOutsideOfProjectDirectory)">
       <Output TaskParameter="InPath" ItemName="_CleanCurrentFileWritesInOutput"/>
-    </FindUnderPath>
+    </FindUnderPathWithDeterministicSemantics>
 
     <!-- Find all files in the intermediate output directory. Same as above, use Conditions to prevent new item list writes -->
-    <FindUnderPath Path="$(IntermediateOutputPath)" Files="@(FileWrites)" UpdateToAbsolutePaths="true" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)">
+    <FindUnderPathWithDeterministicSemantics Path="$(IntermediateOutputPath)" Files="@(FileWrites)" UpdateToAbsolutePaths="true" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)">
       <Output TaskParameter="InPath" ItemName="_CleanCurrentFileWritesInIntermediate"/>
-    </FindUnderPath>
-    <FindUnderPath Path="$(IntermediateOutputPath)" Files="@(FileWrites);@(FileWritesShareable)" UpdateToAbsolutePaths="true" Condition="$(TrackFileWritesShareableOutsideOfProjectDirectory)">
+    </FindUnderPathWithDeterministicSemantics>
+    <FindUnderPathWithDeterministicSemantics Path="$(IntermediateOutputPath)" Files="@(FileWrites);@(FileWritesShareable)" UpdateToAbsolutePaths="true" Condition="$(TrackFileWritesShareableOutsideOfProjectDirectory)">
       <Output TaskParameter="InPath" ItemName="_CleanCurrentFileWritesInIntermediate"/>
-    </FindUnderPath>
+    </FindUnderPathWithDeterministicSemantics>
 
     <!--
         Subtract any resolved assembly files from *current* file writes because deleting
@@ -6071,14 +6071,14 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ReadLinesFromFile>
 
     <!-- Find all files in the final output directory. -->
-    <FindUnderPath Path="$(OutDir)" Files="@(_CleanPriorFileWrites)">
+    <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(_CleanPriorFileWrites)">
       <Output TaskParameter="InPath" ItemName="_CleanPriorFileWritesInOutput"/>
-    </FindUnderPath>
+    </FindUnderPathWithDeterministicSemantics>
 
     <!-- Find all files in the intermediate output directory. -->
-    <FindUnderPath Path="$(IntermediateOutputPath)"    Files="@(_CleanPriorFileWrites)">
+    <FindUnderPathWithDeterministicSemantics Path="$(IntermediateOutputPath)"    Files="@(_CleanPriorFileWrites)">
       <Output TaskParameter="InPath" ItemName="_CleanPriorFileWritesInIntermediate"/>
-    </FindUnderPath>
+    </FindUnderPathWithDeterministicSemantics>
 
     <!-- Delete those files. -->
     <Delete
