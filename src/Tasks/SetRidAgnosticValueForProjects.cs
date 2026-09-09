@@ -10,6 +10,7 @@ using Microsoft.Build.Utilities;
 namespace Microsoft.Build.Tasks
 {
     [MSBuildMultiThreadableTask]
+    [MSBuildPureTask]
     public sealed class SetRidAgnosticValueForProjects : TaskExtension
     {
         public ITaskItem[] Projects { get; set; } = Array.Empty<ITaskItem>();

@@ -2012,6 +2012,79 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             new Dictionary<string, HardenedTaskClassification>());
     }
 
+    [Fact]
+    public void EmptyItemSourceSkipsProhibitedPerItemConditions()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build">
+                <Generate Condition="'$(BuildingInsideVisualStudio)' == 'true' and '@(ProjectReference)' != ''">
+                  <Output TaskParameter="Result" ItemName="_ProjectReference" />
+                </Generate>
+                <ItemGroup>
+                  <_ProjectReference Include="@(ProjectReference)"
+                                     Condition="'$(BuildingInsideVisualStudio)' != 'true' and '@(ProjectReference)' != ''" />
+                </ItemGroup>
+                <ItemGroup>
+                  <Existent Include="@(_ProjectReference)" Condition="Exists('%(Identity)')" />
+                  <Nonexistent Include="@(_ProjectReference)" Condition="!Exists('%(Identity)')" />
+                </ItemGroup>
+                <MSBuild Projects="@(Existent)"
+                         Targets="GetTargetFrameworks"
+                         Condition="'%(Existent.SkipGetTargetFrameworkProperties)' != 'true'">
+                  <Output TaskParameter="TargetOutputs" ItemName="_TargetFrameworkPossibilities" />
+                </MSBuild>
+                <ItemGroup>
+                  <_OriginalItemSpec Include="@(_TargetFrameworkPossibilities->'%(OriginalItemSpec)')" />
+                  <_TargetFrameworkPossibilities Remove="@(_TargetFrameworkPossibilities)" />
+                  <_TargetFrameworkPossibilities Include="@(_OriginalItemSpec)" />
+                </ItemGroup>
+                <SetRidAgnosticValueForProjects Projects="@(_TargetFrameworkPossibilities)">
+                  <Output TaskParameter="UpdatedProjects" ItemName="UpdatedAnnotatedProjects" />
+                </SetRidAgnosticValueForProjects>
+                <ItemGroup>
+                  <AnnotatedProjects Include="@(UpdatedAnnotatedProjects)" />
+                  <UpdatedAnnotatedProjects Remove="@(UpdatedAnnotatedProjects)" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+        HardenedTargetValidator validator = new(
+            new Dictionary<string, HardenedTaskClassification>
+            {
+                ["Generate"] = HardenedTaskClassification.DeclaredIO,
+                ["SetRidAgnosticValueForProjects"] = HardenedTaskClassification.Pure,
+            },
+            static (_, _, _) => { });
+
+        validator.Validate(project, "Build").ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void NonemptyItemSourceRejectsProhibitedPerItemCondition()
+    {
+        InvalidProjectFileException exception = ValidateFailure(
+            """
+            <Project>
+              <ItemGroup>
+                <ProjectReference Include="referenced.proj" />
+              </ItemGroup>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Existent Include="@(ProjectReference)" Condition="Exists('%(Identity)')" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """,
+            new Dictionary<string, HardenedTaskClassification>());
+
+        exception.ErrorCode.ShouldBe("MSB4287");
+        exception.Message.ShouldContain("Exists");
+    }
+
     [Theory]
     [InlineData("false And Exists('input.txt')")]
     [InlineData("true Or Exists('input.txt')")]

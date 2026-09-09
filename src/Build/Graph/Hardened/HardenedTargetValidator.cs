@@ -860,6 +860,7 @@ internal sealed class HardenedTargetValidator
         taskControlState = ValueState.Combine(taskControlState, declaredIOState);
 
         ValueState? intrinsicTaskOutputState = null;
+        bool isStaticallyEmptyMSBuild = false;
         if (isCallTarget)
         {
             intrinsicTaskOutputState = ValidateCallTarget(
@@ -868,6 +869,14 @@ internal sealed class HardenedTargetValidator
                 taskControlState,
                 visitedTargets,
                 callTargetScope ?? throw new InvalidOperationException("CallTarget scope was not captured."));
+        }
+        else if (isMSBuild)
+        {
+            isStaticallyEmptyMSBuild = HasStaticallyEmptyMSBuildProjects(task, taskControlState);
+            if (isStaticallyEmptyMSBuild)
+            {
+                intrinsicTaskOutputState = ValueState.Static;
+            }
         }
 
         HardenedPureTaskExecutor? pureTaskExecutor = _pureTaskExecutor;
@@ -1030,7 +1039,7 @@ internal sealed class HardenedTargetValidator
         }
 
         callTargetScope?.CallerAssignedProperties.Add(ReservedPropertyNames.lastTaskResult);
-        if (pureTaskExecuted)
+        if (pureTaskExecuted || isStaticallyEmptyMSBuild)
         {
             Context.SetConcreteProperty(
                 ReservedPropertyNames.lastTaskResult,
@@ -1047,7 +1056,7 @@ internal sealed class HardenedTargetValidator
 
         return new TaskValidationResult(
             canStopOnFailure,
-            Executed: !pureTaskExecuted,
+            Executed: !pureTaskExecuted && !isStaticallyEmptyMSBuild,
             callTargetScope?.Clone());
     }
 
@@ -1174,6 +1183,31 @@ internal sealed class HardenedTargetValidator
         }
 
         return ValueState.Combine(taskControlState, metadataState);
+    }
+
+    private bool HasStaticallyEmptyMSBuildProjects(
+        ProjectTaskInstance task,
+        ValueState taskControlState)
+    {
+        if (!taskControlState.IsStatic ||
+            !TryGetTaskParameter(task, "Projects", out string projects, out ElementLocation location) ||
+            !TryExpandConcreteExpressionLeaveEscaped(
+                task,
+                projects,
+                location,
+                $"Projects parameter of task '{task.Name}'",
+                reportUnmodeled: false,
+                out string expandedProjects))
+        {
+            return false;
+        }
+
+        foreach (string _ in ExpressionShredder.SplitSemiColonSeparatedList(expandedProjects))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private ValueState ValidateCallTarget(
@@ -2367,6 +2401,11 @@ internal sealed class HardenedTargetValidator
 
     private void ValidateItemOperation(ProjectItemGroupTaskItemInstance item, string targetName)
     {
+        if (IsStaticallyEmptyPlainItemVectorInclude(item))
+        {
+            return;
+        }
+
         List<string> batchableExpressions = [];
         AddIfNotEmpty(batchableExpressions, item.Include);
         AddIfNotEmpty(batchableExpressions, item.Exclude);
@@ -2388,6 +2427,37 @@ internal sealed class HardenedTargetValidator
         ValidateInBuckets(
             batchingResult,
             batchingState => ValidateItemOperation(item, batchingState));
+    }
+
+    private bool IsStaticallyEmptyPlainItemVectorInclude(ProjectItemGroupTaskItemInstance item)
+    {
+        if (item.Include.Length == 0 ||
+            item.Exclude.Length != 0 ||
+            item.Metadata.Count != 0 ||
+            item.MatchOnMetadata.Length != 0 ||
+            item.MatchOnMetadataOptions.Length != 0 ||
+            item.KeepMetadata.Length != 0 ||
+            item.RemoveMetadata.Length != 0 ||
+            item.KeepDuplicates.Length != 0)
+        {
+            return false;
+        }
+
+        string include = item.Include.Trim();
+        if (!ExpressionShredder.TryGetNextItemVectorExpression(
+                include,
+                startIndex: 0,
+                out ExpressionShredder.ItemExpressionCapture itemVector) ||
+            itemVector.Index != 0 ||
+            itemVector.Length != include.Length ||
+            itemVector.Captures is { Count: > 0 } ||
+            !string.IsNullOrEmpty(itemVector.FunctionName))
+        {
+            return false;
+        }
+
+        return Context.GetItemMembership(itemVector.ItemType).IsStatic &&
+            ValidationLookup.GetItems(itemVector.ItemType).Count == 0;
     }
 
     private void ValidateItemOperation(
