@@ -191,6 +191,9 @@ if [[ "$build_repositories" == true ]]; then
   (
     cd "$roslyn_repo"
     dotnet build src/Compilers/Core/MSBuildTask/MSBuild/Microsoft.Build.Tasks.CodeAnalysis.csproj --configuration "$configuration" --framework "$roslyn_tfm"
+    dotnet build src/CodeStyle/Tools/CodeStyleConfigFileGenerator.csproj --configuration "$configuration" --framework "$roslyn_tfm"
+    dotnet build src/CodeStyle/CSharp/CodeFixes/Microsoft.CodeAnalysis.CSharp.CodeStyle.Fixes.csproj --configuration "$configuration" --framework netstandard2.0
+    dotnet build src/CodeStyle/VisualBasic/CodeFixes/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.Fixes.vbproj --configuration "$configuration" --framework netstandard2.0
   )
 fi
 
@@ -215,6 +218,13 @@ msbuild_bootstrap_root="$msbuild_repo/artifacts/bin/bootstrap/core"
 sourcelink_payload="$sourcelink_repo/artifacts/bin/Microsoft.Build.Tasks.Git/$configuration/$sourcelink_tfm"
 sourcelink_common_payload="$sourcelink_repo/artifacts/bin/Microsoft.SourceLink.Common/$configuration/$sourcelink_tfm"
 roslyn_tasks_payload="$roslyn_repo/artifacts/bin/Microsoft.Build.Tasks.CodeAnalysis/$configuration/$roslyn_tfm"
+roslyn_codestyle_generator="$roslyn_repo/artifacts/bin/CodeStyleConfigFileGenerator/$configuration/$roslyn_tfm/CodeStyleConfigFileGenerator.dll"
+roslyn_codestyle_common_payload="$roslyn_repo/artifacts/bin/Microsoft.CodeAnalysis.CodeStyle/$configuration/netstandard2.0"
+roslyn_codestyle_csharp_payload="$roslyn_repo/artifacts/bin/Microsoft.CodeAnalysis.CSharp.CodeStyle/$configuration/netstandard2.0"
+roslyn_codestyle_csharp_fixes_payload="$roslyn_repo/artifacts/bin/Microsoft.CodeAnalysis.CSharp.CodeStyle.Fixes/$configuration/netstandard2.0"
+roslyn_codestyle_visualbasic_payload="$roslyn_repo/artifacts/bin/Microsoft.CodeAnalysis.VisualBasic.CodeStyle/$configuration/netstandard2.0"
+roslyn_codestyle_visualbasic_fixes_payload="$roslyn_repo/artifacts/bin/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.Fixes/$configuration/netstandard2.0"
+netanalyzers_payload="$sdk_repo/artifacts/bin/Microsoft.CodeAnalysis.NetAnalyzers.Package"
 
 require_file "$sdk_payload/MSBuild.dll"
 require_file "$sdk_payload/Sdks/Microsoft.NET.Sdk/targets/Microsoft.NET.Sdk.targets"
@@ -227,6 +237,29 @@ require_file "$sourcelink_common_payload/Microsoft.SourceLink.Common.dll"
 require_file "$sourcelink_repo/src/SourceLink.Common/build/InitializeSourceControlInformation.targets"
 require_file "$sourcelink_repo/src/SourceLink.Common/build/Microsoft.SourceLink.Common.targets"
 require_file "$roslyn_tasks_payload/Microsoft.Build.Tasks.CodeAnalysis.dll"
+require_file "$roslyn_codestyle_generator"
+require_file "$roslyn_codestyle_common_payload/Microsoft.CodeAnalysis.CodeStyle.dll"
+require_file "$roslyn_codestyle_csharp_payload/Microsoft.CodeAnalysis.CSharp.CodeStyle.dll"
+require_file "$roslyn_codestyle_visualbasic_payload/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.dll"
+require_file "$netanalyzers_payload/Build/Microsoft.CodeAnalysis.NetAnalyzers.targets"
+require_directory "$netanalyzers_payload/GlobalAnalyzerConfigs"
+
+"$sdk_redist/dotnet" "$roslyn_codestyle_generator" \
+  CSharp \
+  "$roslyn_codestyle_csharp_fixes_payload" \
+  Microsoft.CodeAnalysis.CSharp.CodeStyle.targets \
+  "$roslyn_codestyle_common_payload/Microsoft.CodeAnalysis.CodeStyle.dll;$roslyn_codestyle_csharp_payload/Microsoft.CodeAnalysis.CSharp.CodeStyle.dll"
+
+"$sdk_redist/dotnet" "$roslyn_codestyle_generator" \
+  VisualBasic \
+  "$roslyn_codestyle_visualbasic_fixes_payload" \
+  Microsoft.CodeAnalysis.VisualBasic.CodeStyle.targets \
+  "$roslyn_codestyle_common_payload/Microsoft.CodeAnalysis.CodeStyle.dll;$roslyn_codestyle_visualbasic_payload/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.dll"
+
+require_file "$roslyn_codestyle_csharp_fixes_payload/Microsoft.CodeAnalysis.CSharp.CodeStyle.targets"
+require_directory "$roslyn_codestyle_csharp_fixes_payload/config"
+require_file "$roslyn_codestyle_visualbasic_fixes_payload/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.targets"
+require_directory "$roslyn_codestyle_visualbasic_fixes_payload/config"
 
 msbuild_bootstrap_sdk=""
 for candidate in "$msbuild_bootstrap_root/sdk"/*; do
@@ -299,6 +332,20 @@ done
 echo "Overlaying Roslyn MSBuild tasks..."
 cp "$roslyn_tasks_payload/Microsoft.Build.Tasks.CodeAnalysis.dll" "$composite_sdk/Roslyn/Microsoft.Build.Tasks.CodeAnalysis.dll"
 
+echo "Overlaying analyzer globalconfig manifests..."
+cp "$roslyn_codestyle_csharp_fixes_payload/Microsoft.CodeAnalysis.CSharp.CodeStyle.targets" \
+  "$composite_sdk/Sdks/Microsoft.NET.Sdk/codestyle/cs/build/Microsoft.CodeAnalysis.CSharp.CodeStyle.targets"
+rsync -a "$roslyn_codestyle_csharp_fixes_payload/config/" \
+  "$composite_sdk/Sdks/Microsoft.NET.Sdk/codestyle/cs/build/config/"
+cp "$roslyn_codestyle_visualbasic_fixes_payload/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.targets" \
+  "$composite_sdk/Sdks/Microsoft.NET.Sdk/codestyle/vb/build/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.targets"
+rsync -a "$roslyn_codestyle_visualbasic_fixes_payload/config/" \
+  "$composite_sdk/Sdks/Microsoft.NET.Sdk/codestyle/vb/build/config/"
+cp "$netanalyzers_payload/Build/Microsoft.CodeAnalysis.NetAnalyzers.targets" \
+  "$composite_sdk/Sdks/Microsoft.NET.Sdk/analyzers/build/Microsoft.CodeAnalysis.NetAnalyzers.targets"
+rsync -a "$netanalyzers_payload/GlobalAnalyzerConfigs/" \
+  "$composite_sdk/Sdks/Microsoft.NET.Sdk/analyzers/build/config/"
+
 cat > "$stage_dir/msbuild-hardened" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -339,6 +386,12 @@ cmp -s "$sourcelink_common_payload/Microsoft.SourceLink.Common.dll" "$composite_
   fail "composite SourceLink common task assembly does not match the local SourceLink build"
 cmp -s "$roslyn_tasks_payload/Microsoft.Build.Tasks.CodeAnalysis.dll" "$composite_sdk/Roslyn/Microsoft.Build.Tasks.CodeAnalysis.dll" ||
   fail "composite Roslyn task assembly does not match the local Roslyn build"
+cmp -s "$roslyn_codestyle_csharp_fixes_payload/Microsoft.CodeAnalysis.CSharp.CodeStyle.targets" "$composite_sdk/Sdks/Microsoft.NET.Sdk/codestyle/cs/build/Microsoft.CodeAnalysis.CSharp.CodeStyle.targets" ||
+  fail "composite C# CodeStyle targets do not match the local Roslyn build"
+cmp -s "$roslyn_codestyle_visualbasic_fixes_payload/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.targets" "$composite_sdk/Sdks/Microsoft.NET.Sdk/codestyle/vb/build/Microsoft.CodeAnalysis.VisualBasic.CodeStyle.targets" ||
+  fail "composite Visual Basic CodeStyle targets do not match the local Roslyn build"
+cmp -s "$netanalyzers_payload/Build/Microsoft.CodeAnalysis.NetAnalyzers.targets" "$composite_sdk/Sdks/Microsoft.NET.Sdk/analyzers/build/Microsoft.CodeAnalysis.NetAnalyzers.targets" ||
+  fail "composite NetAnalyzers targets do not match the local SDK build"
 
 "$stage_dir/msbuild-hardened" -version -nologo >/dev/null
 
