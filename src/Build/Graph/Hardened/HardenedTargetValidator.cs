@@ -2402,7 +2402,7 @@ internal sealed class HardenedTargetValidator
 
     private void ValidateItemOperation(ProjectItemGroupTaskItemInstance item, string targetName)
     {
-        if (IsStaticallyEmptyPlainItemVectorInclude(item))
+        if (TryRecordStaticallyEmptyPlainItemVectorInclude(item))
         {
             return;
         }
@@ -2430,7 +2430,7 @@ internal sealed class HardenedTargetValidator
             batchingState => ValidateItemOperation(item, batchingState));
     }
 
-    private bool IsStaticallyEmptyPlainItemVectorInclude(ProjectItemGroupTaskItemInstance item)
+    private bool TryRecordStaticallyEmptyPlainItemVectorInclude(ProjectItemGroupTaskItemInstance item)
     {
         if (item.Include.Length == 0 ||
             item.Exclude.Length != 0 ||
@@ -2457,8 +2457,30 @@ internal sealed class HardenedTargetValidator
             return false;
         }
 
-        return Context.GetItemMembership(itemVector.ItemType).IsStatic &&
-            ValidationLookup.GetItems(itemVector.ItemType).Count == 0;
+        if (!Context.GetItemMembership(itemVector.ItemType).IsStatic ||
+            ValidationLookup.GetItems(itemVector.ItemType).Count != 0)
+        {
+            return false;
+        }
+
+        HardenedItemOperationPlan.HardenedBucketPath previousPath =
+            ValidationLookup.HardenedBucketPath;
+        ValidationLookup.EnterHardenedBucket(item, sequenceNumber: 0);
+        try
+        {
+            ItemOperationPlan.Record(
+                ValidationLookup.HardenedBucketPath,
+                item,
+                [],
+                new Dictionary<ProjectItemInstance, ProjectItemInstance>(),
+                ItemOperationPlan.CreateExpansionCapture());
+        }
+        finally
+        {
+            ValidationLookup.RestoreHardenedBucketPath(previousPath);
+        }
+
+        return true;
     }
 
     private void ValidateItemOperation(

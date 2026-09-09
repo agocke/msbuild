@@ -33,6 +33,8 @@ namespace Microsoft.Build.Tasks
             Utilities.Task.RegisterTask<WriteLinesToFile>();
             Utilities.Task.RegisterTask<ReadLinesFromFile>();
             Utilities.Task.RegisterTask<WriteCleanFileWritesImport>();
+            Utilities.Task.RegisterTask<WriteUnmanagedRegistrationCacheImport>();
+            Utilities.Task.RegisterTask<ReconcileCleanFileWrites>();
             Utilities.Task.RegisterTask<WriteFileFingerprint>();
         }
     }

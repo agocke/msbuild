@@ -3031,6 +3031,32 @@ $@"<Project>
         }
 
         [Fact]
+        public void HardenedGraphRestoreImportsUnmanagedRegistrationCachePresence()
+        {
+            string projectContents = """
+                <Project DefaultTargets="Build">
+                  <PropertyGroup>
+                    <BaseIntermediateOutputPath>obj/</BaseIntermediateOutputPath>
+                  </PropertyGroup>
+                  <Import Project="$(MSBuildToolsPath)\Microsoft.Common.CurrentVersion.targets" />
+                  <Target Name="Restore">
+                    <WriteLinesToFile
+                      File="$(BaseIntermediateOutputPath)$(MSBuildProjectFile).UnmanagedRegistration.cache"
+                      Lines="cache"
+                      Overwrite="true" />
+                  </Target>
+                  <Target Name="Build">
+                    <Error
+                      Text="Expected imported unmanaged registration cache presence."
+                      Condition="'$(_HardenedUnmanagedRegistrationCacheExists)' != 'true'" />
+                  </Target>
+                </Project>
+                """;
+
+            ExecuteMSBuildExeExpectSuccess(projectContents, arguments: "/restore --hardened-graph");
+        }
+
+        [Fact]
         public void HardenedGraphWritesCopyMarkerFromStaticCopiedOutputPaths()
         {
             string projectContents = """

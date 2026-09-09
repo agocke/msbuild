@@ -2066,6 +2066,29 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void EmptyItemSourceMaterializesEmptyOperationDuringExecution()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <Target Name="Build">
+                <ItemGroup>
+                  <Unconditional Include="@(Missing)" />
+                  <Conditioned Include="@(Missing)" Condition="!Exists('%(Identity)')" />
+                </ItemGroup>
+              </Target>
+            </Project>
+            """);
+
+        ProjectInstance result = BuildHardenedProject(project);
+
+        result.GetItems("Unconditional").ShouldBeEmpty();
+        result.GetItems("Conditioned").ShouldBeEmpty();
+    }
+
+    [Fact]
     public void NonemptyItemSourceRejectsProhibitedPerItemCondition()
     {
         InvalidProjectFileException exception = ValidateFailure(

@@ -399,10 +399,15 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
   <PropertyGroup>
     <_HardenedCleanFileWritesImport>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', '$(CleanFile).hardened.props'))</_HardenedCleanFileWritesImport>
+    <_HardenedUnmanagedRegistrationCacheImport>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)', 'hardened', '$(MSBuildProjectFile).UnmanagedRegistration.cache.props'))</_HardenedUnmanagedRegistrationCacheImport>
   </PropertyGroup>
 
   <Import
       Project="$(_HardenedCleanFileWritesImport)"
+      Condition="'$(MSBuildHardenedGraph)' == 'true'" />
+
+  <Import
+      Project="$(_HardenedUnmanagedRegistrationCacheImport)"
       Condition="'$(MSBuildHardenedGraph)' == 'true'" />
 
   <PropertyGroup>
@@ -1478,7 +1483,8 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       Name="UnmanagedUnregistration"
       Condition="(('$(_AssemblyTimestampBeforeCompile)' != '$(_AssemblyTimestampAfterCompile)' or '$(RegisterForComInterop)' != 'true' or '$(OutputType)' != 'library') or
                     ('$(_AssemblyTimestampBeforeCompile)' == '')) and
-                   Exists('@(_UnmanagedRegistrationCache)')"
+                   (('$(MSBuildHardenedGraph)' == 'true' and '$(_HardenedUnmanagedRegistrationCacheExists)' == 'true') or
+                    ('$(MSBuildHardenedGraph)' != 'true' and Exists('@(_UnmanagedRegistrationCache)')))"
       DependsOnTargets="$(UnmanagedUnregistrationDependsOn)">
 
     <PropertyGroup>
@@ -1501,6 +1507,17 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     <UnregisterAssembly AssemblyListFile="@(_UnmanagedRegistrationCache)"
                         MSBuildArchitecture="$(UnregisterAssemblyMSBuildArchitecture)"
                         MSBuildRuntime="$(UnregisterAssemblyMSBuildRuntime)" />
+
+    <PropertyGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <_HardenedUnmanagedRegistrationCacheExists>false</_HardenedUnmanagedRegistrationCacheExists>
+    </PropertyGroup>
+
+    <WriteUnmanagedRegistrationCacheImport
+        CacheFile="@(_UnmanagedRegistrationCache)"
+        ImportFile="$(_HardenedUnmanagedRegistrationCacheImport)"
+        DeclaredInputs="@(_UnmanagedRegistrationCache)"
+        DeclaredOutputs="$(_HardenedUnmanagedRegistrationCacheImport)"
+        Condition="'$(MSBuildHardenedGraph)' == 'true'" />
 
   </Target>
 
@@ -4248,12 +4265,13 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </PropertyGroup>
 
     <!-- If PreferNativeArm64 is enabled, it searches for the same default.win32manifest  -->
-    <GetFrameworkPath Condition="'$(ApplicationManifest)'=='' and '$(NoWin32Manifest)'!='true' and '$(PreferNativeArm64)' != 'true'">
+    <GetFrameworkPath Condition="'$(ApplicationManifest)'=='' and '$(NoWin32Manifest)'!='true' and '$(PreferNativeArm64)' != 'true' and '$(MSBuildHardenedGraph)' != 'true'">
       <Output TaskParameter="FrameworkVersion40Path"  PropertyName="_FrameworkVersion40Path" />
     </GetFrameworkPath>
 
     <PropertyGroup>
-      <EmbeddedWin32Manifest Condition="'$(ApplicationManifest)'=='' and '$(NoWin32Manifest)'!='true' and '$(PreferNativeArm64)' != 'true' and Exists('$(_FrameworkVersion40Path)\default.win32manifest')">$(_FrameworkVersion40Path)\default.win32manifest</EmbeddedWin32Manifest>
+      <EmbeddedWin32Manifest Condition="'$(ApplicationManifest)'=='' and '$(NoWin32Manifest)'!='true' and '$(PreferNativeArm64)' != 'true' and '$(MSBuildHardenedGraph)' != 'true' and Exists('$(_FrameworkVersion40Path)\default.win32manifest')">$(_FrameworkVersion40Path)\default.win32manifest</EmbeddedWin32Manifest>
+      <EmbeddedWin32Manifest Condition="'$(ApplicationManifest)'=='' and '$(NoWin32Manifest)'!='true' and '$(PreferNativeArm64)' != 'true' and '$(MSBuildHardenedGraph)' == 'true' and '$(MSBuildFrameworkToolsPath)' != ''">$(MSBuildFrameworkToolsPath)\default.win32manifest</EmbeddedWin32Manifest>
     </PropertyGroup>
 
   </Target>
@@ -5812,7 +5830,27 @@ Copyright (C) Microsoft Corporation. All rights reserved.
         CreateCodeBase="true"
         MSBuildRuntime="$(RegisterAssemblyMSBuildRuntime)"
         MSBuildArchitecture="$(RegisterAssemblyMSBuildArchitecture)"
-        Condition="!Exists('@(_UnmanagedRegistrationCache)')"/>
+        Condition="'$(MSBuildHardenedGraph)' != 'true' and !Exists('@(_UnmanagedRegistrationCache)')"/>
+
+    <RegisterAssembly
+        Assemblies="@(_OutputPathItem->'%(FullPath)$(TargetFileName)')"
+        TypeLibFiles="@(_OutputPathItem->'%(FullPath)$(TargetName).tlb')"
+        AssemblyListFile="@(_UnmanagedRegistrationCache)"
+        CreateCodeBase="true"
+        MSBuildRuntime="$(RegisterAssemblyMSBuildRuntime)"
+        MSBuildArchitecture="$(RegisterAssemblyMSBuildArchitecture)"
+        Condition="'$(MSBuildHardenedGraph)' == 'true' and '$(_HardenedUnmanagedRegistrationCacheExists)' != 'true'"/>
+
+    <PropertyGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <_HardenedUnmanagedRegistrationCacheExists>true</_HardenedUnmanagedRegistrationCacheExists>
+    </PropertyGroup>
+
+    <WriteUnmanagedRegistrationCacheImport
+        CacheFile="@(_UnmanagedRegistrationCache)"
+        ImportFile="$(_HardenedUnmanagedRegistrationCacheImport)"
+        DeclaredInputs="@(_UnmanagedRegistrationCache)"
+        DeclaredOutputs="$(_HardenedUnmanagedRegistrationCacheImport)"
+        Condition="'$(MSBuildHardenedGraph)' == 'true'" />
 
     <ItemGroup>
       <FileWrites Include="@(_OutputPathItem->'%(FullPath)$(TargetName).tlb')"/>
@@ -5853,6 +5891,19 @@ Copyright (C) Microsoft Corporation. All rights reserved.
   </Target>
 
   <Target
+      Name="_WriteHardenedUnmanagedRegistrationCacheImport"
+      AfterTargets="Restore"
+      Condition="'$(MSBuildHardenedGraph)' == 'true'">
+
+    <WriteUnmanagedRegistrationCacheImport
+        CacheFile="@(_UnmanagedRegistrationCache)"
+        ImportFile="$(_HardenedUnmanagedRegistrationCacheImport)"
+        DeclaredInputs="@(_UnmanagedRegistrationCache)"
+        DeclaredOutputs="$(_HardenedUnmanagedRegistrationCacheImport)" />
+
+  </Target>
+
+  <Target
        Name="IncrementalClean"
        DependsOnTargets="$(IncrementalCleanDependsOn);_CleanGetCurrentAndPriorFileWrites">
 
@@ -5880,32 +5931,14 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
     </Delete>
 
-    <!-- Create a list of everything that wasn't deleted or was outside
-             the current final output and intermediate output directories. -->
-    <ItemGroup>
-      <_CleanRemainingFileWritesAfterIncrementalClean Include="@(_CleanPriorFileWrites);@(_CleanCurrentFileWrites)" Exclude="@(_CleanOrphanFilesDeleted)"/>
-    </ItemGroup>
-
-    <!-- Remove duplicates. -->
-    <RemoveDuplicates Inputs="@(_CleanRemainingFileWritesAfterIncrementalClean)">
-      <Output TaskParameter="Filtered" ItemName="_CleanUniqueRemainingFileWritesAfterIncrementalClean"/>
-    </RemoveDuplicates>
-
-    <!-- Write new list of current files back to disk, replacing the existing list.-->
-    <WriteLinesToFile
-        File="$(IntermediateOutputPath)$(CleanFile)"
-        Lines="@(_CleanUniqueRemainingFileWritesAfterIncrementalClean)"
-        Condition="'$(MSBuildHardenedGraph)' != 'true' and '@(_CleanUnfilteredPriorFileWrites)'!='@(_CleanUniqueRemainingFileWritesAfterIncrementalClean)'"
-        Overwrite="true"/>
-
-    <WriteLinesToFile
-        File="$(IntermediateOutputPath)$(CleanFile)"
-        Lines="@(_CleanUniqueRemainingFileWritesAfterIncrementalClean)"
+    <!-- Remove deleted files, add current files, and write the reconciled clean ledger. -->
+    <ReconcileCleanFileWrites
+        CleanFile="$(IntermediateOutputPath)$(CleanFile)"
+        PriorFileWrites="@(_CleanPriorFileWrites)"
+        CurrentFileWrites="@(_CleanCurrentFileWrites)"
+        DeletedFiles="@(_CleanOrphanFilesDeleted)"
         DeclaredInputs="$(IntermediateOutputPath)$(CleanFile)"
-        DeclaredOutputs="$(IntermediateOutputPath)$(CleanFile)"
-        Condition="'$(MSBuildHardenedGraph)' == 'true'"
-        Overwrite="true"
-        WriteOnlyWhenDifferent="true"/>
+        DeclaredOutputs="$(IntermediateOutputPath)$(CleanFile)" />
 
   </Target>
 
@@ -6136,27 +6169,16 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
     </Delete>
 
-    <!-- Create a list of everything that wasn't deleted. -->
-    <ItemGroup>
-      <_CleanRemainingFileWritesAfterClean Include="@(_CleanPriorFileWrites)" Exclude="@(_CleanPriorFileWritesDeleted)"/>
-    </ItemGroup>
-
-    <!-- Remove duplicates. -->
-    <RemoveDuplicates Inputs="@(_CleanRemainingFileWritesAfterClean)">
-      <Output TaskParameter="Filtered" ItemName="_CleanUniqueRemainingFileWrites"/>
-    </RemoveDuplicates>
-
     <!-- Make sure the directory exists. -->
     <MakeDir Directories="$(IntermediateOutputPath)"/>
 
-    <!-- Write new list of current files back to disk. -->
-    <WriteLinesToFile
-        File="$(IntermediateOutputPath)$(CleanFile)"
-        Lines="@(_CleanUniqueRemainingFileWrites)"
+    <!-- Remove deleted files and write the reconciled clean ledger. -->
+    <ReconcileCleanFileWrites
+        CleanFile="$(IntermediateOutputPath)$(CleanFile)"
+        PriorFileWrites="@(_CleanPriorFileWrites)"
+        DeletedFiles="@(_CleanPriorFileWritesDeleted)"
         DeclaredInputs="$(IntermediateOutputPath)$(CleanFile)"
-        DeclaredOutputs="$(IntermediateOutputPath)$(CleanFile)"
-        WriteOnlyWhenDifferent="true"
-        Overwrite="true" />
+        DeclaredOutputs="$(IntermediateOutputPath)$(CleanFile)" />
 
   </Target>
 
