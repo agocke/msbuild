@@ -13,24 +13,27 @@ script_root="$(cd -P "$(dirname "$source")" && pwd)"
 msbuild_repo="$(cd "$script_root/.." && pwd -P)"
 sdk_repo="$msbuild_repo/../sdk"
 sourcelink_repo="$msbuild_repo/../sourcelink"
+roslyn_repo="$msbuild_repo/../roslyn"
 output_dir="$msbuild_repo/artifacts/bin/hardened-composite-sdk"
 configuration="Debug"
 sdk_version=""
 msbuild_tfm="net11.0"
 sourcelink_tfm="net10.0"
 sourcelink_framework_tfm="net472"
+roslyn_tfm="net10.0"
 build_repositories=true
 
 usage() {
   cat <<'EOF'
 Usage: eng/create-hardened-composite-sdk.sh [options]
 
-Builds and combines local MSBuild, SDK, and SourceLink checkouts into one SDK.
+Builds and combines local MSBuild, SDK, SourceLink, and Roslyn checkouts into one SDK.
 
 Options:
   --msbuild-repo PATH          MSBuild checkout (default: this repository)
   --sdk-repo PATH              SDK checkout (default: ../sdk)
   --sourcelink-repo PATH       SourceLink checkout (default: ../sourcelink)
+  --roslyn-repo PATH           Roslyn checkout (default: ../roslyn)
   --output PATH                Composite output directory
   --configuration NAME         Build configuration (default: Debug)
   --sdk-version VERSION        SDK directory to compose; auto-detected by default
@@ -38,6 +41,7 @@ Options:
   --sourcelink-tfm TFM         SourceLink .NET output TFM (default: net10.0)
   --sourcelink-framework-tfm TFM
                                 SourceLink .NET Framework output TFM (default: net472)
+  --roslyn-tfm TFM             Roslyn build task output TFM (default: net10.0)
   --no-build                   Compose existing build outputs without rebuilding
   -h, --help                   Show this help
 EOF
@@ -101,6 +105,10 @@ while [[ $# -gt 0 ]]; do
       sourcelink_repo="$2"
       shift 2
       ;;
+    --roslyn-repo)
+      roslyn_repo="$2"
+      shift 2
+      ;;
     --output)
       output_dir="$2"
       shift 2
@@ -125,6 +133,10 @@ while [[ $# -gt 0 ]]; do
       sourcelink_framework_tfm="$2"
       shift 2
       ;;
+    --roslyn-tfm)
+      roslyn_tfm="$2"
+      shift 2
+      ;;
     --no-build)
       build_repositories=false
       shift
@@ -142,14 +154,16 @@ done
 require_directory "$msbuild_repo"
 require_directory "$sdk_repo"
 require_directory "$sourcelink_repo"
+require_directory "$roslyn_repo"
 
 msbuild_repo="$(canonicalize_directory "$msbuild_repo")"
 sdk_repo="$(canonicalize_directory "$sdk_repo")"
 sourcelink_repo="$(canonicalize_directory "$sourcelink_repo")"
+roslyn_repo="$(canonicalize_directory "$roslyn_repo")"
 output_dir="$(canonicalize_output "$output_dir")"
 
 case "$output_dir" in
-  /|"$msbuild_repo"|"$sdk_repo"|"$sourcelink_repo")
+  /|"$msbuild_repo"|"$sdk_repo"|"$sourcelink_repo"|"$roslyn_repo")
     fail "refusing unsafe output directory: $output_dir"
     ;;
 esac
@@ -172,6 +186,12 @@ if [[ "$build_repositories" == true ]]; then
     cd "$sourcelink_repo"
     ./build.sh --configuration "$configuration"
   )
+
+  echo "Building Roslyn MSBuild tasks..."
+  (
+    cd "$roslyn_repo"
+    dotnet build src/Compilers/Core/MSBuildTask/MSBuild/Microsoft.Build.Tasks.CodeAnalysis.csproj --configuration "$configuration" --framework "$roslyn_tfm"
+  )
 fi
 
 sdk_redist="$sdk_repo/artifacts/bin/redist/$configuration/dotnet"
@@ -192,9 +212,9 @@ fi
 sdk_payload="$sdk_redist/sdk/$sdk_version"
 msbuild_payload="$msbuild_repo/artifacts/bin/MSBuild/$configuration/$msbuild_tfm"
 msbuild_bootstrap_root="$msbuild_repo/artifacts/bin/bootstrap/core"
-sourcelink_payload="$sourcelink_repo/artifacts/bin/Microsoft.Build.Tasks.Git/$configuration/$sourcelink_tfm/publish"
-sourcelink_framework_payload="$sourcelink_repo/artifacts/bin/Microsoft.Build.Tasks.Git/$configuration/$sourcelink_framework_tfm"
-sourcelink_package_source="$sourcelink_repo/src/Microsoft.Build.Tasks.Git"
+sourcelink_payload="$sourcelink_repo/artifacts/bin/Microsoft.Build.Tasks.Git/$configuration/$sourcelink_tfm"
+sourcelink_common_payload="$sourcelink_repo/artifacts/bin/Microsoft.SourceLink.Common/$configuration/$sourcelink_tfm"
+roslyn_tasks_payload="$roslyn_repo/artifacts/bin/Microsoft.Build.Tasks.CodeAnalysis/$configuration/$roslyn_tfm"
 
 require_file "$sdk_payload/MSBuild.dll"
 require_file "$sdk_payload/Sdks/Microsoft.NET.Sdk/targets/Microsoft.NET.Sdk.targets"
@@ -202,7 +222,11 @@ require_file "$msbuild_payload/MSBuild.dll"
 require_file "$msbuild_payload/Microsoft.Common.CurrentVersion.targets"
 require_directory "$msbuild_bootstrap_root/sdk"
 require_file "$sourcelink_payload/Microsoft.Build.Tasks.Git.dll"
-require_file "$sourcelink_package_source/build/Microsoft.Build.Tasks.Git.targets"
+require_file "$sourcelink_repo/src/Microsoft.Build.Tasks.Git/build/Microsoft.Build.Tasks.Git.targets"
+require_file "$sourcelink_common_payload/Microsoft.SourceLink.Common.dll"
+require_file "$sourcelink_repo/src/SourceLink.Common/build/InitializeSourceControlInformation.targets"
+require_file "$sourcelink_repo/src/SourceLink.Common/build/Microsoft.SourceLink.Common.targets"
+require_file "$roslyn_tasks_payload/Microsoft.Build.Tasks.CodeAnalysis.dll"
 
 msbuild_bootstrap_sdk=""
 for candidate in "$msbuild_bootstrap_root/sdk"/*; do
@@ -233,25 +257,47 @@ echo "Overlaying MSBuild..."
 rsync -a --exclude '/Roslyn/' --exclude '/Sdks/' "$msbuild_bootstrap_sdk/" "$composite_sdk/"
 
 echo "Overlaying SourceLink..."
-for package_directory in build buildMultiTargeting buildTransitive; do
-  source_directory="$sourcelink_package_source/$package_directory"
-  if [[ -d "$source_directory" ]]; then
-    mkdir -p "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/$package_directory"
-    rsync -a "$source_directory/" "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/$package_directory/"
+for package in Microsoft.Build.Tasks.Git Microsoft.SourceLink.Common Microsoft.SourceLink.AzureRepos.Git Microsoft.SourceLink.Bitbucket.Git Microsoft.SourceLink.GitHub Microsoft.SourceLink.GitLab; do
+  if [[ "$package" == "Microsoft.Build.Tasks.Git" ]]; then
+    package_source="$sourcelink_repo/src/Microsoft.Build.Tasks.Git"
+  else
+    package_source="$sourcelink_repo/src/${package#Microsoft.}"
+  fi
+
+  package_output="$sourcelink_repo/artifacts/bin/$package/$configuration"
+  composite_package="$composite_sdk/Sdks/$package"
+
+  [[ -d "$composite_package" ]] || continue
+  require_directory "$package_source"
+
+  for package_directory in build buildMultiTargeting buildTransitive; do
+    source_directory="$package_source/$package_directory"
+    if [[ -d "$source_directory" ]]; then
+      mkdir -p "$composite_package/$package_directory"
+      rsync -a "$source_directory/" "$composite_package/$package_directory/"
+    fi
+  done
+
+  if [[ "$package" == "Microsoft.Build.Tasks.Git" ]]; then
+    mkdir -p "$composite_package/tools/net"
+    rsync -a --exclude '/publish/' "$sourcelink_payload/" "$composite_package/tools/net/"
+    if [[ -f "$sourcelink_payload/publish/System.IO.Hashing.dll" ]]; then
+      cp "$sourcelink_payload/publish/System.IO.Hashing.dll" "$composite_package/tools/net/"
+    fi
+  else
+    require_directory "$package_output/$sourcelink_tfm"
+    mkdir -p "$composite_package/tools/net"
+    rsync -a "$package_output/$sourcelink_tfm/" "$composite_package/tools/net/"
+  fi
+
+  if [[ -d "$package_output/$sourcelink_framework_tfm" ]]; then
+    mkdir -p "$composite_package/tools/netframework"
+    rsync -a "$package_output/$sourcelink_framework_tfm/" "$composite_package/tools/netframework/"
   fi
 done
 
-mkdir -p "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/tools/net"
-rsync -a "$sourcelink_payload/" "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/tools/net/"
-
-if [[ -d "$sourcelink_framework_payload" ]]; then
-  mkdir -p "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/tools/netframework"
-  for file in Microsoft.Build.Tasks.Git.dll System.IO.Hashing.dll; do
-    if [[ -f "$sourcelink_framework_payload/$file" ]]; then
-      cp "$sourcelink_framework_payload/$file" "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/tools/netframework/$file"
-    fi
-  done
-fi
+echo "Overlaying Roslyn MSBuild tasks..."
+cp "$roslyn_tasks_payload/Microsoft.Build.Tasks.CodeAnalysis.dll" "$composite_sdk/Roslyn/Microsoft.Build.Tasks.CodeAnalysis.dll"
 
 cat > "$stage_dir/msbuild-hardened" <<EOF
 #!/usr/bin/env bash
@@ -272,6 +318,7 @@ sdk-version=$sdk_version
 msbuild=$(repository_revision "$msbuild_repo")
 sdk=$(repository_revision "$sdk_repo")
 sourcelink=$(repository_revision "$sourcelink_repo")
+roslyn=$(repository_revision "$roslyn_repo")
 EOF
 
 cmp -s "$msbuild_payload/MSBuild.dll" "$composite_sdk/MSBuild.dll" ||
@@ -280,10 +327,18 @@ cmp -s "$msbuild_payload/Microsoft.Common.CurrentVersion.targets" "$composite_sd
   fail "composite common targets do not match the local MSBuild build"
 cmp -s "$sdk_payload/Sdks/Microsoft.NET.Sdk/targets/Microsoft.NET.Sdk.targets" "$composite_sdk/Sdks/Microsoft.NET.Sdk/targets/Microsoft.NET.Sdk.targets" ||
   fail "composite SDK targets do not match the local SDK build"
-cmp -s "$sourcelink_package_source/build/Microsoft.Build.Tasks.Git.targets" "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/build/Microsoft.Build.Tasks.Git.targets" ||
+cmp -s "$sourcelink_repo/src/Microsoft.Build.Tasks.Git/build/Microsoft.Build.Tasks.Git.targets" "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/build/Microsoft.Build.Tasks.Git.targets" ||
   fail "composite SourceLink targets do not match the local SourceLink checkout"
 cmp -s "$sourcelink_payload/Microsoft.Build.Tasks.Git.dll" "$composite_sdk/Sdks/Microsoft.Build.Tasks.Git/tools/net/Microsoft.Build.Tasks.Git.dll" ||
   fail "composite SourceLink task assembly does not match the local SourceLink build"
+cmp -s "$sourcelink_repo/src/SourceLink.Common/build/InitializeSourceControlInformation.targets" "$composite_sdk/Sdks/Microsoft.SourceLink.Common/build/InitializeSourceControlInformation.targets" ||
+  fail "composite SourceLink initialization targets do not match the local SourceLink checkout"
+cmp -s "$sourcelink_repo/src/SourceLink.Common/build/Microsoft.SourceLink.Common.targets" "$composite_sdk/Sdks/Microsoft.SourceLink.Common/build/Microsoft.SourceLink.Common.targets" ||
+  fail "composite SourceLink common targets do not match the local SourceLink checkout"
+cmp -s "$sourcelink_common_payload/Microsoft.SourceLink.Common.dll" "$composite_sdk/Sdks/Microsoft.SourceLink.Common/tools/net/Microsoft.SourceLink.Common.dll" ||
+  fail "composite SourceLink common task assembly does not match the local SourceLink build"
+cmp -s "$roslyn_tasks_payload/Microsoft.Build.Tasks.CodeAnalysis.dll" "$composite_sdk/Roslyn/Microsoft.Build.Tasks.CodeAnalysis.dll" ||
+  fail "composite Roslyn task assembly does not match the local Roslyn build"
 
 "$stage_dir/msbuild-hardened" -version -nologo >/dev/null
 
