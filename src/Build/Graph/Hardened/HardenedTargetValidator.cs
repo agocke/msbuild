@@ -1565,7 +1565,8 @@ internal sealed class HardenedTargetValidator
             }
 
             if (unionFileWrites &&
-                MSBuildNameIgnoreCaseComparer.Default.Equals(itemType, "FileWrites"))
+                (MSBuildNameIgnoreCaseComparer.Default.Equals(itemType, "FileWrites") ||
+                 MSBuildNameIgnoreCaseComparer.Default.Equals(itemType, "FileWritesShareable")))
             {
                 UnionConcreteItems(joined.Lookup, states, itemType);
                 if (!combinedState.IsStatic)

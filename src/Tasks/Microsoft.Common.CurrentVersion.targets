@@ -6169,15 +6169,83 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     Files written in prior builds are not removed from Clean cache.
     ============================================================
     -->
+  <PropertyGroup>
+    <_CleanRecordFileWritesDependsOn Condition="'$(MSBuildHardenedGraph)' != 'true'">_CleanGetCurrentAndPriorFileWrites</_CleanRecordFileWritesDependsOn>
+  </PropertyGroup>
+
   <Target
        Name="_CleanRecordFileWrites"
-       DependsOnTargets="_CleanGetCurrentAndPriorFileWrites">
+       DependsOnTargets="$(_CleanRecordFileWritesDependsOn)">
+
+    <!--
+        CoreBuild may fail before or after _CleanGetCurrentAndPriorFileWrites. In hardened mode,
+        derive fresh private items from the failure-path union of FileWrites so the OnError path
+        does not inherit partially-computed clean state.
+        -->
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <_CleanRecordResolvedFilesAbsolute Include="@(_ResolveAssemblyReferenceResolvedFiles->'%(FullPath)')" />
+      <_CleanRecordPriorFileWrites Include="@(_CleanUnfilteredPriorFileWrites)" Exclude="@(_CleanRecordResolvedFilesAbsolute)" />
+    </ItemGroup>
+
+    <FindUnderPathWithDeterministicSemantics
+        Condition="'$(MSBuildHardenedGraph)' == 'true' and !$(TrackFileWritesShareableOutsideOfProjectDirectory)"
+        Path="$(MSBuildProjectDirectory)"
+        Files="@(FileWritesShareable)"
+        UpdateToAbsolutePaths="true">
+      <Output TaskParameter="InPath" ItemName="_CleanRecordFileWritesShareableInProject" />
+    </FindUnderPathWithDeterministicSemantics>
+
+    <FindUnderPathWithDeterministicSemantics
+        Condition="'$(MSBuildHardenedGraph)' == 'true' and !$(TrackFileWritesShareableOutsideOfProjectDirectory)"
+        Path="$(OutDir)"
+        Files="@(FileWrites);@(_CleanRecordFileWritesShareableInProject)"
+        UpdateToAbsolutePaths="true">
+      <Output TaskParameter="InPath" ItemName="_CleanRecordCurrentFileWritesInOutput" />
+    </FindUnderPathWithDeterministicSemantics>
+
+    <FindUnderPathWithDeterministicSemantics
+        Condition="'$(MSBuildHardenedGraph)' == 'true' and $(TrackFileWritesShareableOutsideOfProjectDirectory)"
+        Path="$(OutDir)"
+        Files="@(FileWrites);@(FileWritesShareable)"
+        UpdateToAbsolutePaths="true">
+      <Output TaskParameter="InPath" ItemName="_CleanRecordCurrentFileWritesInOutput" />
+    </FindUnderPathWithDeterministicSemantics>
+
+    <FindUnderPathWithDeterministicSemantics
+        Condition="'$(MSBuildHardenedGraph)' == 'true' and !$(TrackFileWritesShareableOutsideOfProjectDirectory)"
+        Path="$(IntermediateOutputPath)"
+        Files="@(FileWrites);@(_CleanRecordFileWritesShareableInProject)"
+        UpdateToAbsolutePaths="true">
+      <Output TaskParameter="InPath" ItemName="_CleanRecordCurrentFileWritesInIntermediate" />
+    </FindUnderPathWithDeterministicSemantics>
+
+    <FindUnderPathWithDeterministicSemantics
+        Condition="'$(MSBuildHardenedGraph)' == 'true' and $(TrackFileWritesShareableOutsideOfProjectDirectory)"
+        Path="$(IntermediateOutputPath)"
+        Files="@(FileWrites);@(FileWritesShareable)"
+        UpdateToAbsolutePaths="true">
+      <Output TaskParameter="InPath" ItemName="_CleanRecordCurrentFileWritesInIntermediate" />
+    </FindUnderPathWithDeterministicSemantics>
+
+    <ItemGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      <_CleanRecordCurrentFileWritesWithNoReferences
+          Include="@(_CleanRecordCurrentFileWritesInOutput);@(_CleanRecordCurrentFileWritesInIntermediate)"
+          Exclude="@(_CleanRecordResolvedFilesAbsolute)" />
+    </ItemGroup>
 
     <!--
         Merge list of files from prior builds with the current build and then
         remove duplicates.
         -->
-    <RemoveDuplicates Inputs="@(_CleanPriorFileWrites);@(_CleanCurrentFileWrites)">
+    <RemoveDuplicates
+        Condition="'$(MSBuildHardenedGraph)' != 'true'"
+        Inputs="@(_CleanPriorFileWrites);@(_CleanCurrentFileWrites)">
+      <Output TaskParameter="Filtered" ItemName="_CleanUniqueFileWrites"/>
+    </RemoveDuplicates>
+
+    <RemoveDuplicates
+        Condition="'$(MSBuildHardenedGraph)' == 'true'"
+        Inputs="@(_CleanRecordPriorFileWrites);@(_CleanRecordCurrentFileWritesWithNoReferences)">
       <Output TaskParameter="Filtered" ItemName="_CleanUniqueFileWrites"/>
     </RemoveDuplicates>
 

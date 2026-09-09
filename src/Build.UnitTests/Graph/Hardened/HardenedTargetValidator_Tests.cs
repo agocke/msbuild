@@ -1676,31 +1676,33 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
         exception.Message.ShouldContain("failure paths of target 'Build'");
     }
 
-    [Fact]
-    public void OnErrorUnionsFileWritesAcrossFailurePaths()
+    [Theory]
+    [InlineData("FileWrites")]
+    [InlineData("FileWritesShareable")]
+    public void OnErrorUnionsCleanFileWritesAcrossFailurePaths(string itemType)
     {
         using TestEnvironment environment = TestEnvironment.Create(_output);
         ProjectInstance project = CreateProjectInstance(
             environment,
-            """
+            $"""
             <Project>
               <Target Name="Build">
                 <ItemGroup>
-                  <FileWrites Include="first.output" />
+                  <{itemType} Include="first.output" />
                 </ItemGroup>
                 <Generate />
                 <ItemGroup>
-                  <FileWrites Include="second.output" />
+                  <{itemType} Include="second.output" />
                 </ItemGroup>
                 <Generate />
                 <OnError ExecuteTargets="Cleanup" />
               </Target>
               <Target Name="Cleanup">
-                <PureConsume Input="@(FileWrites)" />
+                <PureConsume Input="@({itemType})" />
               </Target>
             </Project>
             """);
-        List<string[]> observedFileWrites = [];
+        List<string[]> observedItems = [];
         HardenedTargetValidator validator = new(
             new Dictionary<string, HardenedTaskClassification>
             {
@@ -1711,13 +1713,13 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             {
                 if (task.Name == "PureConsume")
                 {
-                    observedFileWrites.Add(DescribeItemSpecs(lookup.GetItems("FileWrites")));
+                    observedItems.Add(DescribeItemSpecs(lookup.GetItems(itemType)));
                 }
             });
 
         validator.Validate(project, "Build").ShouldBeEmpty();
 
-        observedFileWrites.ShouldHaveSingleItem()
+        observedItems.ShouldHaveSingleItem()
             .ShouldBe(["first.output", "second.output"]);
     }
 
@@ -3182,6 +3184,39 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
 
         DescribeItemSpecs(validator.GetValidationLookupForTesting().GetItems("FileWrites"))
             .ShouldBe(["out/apphost-output"]);
+    }
+
+    [Fact]
+    public void CommonTargetsRecomputesHardenedCleanWritesAcrossOnErrorFailurePaths()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(_output);
+        ProjectInstance project = CreateProjectInstance(
+            environment,
+            """
+            <Project>
+              <PropertyGroup>
+                <OutDir>out/</OutDir>
+                <IntermediateOutputPath>obj/</IntermediateOutputPath>
+              </PropertyGroup>
+              <Import Project="$(MSBuildBinPath)\Microsoft.Common.CurrentVersion.targets" />
+              <Target Name="First">
+                <ItemGroup>
+                  <FileWrites Include="$(OutDir)first.output" />
+                </ItemGroup>
+              </Target>
+              <Target Name="Second">
+                <ItemGroup>
+                  <FileWrites Include="$(IntermediateOutputPath)second.output" />
+                </ItemGroup>
+              </Target>
+              <Target Name="Last" />
+              <Target Name="Build" DependsOnTargets="First;Second;Last">
+                <OnError ExecuteTargets="_CleanRecordFileWrites" />
+              </Target>
+            </Project>
+            """);
+
+        BuildHardenedProject(project);
     }
 
     [Fact]
