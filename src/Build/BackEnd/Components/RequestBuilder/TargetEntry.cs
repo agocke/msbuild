@@ -94,7 +94,7 @@ namespace Microsoft.Build.BackEnd
         private ProjectTargetInstance _target;
 
         /// <summary>
-        /// The optional compiled task-site plan for <see cref="_target"/>.
+        /// The optional compiled action plan for <see cref="_target"/>.
         /// </summary>
         private CompiledTargetPlan _compiledTargetPlan;
 
@@ -342,6 +342,34 @@ namespace Microsoft.Build.BackEnd
             // Resolve the target now, since from this point on we are going to be doing work with the actual instance.
             GetTargetInstance();
 
+            if (_compiledTargetPlan != null)
+            {
+                if (_compiledTargetPlan.TryGetConditionDecision(
+                        _expander,
+                        out CompiledTargetPreBodyDecision decision))
+                {
+                    if (decision.Kind ==
+                        CompiledTargetPreBodyDecisionKind
+                            .ConditionFalse)
+                    {
+                        CompleteForFalseCompiledCondition(
+                            projectLoggingContext);
+                        return new List<TargetSpecification>();
+                    }
+
+                    _compiledTargetPlan = null;
+                }
+
+                if (_compiledTargetPlan != null)
+                {
+                    _state = TargetEntryState.Execution;
+                    return _compiledTargetPlan
+                        .EvaluateDependencies(_expander);
+                }
+
+                _compiledTargetPlan = null;
+            }
+
             // We first make sure no batching was attempted with the target's condition.
             // UNDONE: (Improvement) We want to allow this actually.  In order to do this we need to determine what the
             // batching buckets are, and if there are any which aren't empty, return our list of dependencies.
@@ -424,13 +452,22 @@ namespace Microsoft.Build.BackEnd
             try
             {
                 VerifyState(_state, TargetEntryState.Execution);
-                Assumed.False(_isExecuting, $"Target {_target.Name} is already executing");
+                Assumed.False(
+                    _isExecuting,
+                    $"Target {_compiledTargetPlan?.TargetName ?? _target.Name} is already executing");
                 _cancellationToken = cancellationToken;
                 _isExecuting = true;
 
                 // Generate the batching buckets.  Note that each bucket will get a lookup based on the baseLookup.  This lookup will be in its
                 // own scope, which we will collapse back down into the baseLookup at the bottom of the function.
-                List<ItemBucket> buckets = BatchingEngine.PrepareBatchingBuckets(GetBatchableParametersForTarget(), _baseLookup, _target.Location, null);
+                List<ItemBucket> buckets =
+                    _compiledTargetPlan?.PrepareTargetBuckets(
+                        _baseLookup) ??
+                    BatchingEngine.PrepareBatchingBuckets(
+                        GetBatchableParametersForTarget(),
+                        _baseLookup,
+                        _target.Location,
+                        null);
 
                 WorkUnitResult aggregateResult = new WorkUnitResult();
                 TargetLoggingContext targetLoggingContext = null;
@@ -479,8 +516,41 @@ namespace Microsoft.Build.BackEnd
 
                         // UNDONE: (Refactor) Refactor TargetUpToDateChecker to take a logging context, not a logging service.
                         MSBuildEventSource.Log.TargetUpToDateStart();
-                        TargetUpToDateChecker dependencyAnalyzer = new TargetUpToDateChecker(requestEntry.RequestConfiguration.Project, _target, targetLoggingContext.LoggingService, targetLoggingContext.BuildEventContext);
-                        DependencyAnalysisResult dependencyResult = dependencyAnalyzer.PerformDependencyAnalysis(bucket, _host.BuildParameters.Question, out changedTargetInputs, out upToDateTargetInputs);
+                        DependencyAnalysisResult dependencyResult;
+                        if (_compiledTargetPlan != null)
+                        {
+                            CompiledTargetPreBodyDecision decision =
+                                _compiledTargetPlan.EvaluateUpToDate(
+                                    requestEntry.RequestConfiguration.Project,
+                                    bucket,
+                                    targetLoggingContext.LoggingService,
+                                    targetLoggingContext.BuildEventContext,
+                                    _host.BuildParameters.Question);
+                            dependencyResult = decision.Kind switch
+                            {
+                                CompiledTargetPreBodyDecisionKind
+                                    .SkipUpToDate =>
+                                    decision.AnalysisResult,
+                                CompiledTargetPreBodyDecisionKind
+                                    .ExecuteIncrementally =>
+                                    DependencyAnalysisResult
+                                        .IncrementalBuild,
+                                CompiledTargetPreBodyDecisionKind
+                                    .ExecuteFully =>
+                                    DependencyAnalysisResult.FullBuild,
+                                _ => throw new InternalErrorException(
+                                    "Unexpected compiled target pre-body decision."),
+                            };
+                            changedTargetInputs =
+                                decision.ChangedTargetInputs;
+                            upToDateTargetInputs =
+                                decision.UpToDateTargetInputs;
+                        }
+                        else
+                        {
+                            TargetUpToDateChecker dependencyAnalyzer = new TargetUpToDateChecker(requestEntry.RequestConfiguration.Project, _target, targetLoggingContext.LoggingService, targetLoggingContext.BuildEventContext);
+                            dependencyResult = dependencyAnalyzer.PerformDependencyAnalysis(bucket, _host.BuildParameters.Question, out changedTargetInputs, out upToDateTargetInputs);
+                        }
                         MSBuildEventSource.Log.TargetUpToDateStop((int)dependencyResult);
 
                         switch (dependencyResult)
@@ -489,7 +559,12 @@ namespace Microsoft.Build.BackEnd
                             case DependencyAnalysisResult.FullBuild:
                             case DependencyAnalysisResult.IncrementalBuild:
                             case DependencyAnalysisResult.SkipUpToDate:
-                                if (dependencyResult != DependencyAnalysisResult.SkipUpToDate && _host.BuildParameters.Question && !string.IsNullOrEmpty(_target.Inputs) && !string.IsNullOrEmpty(_target.Outputs))
+                                if (dependencyResult != DependencyAnalysisResult.SkipUpToDate &&
+                                    _host.BuildParameters.Question &&
+                                    (_compiledTargetPlan?.HasDeclaredInputs ??
+                                     !string.IsNullOrEmpty(_target.Inputs)) &&
+                                    (_compiledTargetPlan?.HasDeclaredOutputs ??
+                                     !string.IsNullOrEmpty(_target.Outputs)))
                                 {
                                     targetSuccess = false;
                                     aggregateResult = aggregateResult.AggregateResult(new WorkUnitResult(WorkUnitResultCode.Canceled, WorkUnitActionCode.Stop, null));
@@ -817,116 +892,58 @@ namespace Microsoft.Build.BackEnd
         /// </returns>
         private async ValueTask<WorkUnitResult> ProcessBucket(ITaskBuilder taskBuilder, TargetLoggingContext targetLoggingContext, TaskExecutionMode mode, Lookup lookupForInference, Lookup lookupForExecution)
         {
+            if (_compiledTargetPlan != null)
+            {
+                using var frame = new CompiledTargetExecutionFrame(
+                    _host,
+                    _requestEntry,
+                    _targetBuilderCallback,
+                    targetLoggingContext,
+                    taskBuilder,
+                    mode,
+                    lookupForInference,
+                    lookupForExecution,
+                    _cancellationToken);
+                return await _compiledTargetPlan.ExecuteAsync(frame);
+            }
+
             WorkUnitResultCode aggregatedTaskResult = WorkUnitResultCode.Success;
             WorkUnitActionCode finalActionCode = WorkUnitActionCode.Continue;
             WorkUnitResult lastResult = new WorkUnitResult(WorkUnitResultCode.Success, WorkUnitActionCode.Continue, null);
-            FastTaskExecutionFrame fastTaskFrame = null;
 
-            int currentTask = 0;
-
-            try
+            for (int currentTask = 0;
+                 currentTask < _target.Children.Count &&
+                 !_cancellationToken.IsCancellationRequested;
+                 currentTask++)
             {
-                // Walk through all of the tasks and execute them in order.
-                for (; (currentTask < _target.Children.Count) && !_cancellationToken.IsCancellationRequested; ++currentTask)
+                lastResult = await taskBuilder.ExecuteTask(
+                    targetLoggingContext,
+                    _requestEntry,
+                    _targetBuilderCallback,
+                    _target.Children[currentTask],
+                    action: null,
+                    mode,
+                    lookupForInference,
+                    lookupForExecution,
+                    _cancellationToken);
+
+                if (lastResult.ResultCode == WorkUnitResultCode.Failed)
                 {
-                    ProjectTargetInstanceChild targetChildInstance = _target.Children[currentTask];
-                    CompiledTaskAction action = _compiledTargetPlan?.GetAction(currentTask);
-                    string fastTaskName =
-                        (targetChildInstance as ProjectTaskInstance)?.Name;
-                    long fastTaskSiteStart =
-                        action == null
-                            ? 0
-                            : BuildExecutionInstrumentation.StartTimestamp();
-                    FastTaskInvocation fastInvocation;
-                    using (action != null
-                               ? BuildExecutionInstrumentation.MeasureFastTaskDetail(
-                                   BuildExecutionMetric.FastTaskLookup,
-                                   fastTaskName,
-                                   targetLoggingContext.Target.Name)
-                               : default)
-                    {
-                        fastInvocation = action == null
-                            ? default
-                            : action.GetFastInvocation();
-                    }
-
-                    if (fastInvocation.IsValid &&
-                        mode == TaskExecutionMode.ExecuteTaskAndGatherOutputs &&
-                        targetChildInstance is ProjectTaskInstance taskInstance)
-                    {
-                        if (fastTaskFrame == null)
-                        {
-                            using var frameMeasurement =
-                                BuildExecutionInstrumentation.MeasureFastTaskDetail(
-                                    BuildExecutionMetric.FastTaskFrame,
-                                    taskInstance.Name,
-                                    targetLoggingContext.Target.Name);
-                            fastTaskFrame = new FastTaskExecutionFrame(
-                                _host,
-                                _requestEntry,
-                                _targetBuilderCallback,
-                                targetLoggingContext,
-                                taskInstance,
-                                lookupForExecution,
-                                _cancellationToken);
-                        }
-
-                        fastTaskFrame.SetTaskInstance(taskInstance);
-
-                        if (fastInvocation.CanExecute(fastTaskFrame))
-                        {
-                            try
-                            {
-                                lastResult =
-                                    fastInvocation.Execute(fastTaskFrame);
-                            }
-                            finally
-                            {
-                                BuildExecutionInstrumentation.RecordSince(
-                                    BuildExecutionMetric.FastTaskSite,
-                                    fastTaskSiteStart,
-                                    taskInstance.Name,
-                                    targetLoggingContext.Target.Name);
-                            }
-                        }
-                        else
-                        {
-                            lastResult = await taskBuilder.ExecuteTask(
-                                targetLoggingContext,
-                                _requestEntry,
-                                _targetBuilderCallback,
-                                targetChildInstance,
-                                action,
-                                mode,
-                                lookupForInference,
-                                lookupForExecution,
-                                _cancellationToken);
-                        }
-                    }
-                    else
-                    {
-                        lastResult = await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, action, mode, lookupForInference, lookupForExecution, _cancellationToken);
-                    }
-
-                    if (lastResult.ResultCode == WorkUnitResultCode.Failed)
-                    {
-                        aggregatedTaskResult = WorkUnitResultCode.Failed;
-                    }
-                    else if (lastResult.ResultCode == WorkUnitResultCode.Success && aggregatedTaskResult != WorkUnitResultCode.Failed)
-                    {
-                        aggregatedTaskResult = WorkUnitResultCode.Success;
-                    }
-
-                    if (lastResult.ActionCode == WorkUnitActionCode.Stop)
-                    {
-                        finalActionCode = WorkUnitActionCode.Stop;
-                        break;
-                    }
+                    aggregatedTaskResult = WorkUnitResultCode.Failed;
                 }
-            }
-            finally
-            {
-                fastTaskFrame?.Dispose();
+                else if (lastResult.ResultCode ==
+                             WorkUnitResultCode.Success &&
+                         aggregatedTaskResult !=
+                             WorkUnitResultCode.Failed)
+                {
+                    aggregatedTaskResult = WorkUnitResultCode.Success;
+                }
+
+                if (lastResult.ActionCode == WorkUnitActionCode.Stop)
+                {
+                    finalActionCode = WorkUnitActionCode.Stop;
+                    break;
+                }
             }
 
             if (_cancellationToken.IsCancellationRequested)
@@ -974,6 +991,57 @@ namespace Microsoft.Build.BackEnd
         private void VerifyState(TargetEntryState actual, TargetEntryState expected)
         {
             Assumed.Equal(actual, expected, $"Expected state {expected}.  Got {actual}");
+        }
+
+        private void CompleteForFalseCompiledCondition(
+            ProjectLoggingContext projectLoggingContext)
+        {
+            _targetResult = new TargetResult(
+                Array.Empty<TaskItem>(),
+                new WorkUnitResult(
+                    WorkUnitResultCode.Skipped,
+                    WorkUnitActionCode.Continue,
+                    null),
+                projectLoggingContext.BuildEventContext,
+                TargetSkipReason.ConditionWasFalse);
+            _state = TargetEntryState.Completed;
+
+            if (projectLoggingContext.LoggingService
+                    .MinimumRequiredMessageImportance <=
+                    MessageImportance.Low ||
+                projectLoggingContext.LoggingService
+                    .OnlyLogCriticalEvents)
+            {
+                return;
+            }
+
+            string expanded =
+                _expander.ExpandIntoStringAndUnescape(
+                    _compiledTargetPlan.TargetCondition,
+                    ExpanderOptions.ExpandPropertiesAndItems |
+                    ExpanderOptions.LeavePropertiesUnexpandedOnError |
+                    ExpanderOptions.Truncate,
+                    _compiledTargetPlan.ConditionLocation);
+            var skippedTargetEventArgs =
+                new TargetSkippedEventArgs(message: null)
+                {
+                    BuildEventContext =
+                        projectLoggingContext.BuildEventContext,
+                    TargetName =
+                        _compiledTargetPlan.TargetName,
+                    TargetFile =
+                        _compiledTargetPlan.TargetLocation.File,
+                    ParentTarget =
+                        ParentEntry?.Name,
+                    BuildReason = BuildReason,
+                    SkipReason =
+                        TargetSkipReason.ConditionWasFalse,
+                    Condition =
+                        _compiledTargetPlan.TargetCondition,
+                    EvaluatedCondition = expanded
+                };
+            projectLoggingContext.LogBuildEvent(
+                skippedTargetEventArgs);
         }
 
         /// <summary>

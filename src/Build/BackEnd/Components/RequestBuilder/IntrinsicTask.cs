@@ -83,7 +83,7 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         /// <param name="list">The list of strings to which this should be added, if it is not empty.</param>
         /// <param name="value">The string to add.</param>
-        protected static void AddIfNotEmptyString(List<string> list, string value)
+        internal static void AddIfNotEmptyString(List<string> list, string value)
         {
             if (!String.IsNullOrEmpty(value))
             {

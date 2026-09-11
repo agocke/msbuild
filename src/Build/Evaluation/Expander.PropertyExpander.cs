@@ -33,6 +33,16 @@ internal partial class Expander<P, I>
     where P : class, IProperty
     where I : class, IItem
 {
+    internal string GetEscapedPropertyValue(
+        string propertyName,
+        IElementLocation elementLocation) =>
+        PropertyExpander.GetEscapedPropertyValue(
+            propertyName,
+            _properties,
+            elementLocation,
+            _propertiesUseTracker,
+            _fileSystem);
+
     /// <summary>
     /// Expands property expressions, like $(Configuration) and $(Registry:HKEY_LOCAL_MACHINE\Software\Vendor\Tools@TaskLocation).
     /// </summary>
@@ -67,6 +77,22 @@ internal partial class Expander<P, I>
             _propertiesUseTracker = propertiesUseTracker;
             _fileSystem = fileSystem;
             _isTruncationEnabled = IsTruncationEnabled(options);
+        }
+
+        internal static string GetEscapedPropertyValue(
+            string propertyName,
+            IPropertyProvider<P> properties,
+            IElementLocation elementLocation,
+            PropertiesUseTracker propertiesUseTracker,
+            IFileSystem fileSystem)
+        {
+            var propertyExpander = new PropertyExpander(
+                properties,
+                ExpanderOptions.ExpandProperties,
+                elementLocation,
+                propertiesUseTracker,
+                fileSystem);
+            return (string)propertyExpander.LookupProperty(propertyName);
         }
 
         /// <summary>

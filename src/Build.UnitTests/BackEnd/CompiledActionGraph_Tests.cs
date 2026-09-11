@@ -3,9 +3,16 @@
 
 using System;
 using System.Collections.Generic;
+#if NET
+using System.Diagnostics.Metrics;
+#endif
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
+#if NET
+using NuGet.Frameworks;
+#endif
 #if FEATURE_ASSEMBLYLOADCONTEXT
 using System.Reflection;
 using System.Runtime.Loader;
@@ -57,8 +64,14 @@ namespace Microsoft.Build.UnitTests.BackEnd
                     peer,
                     peer.Targets["Build"]);
             Assert.Same(
+                originalPlan.SourceProgram,
+                peerPlan.SourceProgram);
+            Assert.Same(
                 originalPlan.GetAction(0).Program,
                 peerPlan.GetAction(0).Program);
+            Assert.NotSame(
+                originalPlan.GetAction(0),
+                peerPlan.GetAction(0));
 
             original.TranslateEntireState = true;
             ((ITranslatable)original).Translate(TranslationHelpers.GetWriteTranslator());
@@ -66,7 +79,2136 @@ namespace Microsoft.Build.UnitTests.BackEnd
             CompiledTargetPlan translatedPlan = CompiledTargetPlan.PartiallyEvaluate(translated, translated.Targets["Build"]);
 
             Assert.NotSame(originalPlan, translatedPlan);
+            Assert.NotSame(
+                originalPlan.SourceProgram,
+                translatedPlan.SourceProgram);
             Assert.NotSame(originalPlan.GetAction(0).Template, translatedPlan.GetAction(0).Template);
+        }
+
+        [Fact]
+        public void TargetPlanLowersAndExecutesOrderedMixedActions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <LocalValue>property</LocalValue>
+                </PropertyGroup>
+                <ItemGroup>
+                  <Generated Include="$(LocalValue)" />
+                </ItemGroup>
+                <CompiledActionGraphTestTask
+                    Text="$(LocalValue)"
+                    Values="@(Generated)" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Equal(3, plan.ActionCount);
+            Assert.Equal(
+                CompiledTargetActionKind.PropertyGroup,
+                plan.GetActionRecord(0).Kind);
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
+            Assert.Equal(
+                CompiledTargetActionKind.ItemGroup,
+                plan.GetActionRecord(1).Kind);
+            Assert.NotNull(
+                plan.GetActionRecord(1).ItemGroupAction);
+            Assert.Equal(
+                CompiledTargetActionKind.Task,
+                plan.GetActionRecord(2).Kind);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "property",
+                instance.GetPropertyValue("LocalValue"));
+            Assert.Equal(
+                "property",
+                Assert.Single(instance.GetItems("Generated"))
+                    .EvaluatedInclude);
+            logger.AssertLogContains(
+                "compiled-action:property:0:property");
+            Assert.NotNull(plan.GetAction(2).GetFastAction());
+        }
+
+        [Fact]
+        public void DirectIntrinsicActionsPreserveFalseConditions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup Condition="'$(RunIntrinsic)' == 'true'">
+                  <LocalValue>property</LocalValue>
+                </PropertyGroup>
+                <ItemGroup Condition="'$(RunIntrinsic)' == 'true'">
+                  <Generated Include="item" />
+                </ItemGroup>
+                <CompiledActionGraphTestTask
+                    Text="$(Text)"
+                    Values="@(Generated)" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
+            Assert.NotNull(
+                plan.GetActionRecord(1).ItemGroupAction);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                string.Empty,
+                instance.GetPropertyValue("LocalValue"));
+            Assert.Empty(instance.GetItems("Generated"));
+            logger.AssertLogContains("compiled-action:first:0:");
+        }
+
+        [Fact]
+        public void DirectIntrinsicActionsRunDuringOutputInference()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            string upToDateFile =
+                environment.CreateFile("up-to-date.marker", string.Empty)
+                    .Path;
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <Target
+                      Name="Build"
+                      Inputs="{upToDateFile}"
+                      Outputs="{upToDateFile}">
+                    <PropertyGroup>
+                      <InferredValue>inferred</InferredValue>
+                    </PropertyGroup>
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "inferred",
+                instance.GetPropertyValue("InferredValue"));
+        }
+
+        [Fact]
+        public void CompiledItemGroupRunsDuringOutputInference()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            string upToDateFile =
+                environment.CreateFile(
+                    "item-group-up-to-date.marker",
+                    string.Empty).Path;
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <Target
+                      Name="Build"
+                      Inputs="{upToDateFile}"
+                      Outputs="{upToDateFile}">
+                    <ItemGroup>
+                      <InferredItem Include="inferred" />
+                    </ItemGroup>
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "inferred",
+                Assert.Single(instance.GetItems("InferredItem"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void TargetPlanOwnsImmutablePreBodyPrograms()
+        {
+            using ProjectFromString projectFromString = new("""
+                <Project>
+                  <Target
+                      Name="Build"
+                      DependsOnTargets="$(Dependency)"
+                      Inputs="@(Input)"
+                      Outputs="@(Input->'%(FullPath).out')" />
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            CompiledTargetPlan plan =
+                CompiledTargetPlan.PartiallyEvaluate(
+                    instance,
+                    instance.Targets["Build"]);
+
+            Assert.NotNull(plan);
+            Assert.NotNull(plan.SourceProgram.TargetBatching);
+            Assert.NotNull(
+                plan.SourceProgram.UpToDateSpecification
+                    .InputsProgram);
+            Assert.NotNull(
+                plan.SourceProgram.UpToDateSpecification
+                    .OutputsProgram);
+            Assert.Equal(
+                "Build",
+                plan.TargetName);
+            Assert.True(plan.HasDeclaredInputs);
+            Assert.True(plan.HasDeclaredOutputs);
+        }
+
+        [Fact]
+        public void CompiledTargetDependencyProgramPreservesOrdering()
+        {
+            using TestEnvironment environment =
+                TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask
+                    Text="$(Prepared)" />
+                """,
+                """
+                <PropertyGroup>
+                  <DependencyTarget>Prepare</DependencyTarget>
+                </PropertyGroup>
+                <Target Name="Prepare">
+                  <PropertyGroup>
+                    <Prepared>dependency-ran</Prepared>
+                  </PropertyGroup>
+                </Target>
+                """,
+                dependsOnTargets: "$(DependencyTarget)"));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            MockLogger logger = Build(
+                instance,
+                out BuildResult result);
+
+            Assert.Equal(
+                BuildResultCode.Success,
+                result.OverallResult);
+            logger.AssertLogContains(
+                "compiled-action:dependency-ran:0:");
+        }
+
+        [Theory]
+        [InlineData("$(Empty)", "output")]
+        [InlineData("input", "$(Empty)")]
+        public void CompiledPreBodyPreservesEmptyInputOutputSkips(
+            string inputs,
+            string outputs)
+        {
+            using TestEnvironment environment =
+                TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <CompiledActionGraphTestTask
+                    Text="should-not-run" />
+                """,
+                targetAttributes:
+                    $"Inputs=\"{inputs}\" Outputs=\"{outputs}\""));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            int compiledPreBodyCount = 0;
+            int actionArrayCount = 0;
+            int fallbackPreBodyCount = 0;
+            using MeterListener listener = ListenForExecutionMetrics(
+                (metric, value) =>
+                {
+                    if (metric ==
+                        nameof(
+                            BuildExecutionMetric
+                                .CompiledTargetPreBody))
+                    {
+                        compiledPreBodyCount += (int)value;
+                    }
+                    else if (metric ==
+                             nameof(
+                                 BuildExecutionMetric
+                                     .CompiledTargetActionArray))
+                    {
+                        actionArrayCount += (int)value;
+                    }
+                    else if (metric ==
+                             nameof(
+                                 BuildExecutionMetric
+                                     .FallbackTargetPreBody))
+                    {
+                        fallbackPreBodyCount += (int)value;
+                    }
+                });
+
+            MockLogger logger = Build(
+                instance,
+                out BuildResult result);
+
+            Assert.Equal(
+                BuildResultCode.Success,
+                result.OverallResult);
+            logger.AssertLogDoesntContain("should-not-run");
+            Assert.Equal(1, compiledPreBodyCount);
+            Assert.Equal(0, actionArrayCount);
+            Assert.Equal(0, fallbackPreBodyCount);
+        }
+
+        [Fact]
+        public void CompiledPreBodyPreservesIncrementalInputPartitions()
+        {
+            using TestEnvironment environment =
+                TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            string upToDateInput =
+                environment.CreateFile(
+                    "incremental-up-to-date.in",
+                    string.Empty).Path;
+            string changedInput =
+                environment.CreateFile(
+                    "incremental-changed.in",
+                    string.Empty).Path;
+            string upToDateOutput =
+                environment.CreateFile(
+                    "incremental-up-to-date.out",
+                    string.Empty).Path;
+            string changedOutput =
+                environment.CreateFile(
+                    "incremental-changed.out",
+                    string.Empty).Path;
+            string upToDateAuxiliaryOutput =
+                environment.CreateFile(
+                    "incremental-up-to-date.aux",
+                    string.Empty).Path;
+            string changedAuxiliaryOutput =
+                environment.CreateFile(
+                    "incremental-changed.aux",
+                    string.Empty).Path;
+            DateTime baseline = DateTime.UtcNow.AddMinutes(-10);
+            File.SetLastWriteTimeUtc(
+                upToDateInput,
+                baseline);
+            File.SetLastWriteTimeUtc(
+                upToDateOutput,
+                baseline.AddMinutes(2));
+            File.SetLastWriteTimeUtc(
+                upToDateAuxiliaryOutput,
+                baseline.AddMinutes(2));
+            File.SetLastWriteTimeUtc(
+                changedOutput,
+                baseline);
+            File.SetLastWriteTimeUtc(
+                changedAuxiliaryOutput,
+                baseline.AddMinutes(2));
+            File.SetLastWriteTimeUtc(
+                changedInput,
+                baseline.AddMinutes(2));
+
+            string upToDateInputName =
+                Path.GetFileName(upToDateInput);
+            string changedInputName =
+                Path.GetFileName(changedInput);
+            TransientTestFile projectFile =
+                environment.CreateFile(
+                    "incremental.proj",
+                    $"""
+                    <Project>
+                      <UsingTask
+                          TaskName="{typeof(CompiledActionGraphTestTask).FullName}"
+                          AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
+                      <ItemGroup>
+                        <Input Include="{upToDateInputName};{changedInputName}" />
+                      </ItemGroup>
+                      <Target
+                          Name="Build"
+                          Inputs="@(Input)"
+                          Outputs="@(Input->'%(Filename).out');@(Input->'%(Filename).aux')">
+                        <CompiledActionGraphTestTask
+                            Text="@(Input)" />
+                      </Target>
+                    </Project>
+                    """);
+            using var projectCollection = new ProjectCollection();
+            ProjectInstance instance =
+                projectCollection.LoadProject(projectFile.Path)
+                    .CreateProjectInstance();
+            int compiledPreBodyCount = 0;
+            int actionArrayCount = 0;
+            int fallbackPreBodyCount = 0;
+            using MeterListener listener = ListenForExecutionMetrics(
+                (metric, value) =>
+                {
+                    if (metric ==
+                        nameof(
+                            BuildExecutionMetric
+                                .CompiledTargetPreBody))
+                    {
+                        compiledPreBodyCount += (int)value;
+                    }
+                    else if (metric ==
+                             nameof(
+                                 BuildExecutionMetric
+                                     .CompiledTargetActionArray))
+                    {
+                        actionArrayCount += (int)value;
+                    }
+                    else if (metric ==
+                             nameof(
+                                 BuildExecutionMetric
+                                     .FallbackTargetPreBody))
+                    {
+                        fallbackPreBodyCount += (int)value;
+                    }
+                });
+
+            MockLogger logger = Build(
+                instance,
+                out BuildResult result);
+
+            Assert.Equal(
+                BuildResultCode.Success,
+                result.OverallResult);
+            logger.AssertLogContains(
+                $"compiled-action:{changedInputName}:0:");
+            logger.AssertLogDoesntContain(
+                $"compiled-action:{upToDateInputName}:0:");
+            Assert.Equal(1, compiledPreBodyCount);
+            Assert.Equal(1, actionArrayCount);
+            Assert.Equal(0, fallbackPreBodyCount);
+        }
+
+        [Fact]
+        public void CompiledItemGroupPreservesOrderedOperationsAndEscaping()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup Condition="'$(RunGroup)' == 'true'">
+                  <Generated
+                      Include="a%3Bb;@(Source);remove-me;skip"
+                      Exclude="skip"
+                      KeepDuplicates="'$(KeepDuplicates)' == 'true'">
+                    <Kind Condition="'$(SetMetadata)' == 'true'">$(Suffix)%3Btail</Kind>
+                  </Generated>
+                  <Generated Remove="remove-me" />
+                  <Generated>
+                    <Updated>$(Suffix)%3Bupdated</Updated>
+                  </Generated>
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <RunGroup>true</RunGroup>
+                  <KeepDuplicates>true</KeepDuplicates>
+                  <SetMetadata>true</SetMetadata>
+                  <Suffix>b</Suffix>
+                </PropertyGroup>
+                <ItemDefinitionGroup>
+                  <Generated>
+                    <FromDefinition>definition</FromDefinition>
+                  </Generated>
+                </ItemDefinitionGroup>
+                <ItemGroup>
+                  <Source Include="copied">
+                    <Origin>source</Origin>
+                  </Source>
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+            CompiledItemGroupAction action =
+                plan.GetActionRecord(0).ItemGroupAction;
+
+            Assert.NotNull(action);
+            Assert.Equal(3, action.OperationCount);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            var outputs =
+                new List<ProjectItemInstance>(
+                    instance.GetItems("Generated"));
+            Assert.Equal(2, outputs.Count);
+            ProjectItemInstance literal =
+                Assert.Single(
+                    outputs,
+                    output => output.EvaluatedInclude == "a;b");
+            ProjectItemInstance copied =
+                Assert.Single(
+                    outputs,
+                    output => output.EvaluatedInclude == "copied");
+            Assert.Equal("source", copied.GetMetadataValue("Origin"));
+            foreach (ProjectItemInstance output in new[] { literal, copied })
+            {
+                Assert.Equal(
+                    "b;tail",
+                    output.GetMetadataValue("Kind"));
+                Assert.Equal(
+                    "b;updated",
+                    output.GetMetadataValue("Updated"));
+                Assert.Equal(
+                    "definition",
+                    output.GetMetadataValue("FromDefinition"));
+            }
+        }
+
+        [Fact]
+        public void CompiledItemGroupPreservesDuplicateElimination()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Generated Include="same;same" KeepDuplicates="false" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Single(instance.GetItems("Generated"));
+        }
+
+        [Fact]
+        public void CompiledItemGroupExpandsItemVectorsIntroducedByProperties()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup Condition="'$(Prefix)(Source)' == 'one;two'">
+                  <Generated Include="value">
+                    <Captured>$(Vector)</Captured>
+                  </Generated>
+                </ItemGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Source Include="one;two" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            instance.SetProperty("Prefix", "@");
+            instance.SetProperty("Vector", "@(Source)");
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "one;two",
+                Assert.Single(instance.GetItems("Generated"))
+                    .GetMetadataValue("Captured"));
+        }
+
+        [Fact]
+        public void CompiledItemGroupPreservesInputLogging()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Generated Include="logged" />
+                  <Generated Remove="logged" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            MockLogger logger = Build(
+                instance,
+                out BuildResult result,
+                logTaskInputs: true);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("Added Item(s):");
+            logger.AssertLogContains("Removed Item(s):");
+        }
+
+        [Fact]
+        public void CompiledItemGroupSupportsTransformsFunctionsAndMetadataFilters()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Generated Include="@(Source->'%(Filename).obj')">
+                    <Names>@(Source->Metadata('Keep')->Distinct())</Names>
+                  </Generated>
+                  <Generated Remove="@(RemoveSource->'%(Filename).obj')" />
+                  <Filtered Include="@(Source)" KeepMetadata="$(MetadataToKeep)" />
+                  <Removed Include="@(Source)" RemoveMetadata="@(MetadataToRemove)" />
+                  <Count Include="@(Source->Count())" />
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <MetadataToKeep>Keep</MetadataToKeep>
+                </PropertyGroup>
+                <ItemGroup>
+                  <Source Include="a.cpp">
+                    <Keep>one</Keep>
+                    <Drop>x</Drop>
+                  </Source>
+                  <Source Include="b.cpp">
+                    <Keep>two</Keep>
+                    <Drop>y</Drop>
+                  </Source>
+                  <RemoveSource Include="a.cpp" />
+                  <MetadataToRemove Include="Drop" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            ProjectItemInstance generated =
+                Assert.Single(instance.GetItems("Generated"));
+            Assert.Equal("b.obj", generated.EvaluatedInclude);
+            Assert.Equal(
+                "one;two",
+                generated.GetMetadataValue("Names"));
+
+            foreach (ProjectItemInstance filtered
+                in instance.GetItems("Filtered"))
+            {
+                Assert.NotEmpty(filtered.GetMetadataValue("Keep"));
+                Assert.Empty(filtered.GetMetadataValue("Drop"));
+            }
+
+            foreach (ProjectItemInstance removed
+                in instance.GetItems("Removed"))
+            {
+                Assert.NotEmpty(removed.GetMetadataValue("Keep"));
+                Assert.Empty(removed.GetMetadataValue("Drop"));
+            }
+
+            Assert.Equal(
+                "2",
+                Assert.Single(instance.GetItems("Count"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupAppliesMetadataFiltersBeforeExplicitMetadata()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Mutable KeepMetadata="Keep">
+                    <Drop>restored</Drop>
+                  </Mutable>
+                </ItemGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Mutable Include="value">
+                    <Keep>preserved</Keep>
+                    <Drop>removed</Drop>
+                  </Mutable>
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            ProjectItemInstance item =
+                Assert.Single(instance.GetItems("Mutable"));
+            Assert.Equal(
+                "preserved",
+                item.GetMetadataValue("Keep"));
+            Assert.Equal(
+                "restored",
+                item.GetMetadataValue("Drop"));
+        }
+
+        [Fact]
+        public void CompiledItemGroupRemovesItemsMatchingMetadata()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Candidate
+                      Remove="@(Reference)"
+                      MatchOnMetadata="$(MatchNames)"
+                      MatchOnMetadataOptions="CaseInsensitive" />
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <MatchNames>Key;Flavor</MatchNames>
+                </PropertyGroup>
+                <ItemGroup>
+                  <Reference Include="r1" Key="A" Flavor="x" />
+                  <Reference Include="r2" Key="B" Flavor="y" />
+                  <Candidate Include="c1" Key="a" Flavor="X" />
+                  <Candidate Include="c2" Key="B" Flavor="z" />
+                  <Candidate Include="c3" Key="C" Flavor="q" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                new[] { "c2", "c3" },
+                instance.GetItems("Candidate")
+                    .Select(item => item.EvaluatedInclude));
+        }
+
+        [Theory]
+        [InlineData(
+            """
+            <Input
+                Include="@(Source, '%(Source.Identity)')" />
+            """)]
+        [InlineData(
+            """
+            <Input Include="value">
+              <Generated>$([System.Guid]::NewGuid())</Generated>
+            </Input>
+            """)]
+        [InlineData(
+            """
+            <Input Include="value"
+                   Condition="$([MSBuild]::VersionGreaterThan('2.0', '1.0'))" />
+            """)]
+        public void ItemGroupFallsBackAsAWholeForUnsupportedOperations(
+            string unsupportedOperation)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                $"""
+                <ItemGroup>
+                  <Simple Include="simple" />
+                  {unsupportedOperation}
+                </ItemGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Source Include="source" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Null(
+                plan.GetActionRecord(0).ItemGroupAction);
+            Assert.Equal(
+                CompiledTargetActionKind.Fallback,
+                plan.GetActionRecord(0).Kind);
+            Assert.Equal(
+                CompiledTargetFallbackKind.ItemGroupIntrinsic,
+                plan.GetActionRecord(0).FallbackKind);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "simple",
+                Assert.Single(instance.GetItems("Simple"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupBatchesMetadataValuesAndConditions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Decomposed Include="@(TargetFramework)">
+                    <Supports>$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', 'net7.0'))</Supports>
+                    <Original>%(Identity)</Original>
+                  </Decomposed>
+                  <Selected
+                      Include="@(Decomposed)"
+                      Condition="'%(Supports)' == 'true' And $(_Marker.Contains('enabled'))" />
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <_Marker>feature-enabled</_Marker>
+                </PropertyGroup>
+                <ItemGroup>
+                  <TargetFramework Include="net6.0;net8.0" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                new[] { "net6.0:false", "net8.0:true" },
+                instance.GetItems("Decomposed").Select(
+                    item =>
+                        $"{item.EvaluatedInclude}:{item.GetMetadataValue("Supports").ToLowerInvariant()}"));
+            ProjectItemInstance selected =
+                Assert.Single(instance.GetItems("Selected"));
+            Assert.Equal("net8.0", selected.EvaluatedInclude);
+            Assert.Equal("net8.0", selected.GetMetadataValue("Original"));
+            Assert.Equal("True", selected.GetMetadataValue("Supports"));
+        }
+
+#if NET
+        [Fact]
+        public void CompiledTargetFrameworkRoutingExecutesDirectly()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <TargetFrameworks>net6.0;net7.0;net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            CompiledItemGroupAction action =
+                plan.GetActionRecord(0).ItemGroupAction;
+            Assert.NotNull(action);
+            Assert.NotNull(action.TargetFrameworkRoutingAction);
+
+            int routingExecutionCount = 0;
+            using MeterListener listener =
+                ListenForTargetFrameworkRouting(
+                    value => routingExecutionCount += (int)value);
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(1, routingExecutionCount);
+            Assert.Equal(
+                new[] { "net6.0", "net7.0", "net8.0" },
+                instance.GetItems("_DecomposedTargetFramework")
+                    .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                new[] { "net7.0", "net8.0" },
+                instance.GetItems(
+                        "_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning")
+                    .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                new[] { "net8.0" },
+                instance.GetItems(
+                        "_TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning")
+                    .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                new[] { "net6.0", "net7.0", "net8.0" },
+                instance.GetItems(
+                        "_TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning")
+                    .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                new[]
+                {
+                    "net6.0|False|True|False|True|True|True",
+                    "net7.0|True|True|False|True|True|True",
+                    "net8.0|True|True|True|True|True|True",
+                },
+                instance.GetItems("_DecomposedTargetFramework")
+                    .Select(DescribeDecomposedTargetFramework));
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingRunsWithInputLogging()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            const string properties = """
+                <PropertyGroup>
+                  <TargetFrameworks>net7.0;net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """;
+            string genericItemGroup =
+                CreateTargetFrameworkRoutingItemGroup().Replace(
+                    "'%(SupportsAot)' == 'true'",
+                    "'%(SupportsAot)' == 'True'",
+                    StringComparison.Ordinal);
+            using ProjectFromString specializedProject = new(
+                CreateProject(
+                    CreateTargetFrameworkRoutingItemGroup(),
+                    properties));
+            using ProjectFromString genericProject = new(
+                CreateProject(genericItemGroup, properties));
+            ProjectInstance specialized =
+                specializedProject.Project.CreateProjectInstance();
+            ProjectInstance generic =
+                genericProject.Project.CreateProjectInstance();
+
+            int routingExecutionCount = 0;
+            using MeterListener listener =
+                ListenForTargetFrameworkRouting(
+                    value => routingExecutionCount += (int)value);
+            MockLogger specializedLogger = Build(
+                specialized,
+                out BuildResult specializedResult,
+                logTaskInputs: true);
+            MockLogger genericLogger = Build(
+                generic,
+                out BuildResult genericResult,
+                logTaskInputs: true);
+
+            Assert.Equal(
+                BuildResultCode.Success,
+                specializedResult.OverallResult);
+            Assert.Equal(
+                BuildResultCode.Success,
+                genericResult.OverallResult);
+            Assert.Equal(1, routingExecutionCount);
+            Assert.Equal(
+                DescribeTaskParameterEvents(genericLogger),
+                DescribeTaskParameterEvents(specializedLogger));
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingMatchesGenericItemGroup()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            const string properties = """
+                <PropertyGroup>
+                  <TargetFrameworks>net6.0;net7.0;net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """;
+            string genericItemGroup =
+                CreateTargetFrameworkRoutingItemGroup().Replace(
+                    "'%(SupportsAot)' == 'true'",
+                    "'%(SupportsAot)' == 'True'",
+                    StringComparison.Ordinal);
+
+            using ProjectFromString specializedProject = new(
+                CreateProject(
+                    CreateTargetFrameworkRoutingItemGroup(),
+                    properties));
+            using ProjectFromString genericProject = new(
+                CreateProject(genericItemGroup, properties));
+            ProjectInstance specialized =
+                specializedProject.Project.CreateProjectInstance();
+            ProjectInstance generic =
+                genericProject.Project.CreateProjectInstance();
+
+            Assert.NotNull(
+                CompiledTargetPlan.PartiallyEvaluate(
+                        specialized,
+                        specialized.Targets["Build"])
+                    .GetActionRecord(0)
+                    .ItemGroupAction.TargetFrameworkRoutingAction);
+            Assert.Null(
+                CompiledTargetPlan.PartiallyEvaluate(
+                        generic,
+                        generic.Targets["Build"])
+                    .GetActionRecord(0)
+                    .ItemGroupAction.TargetFrameworkRoutingAction);
+
+            Build(specialized, out BuildResult specializedResult);
+            Build(generic, out BuildResult genericResult);
+
+            Assert.Equal(
+                BuildResultCode.Success,
+                specializedResult.OverallResult);
+            Assert.Equal(
+                BuildResultCode.Success,
+                genericResult.OverallResult);
+            foreach (string itemType in new[]
+            {
+                "_TargetFramework",
+                "_DecomposedTargetFramework",
+                "_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning",
+                "_TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning",
+                "_TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning",
+            })
+            {
+                Assert.Equal(
+                    DescribeItems(generic, itemType),
+                    DescribeItems(specialized, itemType));
+            }
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingPreservesFunctionErrors()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            const string properties = """
+                <PropertyGroup>
+                  <TargetFrameworks>net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>.NETCoreApp,Version=bogus</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """;
+            string genericItemGroup =
+                CreateTargetFrameworkRoutingItemGroup().Replace(
+                    "'%(SupportsAot)' == 'true'",
+                    "'%(SupportsAot)' == 'True'",
+                    StringComparison.Ordinal);
+
+            using ProjectFromString specializedProject = new(
+                CreateProject(
+                    CreateTargetFrameworkRoutingItemGroup(),
+                    properties));
+            using ProjectFromString genericProject = new(
+                CreateProject(genericItemGroup, properties));
+            ProjectInstance specialized =
+                specializedProject.Project.CreateProjectInstance();
+            ProjectInstance generic =
+                genericProject.Project.CreateProjectInstance();
+
+            MockLogger specializedLogger = Build(
+                specialized,
+                out BuildResult specializedResult);
+            MockLogger genericLogger = Build(
+                generic,
+                out BuildResult genericResult);
+
+            Assert.Equal(
+                BuildResultCode.Failure,
+                specializedResult.OverallResult);
+            Assert.Equal(
+                BuildResultCode.Failure,
+                genericResult.OverallResult);
+            BuildErrorEventArgs specializedError =
+                Assert.Single(specializedLogger.Errors);
+            BuildErrorEventArgs genericError =
+                Assert.Single(genericLogger.Errors);
+            Assert.Equal(genericError.Code, specializedError.Code);
+            Assert.Equal(genericError.Message, specializedError.Message);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingFallsBackForExistingDecomposedItems()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <TargetFrameworks>net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                <ItemGroup>
+                  <_DecomposedTargetFramework Include="preexisting" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0)
+                    .ItemGroupAction.TargetFrameworkRoutingAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingFallsBackForExistingRouteItems()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <TargetFrameworks>net8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                <ItemGroup>
+                  <_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning
+                    Include="preexisting" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingFallsBackForEmptySource()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <_FirstTargetFrameworkToSupportTrimming>.NETCoreApp,Version=bogus</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net8.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net8.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net8.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingFallsBackForDuplicateIdentities()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup(),
+                """
+                <PropertyGroup>
+                  <TargetFrameworks>net8.0;net9.0;NET8.0</TargetFrameworks>
+                  <_FirstTargetFrameworkToSupportTrimming>net7.0</_FirstTargetFrameworkToSupportTrimming>
+                  <_MinNonEolTargetFrameworkForTrimming>net9.0</_MinNonEolTargetFrameworkForTrimming>
+                  <_FirstTargetFrameworkToSupportAot>net8.0</_FirstTargetFrameworkToSupportAot>
+                  <_MinNonEolTargetFrameworkForAot>net9.0</_MinNonEolTargetFrameworkForAot>
+                  <_FirstTargetFrameworkToSupportSingleFile>net6.0</_FirstTargetFrameworkToSupportSingleFile>
+                  <_MinNonEolTargetFrameworkForSingleFile>net9.0</_MinNonEolTargetFrameworkForSingleFile>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                new[] { "net8.0", "NET8.0", "net9.0" },
+                instance.GetItems("_DecomposedTargetFramework")
+                    .Select(item => item.EvaluatedInclude));
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkRoutingRequiresExactShape()
+        {
+            using ProjectFromString projectFromString = new(CreateProject(
+                CreateTargetFrameworkRoutingItemGroup().Replace(
+                    "'%(SupportsAot)' == 'true'",
+                    "'%(SupportsAot)' == 'True'",
+                    StringComparison.Ordinal)));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            CompiledItemGroupAction action =
+                plan.GetActionRecord(0).ItemGroupAction;
+            Assert.NotNull(action);
+            Assert.Null(action.TargetFrameworkRoutingAction);
+        }
+
+        [Fact]
+        public void CompiledTargetFrameworkCompatibilityUsesTypedOperandsAndCachesParsedValues()
+        {
+            CompiledScalarProgram specialized =
+                CompiledScalarProgram.TryCreateItemSpecification(
+                    "$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', 'net7.0'))");
+            CompiledScalarProgram composite =
+                CompiledScalarProgram.TryCreateItemSpecification(
+                    "$([MSBuild]::IsTargetFrameworkCompatible('$(Prefix)%(Identity)', 'net7.0'))");
+            CompiledScalarProgram propertySpecialized =
+                CompiledScalarProgram.TryCreateItemSpecification(
+                    "$([MSBuild]::IsTargetFrameworkCompatible('$(Framework)', 'net7.0'))");
+            var expressionEnvironment =
+                new RecordingCompiledExpressionEnvironment
+                {
+                    MetadataValue = "net8.0",
+                };
+
+            Assert.True(
+                specialized.HasTargetFrameworkCompatibilitySpecialization);
+            Assert.False(
+                composite.HasTargetFrameworkCompatibilitySpecialization);
+            Assert.True(
+                propertySpecialized
+                    .HasTargetFrameworkCompatibilitySpecialization);
+            Assert.Equal(
+                "True",
+                specialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(
+                "True",
+                specialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(2, expressionEnvironment.ParsedFrameworkCount);
+
+            expressionEnvironment.MetadataValue = "net6.0";
+            Assert.Equal(
+                "False",
+                specialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(3, expressionEnvironment.ParsedFrameworkCount);
+
+            expressionEnvironment.PropertyValue = "net9.0";
+            Assert.Equal(
+                "True",
+                propertySpecialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(4, expressionEnvironment.ParsedFrameworkCount);
+
+            expressionEnvironment.PropertyValue = "net5.0";
+            Assert.Equal(
+                "False",
+                propertySpecialized.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(5, expressionEnvironment.ParsedFrameworkCount);
+
+            Assert.Equal(
+                "False",
+                composite.Evaluate(
+                    expressionEnvironment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(5, expressionEnvironment.ParsedFrameworkCount);
+        }
+#endif
+
+#if NET
+        private static string DescribeDecomposedTargetFramework(
+            ProjectItemInstance item) =>
+            string.Join(
+                "|",
+                item.EvaluatedInclude,
+                item.GetMetadataValue("SupportsTrimming"),
+                item.GetMetadataValue(
+                    "SupportedByMinNonEolTargetFrameworkForTrimming"),
+                item.GetMetadataValue("SupportsAot"),
+                item.GetMetadataValue(
+                    "SupportedByMinNonEolTargetFrameworkForAot"),
+                item.GetMetadataValue("SupportsSingleFile"),
+                item.GetMetadataValue(
+                    "SupportedByMinNonEolTargetFrameworkForSingleFile"));
+
+        private static string[] DescribeItems(
+            ProjectInstance project,
+            string itemType) =>
+            project.GetItems(itemType)
+                .Select(
+                    item =>
+                        $"{item.EvaluatedInclude}|{string.Join(",", item.Metadata.Select(metadata => $"{metadata.Name}={metadata.EvaluatedValue}"))}")
+                .ToArray();
+
+        private static string[] DescribeTaskParameterEvents(
+            MockLogger logger) =>
+            logger.TaskParameterEvents.Select(
+                taskParameter =>
+                    $"{taskParameter.Kind}|{taskParameter.ItemType}|{string.Join(",", taskParameter.Items.Cast<object>().Select(item => item.ToString()))}")
+                .ToArray();
+
+        private static MeterListener ListenForTargetFrameworkRouting(
+            Action<long> onMeasurement)
+        {
+            return ListenForExecutionMetrics(
+                (metric, value) =>
+                {
+                    if (metric ==
+                        nameof(
+                            BuildExecutionMetric
+                                .CompiledTargetFrameworkRouting))
+                    {
+                        onMeasurement(value);
+                    }
+                });
+        }
+
+        private static MeterListener ListenForExecutionMetrics(
+            Action<string, long> onMeasurement)
+        {
+            var listener = new MeterListener();
+            listener.InstrumentPublished = (instrument, meterListener) =>
+            {
+                if (instrument.Meter.Name ==
+                        BuildExecutionInstrumentation.MeterName &&
+                    instrument.Name ==
+                        BuildExecutionInstrumentation.EventInstrumentName)
+                {
+                    meterListener.EnableMeasurementEvents(instrument);
+                }
+            };
+            listener.SetMeasurementEventCallback<long>(
+                (instrument, value, tags, _) =>
+                {
+                    foreach (KeyValuePair<string, object> tag in tags)
+                    {
+                        if (tag.Key == "metric" &&
+                            tag.Value is string metric)
+                        {
+                            onMeasurement(metric, value);
+                            break;
+                        }
+                    }
+                });
+            listener.Start();
+            return listener;
+        }
+
+        private static string CreateTargetFrameworkRoutingItemGroup() =>
+            """
+            <ItemGroup>
+              <_TargetFramework Include="$(TargetFrameworks)" />
+              <_DecomposedTargetFramework Include="@(_TargetFramework)">
+                <SupportsTrimming>$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportTrimming)'))</SupportsTrimming>
+                <SupportedByMinNonEolTargetFrameworkForTrimming>$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForTrimming)', '%(Identity)'))</SupportedByMinNonEolTargetFrameworkForTrimming>
+                <SupportsAot>$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportAot)'))</SupportsAot>
+                <SupportedByMinNonEolTargetFrameworkForAot>$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForAot)', '%(Identity)'))</SupportedByMinNonEolTargetFrameworkForAot>
+                <SupportsSingleFile>$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportSingleFile)'))</SupportsSingleFile>
+                <SupportedByMinNonEolTargetFrameworkForSingleFile>$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForSingleFile)', '%(Identity)'))</SupportedByMinNonEolTargetFrameworkForSingleFile>
+              </_DecomposedTargetFramework>
+              <_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning
+                Include="@(_DecomposedTargetFramework)"
+                Condition="'%(SupportsTrimming)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForTrimming)' == 'true'" />
+              <_TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning
+                Include="@(_DecomposedTargetFramework->'%(Identity)')"
+                Condition="'%(SupportsAot)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForAot)' == 'true'" />
+              <_TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning
+                Include="@(_DecomposedTargetFramework)"
+                Condition="'%(SupportsSingleFile)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForSingleFile)' == 'true'" />
+            </ItemGroup>
+            """;
+#endif
+
+        [Fact]
+        public void CompiledItemIncludeUsesDestinationItemDefinitionMetadata()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <Out Include="%(Out.Name)">
+                    <Derived>%(Name)-derived</Derived>
+                  </Out>
+                  <Excluded
+                      Include="kept;skip"
+                      Exclude="%(Excluded.Skip)" />
+                </ItemGroup>
+                """,
+                """
+                <ItemDefinitionGroup>
+                  <Out>
+                    <Name>generated</Name>
+                  </Out>
+                  <Excluded>
+                    <Skip>skip</Skip>
+                  </Excluded>
+                </ItemDefinitionGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            ProjectItemInstance output =
+                Assert.Single(instance.GetItems("Out"));
+            Assert.Equal("generated", output.EvaluatedInclude);
+            Assert.Equal(
+                "generated-derived",
+                output.GetMetadataValue("Derived"));
+            Assert.Equal(
+                "kept",
+                Assert.Single(instance.GetItems("Excluded"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupSupportsVersionFunctionInBatchedCondition()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <ValidVersion
+                      Include="%(Version.Identity)"
+                      Condition="$([MSBuild]::VersionEquals(%(Identity), 11.0))" />
+                </ItemGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Version Include="10.0;11.0" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "11.0",
+                Assert.Single(instance.GetItems("ValidVersion"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledItemGroupSupportsNestedAndPathFunctionArguments()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <ItemGroup>
+                  <NestedMatched
+                      Include="nested"
+                      Condition="$(_NestedResult.Contains($([MSBuild]::VersionEquals('1.0', '1.0'))))" />
+                  <PathMatched
+                      Include="path"
+                      Condition="$(_PathValue.Contains('$(MSBuildToolsPath)\nested'))" />
+                </ItemGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <_NestedResult>True</_NestedResult>
+                  <_PathValue>$(MSBuildToolsPath)/nested</_PathValue>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).ItemGroupAction);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "nested",
+                Assert.Single(instance.GetItems("NestedMatched"))
+                    .EvaluatedInclude);
+            Assert.Equal(
+                "path",
+                Assert.Single(instance.GetItems("PathMatched"))
+                    .EvaluatedInclude);
+        }
+
+        [Fact]
+        public void CompiledPropertyGroupPreservesOrderedConditionsAndEscaping()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup Condition="'$(RunGroup)' == 'true'">
+                  <First>a%3Bb</First>
+                  <Skipped Condition="'$(RunProperty)' == 'true'">skipped</Skipped>
+                  <Second Condition="'$(First)' == 'a;b'">$(First)%3Btail</Second>
+                  <AdjustedPath>directory\file.txt</AdjustedPath>
+                </PropertyGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <RunGroup>true</RunGroup>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+            CompiledPropertyGroupAction action =
+                plan.GetActionRecord(0).PropertyGroupAction;
+
+            Assert.NotNull(action);
+            Assert.Equal(4, action.AssignmentCount);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "a%3Bb",
+                ((IProperty)instance.GetProperty("First"))
+                    .EvaluatedValueEscaped);
+            Assert.Equal(
+                "a;b;tail",
+                instance.GetPropertyValue("Second"));
+            Assert.Equal(
+                string.Empty,
+                instance.GetPropertyValue("Skipped"));
+            Assert.Equal(
+                FileUtilities.MaybeAdjustFilePath(
+                    @"directory\file.txt"),
+                instance.GetPropertyValue("AdjustedPath"));
+        }
+
+        [Theory]
+        [InlineData("@(Input)")]
+        [InlineData("%(Input.Identity)")]
+        [InlineData("$([System.String]::Copy('function'))")]
+        public void PropertyGroupFallsBackAsAWholeForUnsupportedValues(
+            string unsupportedValue)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                $"""
+                <PropertyGroup>
+                  <Simple>simple</Simple>
+                  <FallbackValue>{unsupportedValue}</FallbackValue>
+                </PropertyGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Input Include="a;b" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Null(
+                plan.GetActionRecord(0).PropertyGroupAction);
+            Assert.Equal(
+                CompiledTargetActionKind.Fallback,
+                plan.GetActionRecord(0).Kind);
+            Assert.Equal(
+                CompiledTargetFallbackKind.PropertyGroupIntrinsic,
+                plan.GetActionRecord(0).FallbackKind);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "simple",
+                instance.GetPropertyValue("Simple"));
+            Assert.NotEmpty(
+                instance.GetPropertyValue("FallbackValue"));
+        }
+
+        [Theory]
+        [InlineData("'@(Input)' != ''", "")]
+        [InlineData("", "'%(Input.Identity)' != ''")]
+        [InlineData("$([System.String]::Copy('true'))", "")]
+        public void PropertyGroupFallsBackAsAWholeForUnsupportedConditions(
+            string groupCondition,
+            string propertyCondition)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            string groupConditionAttribute =
+                string.IsNullOrEmpty(groupCondition)
+                    ? string.Empty
+                    : $" Condition=\"{groupCondition}\"";
+            string propertyConditionAttribute =
+                string.IsNullOrEmpty(propertyCondition)
+                    ? string.Empty
+                    : $" Condition=\"{propertyCondition}\"";
+            using ProjectFromString projectFromString = new(CreateProject(
+                $"""
+                <PropertyGroup{groupConditionAttribute}>
+                  <FallbackValue{propertyConditionAttribute}>fallback</FallbackValue>
+                </PropertyGroup>
+                """,
+                """
+                <ItemGroup>
+                  <Input Include="a" />
+                </ItemGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Null(
+                plan.GetActionRecord(0).PropertyGroupAction);
+            Assert.Equal(
+                CompiledTargetActionKind.Fallback,
+                plan.GetActionRecord(0).Kind);
+            Assert.Equal(
+                CompiledTargetFallbackKind.PropertyGroupIntrinsic,
+                plan.GetActionRecord(0).FallbackKind);
+
+            Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Equal(
+                "fallback",
+                instance.GetPropertyValue("FallbackValue"));
+        }
+
+        [Fact]
+        public void CompiledPropertyGroupPreservesTrackingAndInputLogging()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            environment.SetEnvironmentVariable(
+                "MsBuildLogPropertyTracking",
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <TrackedValue>new</TrackedValue>
+                </PropertyGroup>
+                """,
+                """
+                <PropertyGroup>
+                  <TrackedValue>old</TrackedValue>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
+
+            MockLogger logger = Build(
+                instance,
+                out BuildResult result,
+                logTaskInputs: true);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            Assert.Contains(
+                logger.BuildMessageEvents,
+                message =>
+                    message is PropertyReassignmentEventArgs reassignment &&
+                    reassignment.PropertyName == "TrackedValue" &&
+                    reassignment.PreviousValue == "old" &&
+                    reassignment.NewValue == "new");
+            logger.AssertLogContains(
+                ResourceUtilities.FormatResourceStringIgnoreCodeAndKeyword(
+                    "PropertyGroupLogMessage",
+                    "TrackedValue",
+                    "new"));
+        }
+
+        [Fact]
+        public void CompiledPropertyGroupDoesNotLeakUndefinedReadsAcrossAssignments()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+            environment.SetEnvironmentVariable(
+                "MSBUILDWARNONUNINITIALIZEDPROPERTY",
+                "true");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <First>$(Later)</First>
+                  <Later>set</Later>
+                  <Self>$(Self);tail</Self>
+                </PropertyGroup>
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(
+                plan.GetActionRecord(0).PropertyGroupAction);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogDoesntContain("MSB4211");
+        }
+
+        [Fact]
+        public void CompiledTargetConditionPreservesSkipBehavior()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <UsingTask
+                      TaskName="{typeof(CompiledActionGraphTestTask).FullName}"
+                      AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
+                  <PropertyGroup>
+                    <RunTarget>false</RunTarget>
+                  </PropertyGroup>
+                  <Target
+                      Name="Build"
+                      Condition="'$(RunTarget)' == 'true'"
+                      DependsOnTargets="Prepare">
+                    <CompiledActionGraphTestTask Text="should-not-run" />
+                  </Target>
+                  <Target Name="Prepare">
+                    <CompiledActionGraphTestTask
+                        Text="dependency-should-not-run" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.True(plan.HasCompiledCondition);
+            int actionArrayCount = 0;
+            using MeterListener listener = ListenForExecutionMetrics(
+                (metric, value) =>
+                {
+                    if (metric ==
+                        nameof(
+                            BuildExecutionMetric
+                                .CompiledTargetActionArray))
+                    {
+                        actionArrayCount += (int)value;
+                    }
+                });
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogDoesntContain("should-not-run");
+            logger.AssertLogDoesntContain(
+                "dependency-should-not-run");
+            Assert.Equal(0, actionArrayCount);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void CompiledTargetConditionSupportsItemLists(
+            bool includeItem)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            string items = includeItem
+                ? """
+                  <ItemGroup>
+                    <Trigger Include="value" />
+                  </ItemGroup>
+                  """
+                : string.Empty;
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <UsingTask
+                      TaskName="{typeof(CompiledActionGraphTestTask).FullName}"
+                      AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
+                  {items}
+                  <Target Name="Prepare">
+                    <CompiledActionGraphTestTask Text="dependency-ran" />
+                  </Target>
+                  <Target
+                      Name="Build"
+                      Condition="'@(Trigger)' != ''"
+                      DependsOnTargets="Prepare">
+                    <CompiledActionGraphTestTask Text="target-ran" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(plan);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            if (includeItem)
+            {
+                logger.AssertLogContains("dependency-ran");
+                logger.AssertLogContains("target-ran");
+            }
+            else
+            {
+                logger.AssertLogDoesntContain("dependency-ran");
+                logger.AssertLogDoesntContain("target-ran");
+            }
+        }
+
+        [Fact]
+        public void CompiledTargetConditionExpandsConstructedItemList()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <UsingTask
+                      TaskName="{typeof(CompiledActionGraphTestTask).FullName}"
+                      AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
+                  <PropertyGroup>
+                    <At>@</At>
+                    <ItemType>Missing</ItemType>
+                  </PropertyGroup>
+                  <Target
+                      Name="Build"
+                      Condition="'$(At)($(ItemType))' == ''">
+                    <CompiledActionGraphTestTask Text="target-ran" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.NotNull(plan);
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains("target-ran");
+        }
+
+        [Fact]
+        public void UnsupportedTargetConditionFallsBackWholeTarget()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new($"""
+                <Project>
+                  <UsingTask
+                      TaskName="{typeof(CompiledActionGraphTestTask).FullName}"
+                      AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
+                  <PropertyGroup>
+                    <Gate>2</Gate>
+                  </PropertyGroup>
+                  <Target
+                      Name="Build"
+                      Condition="'$(Gate)' &gt; '1'">
+                    <CompiledActionGraphTestTask Text="legacy-condition" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(
+                instance,
+                instance.Targets["Build"]);
+
+            Assert.Null(plan);
+            int compiledPreBodyCount = 0;
+            int actionArrayCount = 0;
+            int fallbackPreBodyCount = 0;
+            using MeterListener listener = ListenForExecutionMetrics(
+                (metric, value) =>
+                {
+                    if (metric ==
+                        nameof(
+                            BuildExecutionMetric
+                                .CompiledTargetPreBody))
+                    {
+                        compiledPreBodyCount += (int)value;
+                    }
+                    else if (metric ==
+                             nameof(
+                                 BuildExecutionMetric
+                                     .CompiledTargetActionArray))
+                    {
+                        actionArrayCount += (int)value;
+                    }
+                    else if (metric ==
+                             nameof(
+                                 BuildExecutionMetric
+                                     .FallbackTargetPreBody))
+                    {
+                        fallbackPreBodyCount += (int)value;
+                    }
+                });
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Success, result.OverallResult);
+            logger.AssertLogContains(
+                "compiled-action:legacy-condition:0:");
+            Assert.Equal(0, compiledPreBodyCount);
+            Assert.Equal(0, actionArrayCount);
+            Assert.Equal(1, fallbackPreBodyCount);
+        }
+
+        [Fact]
+        public void DirectIntrinsicFailureStopsFollowingActions()
+        {
+            using TestEnvironment environment =
+                TestEnvironment.Create(ignoreBuildErrorFiles: true);
+            environment.SetEnvironmentVariable(
+                CompiledTargetPlan.EnablePartialEvaluationEnvVarName,
+                "1");
+
+            using ProjectFromString projectFromString = new(CreateProject(
+                """
+                <PropertyGroup>
+                  <LocalValue Condition="'left' ==">invalid</LocalValue>
+                </PropertyGroup>
+                <CompiledActionGraphTestTask Text="should-not-run" />
+                """));
+            ProjectInstance instance =
+                projectFromString.Project.CreateProjectInstance();
+
+            MockLogger logger = Build(instance, out BuildResult result);
+
+            Assert.Equal(BuildResultCode.Failure, result.OverallResult);
+            logger.AssertLogContains("error MSB");
+            logger.AssertLogDoesntContain("should-not-run");
         }
 
         [Fact]
@@ -813,6 +2955,87 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 
         [Fact]
+        public void CompiledConditionMarksEmptyOperandPropertyReads()
+        {
+            CompiledConditionProgram program =
+                CompiledConditionProgram.TryCreate(
+                    "'$(OptionalProperty)' == ''",
+                    ElementLocation.EmptyLocation);
+            var environment =
+                new RecordingCompiledExpressionEnvironment();
+
+            Assert.True(
+                program.Evaluate(
+                    environment,
+                    ElementLocation.EmptyLocation));
+            Assert.True(environment.EnteredWithEmptyOperand);
+            Assert.Equal(1, environment.LeaveCount);
+        }
+
+        [Fact]
+        public void CompiledConditionPreservesStaticNonemptyShortCircuit()
+        {
+            CompiledConditionProgram program =
+                CompiledConditionProgram.TryCreate(
+                    "'prefix$(UnusedProperty)' == ''",
+                    ElementLocation.EmptyLocation);
+            var environment =
+                new RecordingCompiledExpressionEnvironment();
+
+            Assert.False(
+                program.Evaluate(
+                    environment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(0, environment.PropertyReadCount);
+            Assert.True(environment.EnteredWithEmptyOperand);
+            Assert.Equal(1, environment.LeaveCount);
+        }
+
+        [Fact]
+        public void CompiledTargetConditionChecksItemListEmptinessDirectly()
+        {
+            CompiledConditionProgram program =
+                CompiledConditionProgram.TryCreateForTarget(
+                    "'@(Items)' != ''",
+                    ElementLocation.EmptyLocation);
+            var environment =
+                new RecordingCompiledExpressionEnvironment();
+
+            Assert.True(
+                program.EvaluateForTarget(
+                    environment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(1, environment.ItemEmptinessCheckCount);
+        }
+
+        [Fact]
+        public void CompiledTargetConditionPreservesStaticNonemptyShortCircuit()
+        {
+            CompiledConditionProgram program =
+                CompiledConditionProgram.TryCreateForTarget(
+                    "'prefix$(UnusedProperty)' == ''",
+                    ElementLocation.EmptyLocation);
+            var environment =
+                new RecordingCompiledExpressionEnvironment();
+
+            Assert.False(
+                program.EvaluateForTarget(
+                    environment,
+                    ElementLocation.EmptyLocation));
+            Assert.Equal(0, environment.ItemEmptinessCheckCount);
+            Assert.Equal(0, environment.PropertyReadCount);
+        }
+
+        [Fact]
+        public void CompiledConditionRejectsMixedBooleanFunctionValue()
+        {
+            Assert.Null(
+                CompiledConditionProgram.TryCreate(
+                    "prefix$([MSBuild]::VersionEquals('1.0', '1.0'))",
+                    ElementLocation.EmptyLocation));
+        }
+
+        [Fact]
         public void CompiledActionPreservesCaseInsensitiveParameterBinding()
         {
             using TestEnvironment environment = TestEnvironment.Create();
@@ -1084,21 +3307,114 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
 #endif
 
+        private sealed class RecordingCompiledExpressionEnvironment :
+            ICompiledExpressionEnvironment
+        {
+#if NET
+            private readonly Dictionary<string, NuGetFramework>
+                _parsedFrameworks = new(StringComparer.Ordinal);
+#endif
+
+            internal bool EnteredWithEmptyOperand { get; private set; }
+
+            internal int LeaveCount { get; private set; }
+
+            internal int PropertyReadCount { get; private set; }
+
+            internal int ItemEmptinessCheckCount { get; private set; }
+
+            internal string MetadataValue { get; set; } = string.Empty;
+
+            internal string PropertyValue { get; set; } = string.Empty;
+
+#if NET
+            internal int ParsedFrameworkCount => _parsedFrameworks.Count;
+#endif
+
+            public string GetEscapedPropertyValue(
+                string propertyName,
+                IElementLocation location)
+            {
+                PropertyReadCount++;
+                return propertyName.Equals(
+                    "Prefix",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? string.Empty
+                    : PropertyValue;
+            }
+
+            public string GetEscapedMetadataValue(
+                string itemType,
+                string metadataName,
+                IElementLocation location) =>
+                MetadataValue;
+
+            public string ExpandItems(
+                string escapedValue,
+                IElementLocation location) =>
+                escapedValue;
+
+            public bool IsItemExpansionEmpty(
+                string escapedValue,
+                IElementLocation location)
+            {
+                ItemEmptinessCheckCount++;
+                return escapedValue.Length == 0;
+            }
+
+            public void EnterConditionEvaluation(bool oneSideIsEmpty)
+            {
+                EnteredWithEmptyOperand = oneSideIsEmpty;
+            }
+
+            public void LeaveConditionEvaluation()
+            {
+                LeaveCount++;
+            }
+
+#if NET
+            public NuGetFramework GetOrParseTargetFramework(string framework)
+            {
+                if (!_parsedFrameworks.TryGetValue(
+                        framework,
+                        out NuGetFramework parsed))
+                {
+                    parsed = NuGetFramework.Parse(framework);
+                    _parsedFrameworks.Add(framework, parsed);
+                }
+
+                return parsed;
+            }
+#endif
+        }
+
         private static string CreateProject(
             string targetContents,
-            string projectContents = "") =>
-            $"""
+            string projectContents = "",
+            string dependsOnTargets = "",
+            string targetAttributes = "")
+        {
+            string dependencyAttribute =
+                dependsOnTargets.Length == 0
+                    ? string.Empty
+                    : $" DependsOnTargets=\"{dependsOnTargets}\"";
+            string additionalTargetAttributes =
+                targetAttributes.Length == 0
+                    ? string.Empty
+                    : $" {targetAttributes}";
+            return $"""
             <Project>
               <UsingTask TaskName="{typeof(CompiledActionGraphTestTask).FullName}" AssemblyFile="{typeof(CompiledActionGraphTestTask).Assembly.Location}" />
               <PropertyGroup>
                 <Text>first</Text>
               </PropertyGroup>
               {projectContents}
-              <Target Name="Build">
+              <Target Name="Build"{dependencyAttribute}{additionalTargetAttributes}>
                 {targetContents}
               </Target>
             </Project>
             """;
+        }
 
         private static string CreateProjectForTask(
             Type taskType,
@@ -1117,17 +3433,25 @@ namespace Microsoft.Build.UnitTests.BackEnd
             return Build(instance, out _);
         }
 
-        private static MockLogger Build(ProjectInstance instance, out BuildResult result, bool allowTaskCrashes = false)
+        private static MockLogger Build(
+            ProjectInstance instance,
+            out BuildResult result,
+            bool allowTaskCrashes = false,
+            bool logTaskInputs = false)
         {
             var logger = new MockLogger
             {
                 AllowTaskCrashes = allowTaskCrashes,
+                Verbosity = logTaskInputs
+                    ? LoggerVerbosity.Diagnostic
+                    : LoggerVerbosity.Normal,
             };
             using var manager = new BuildManager();
             manager.BeginBuild(new BuildParameters
             {
                 EnableNodeReuse = false,
                 Loggers = new ILogger[] { logger },
+                LogTaskInputs = logTaskInputs,
             });
 
             try

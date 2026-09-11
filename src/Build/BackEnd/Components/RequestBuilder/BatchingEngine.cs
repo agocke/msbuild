@@ -124,6 +124,66 @@ namespace Microsoft.Build.BackEnd
             // name (possibly null) and the actual metadata name.
             Dictionary<string, MetadataReference> consumedMetadataReferences = pair.Metadata;
 
+            return PrepareBatchingBuckets(
+                consumedItemReferences,
+                consumedMetadataReferences,
+                lookup,
+                implicitBatchableItemType,
+                elementLocation,
+                loggingContext);
+        }
+
+        internal static List<ItemBucket> PrepareBatchingBuckets(
+            CompiledBatchingDescriptor descriptor,
+            Lookup lookup,
+            string implicitBatchableItemType,
+            ElementLocation elementLocation,
+            LoggingContext loggingContext)
+        {
+            Assumed.NotNull(descriptor);
+            HashSet<string> consumedItemReferences =
+                descriptor.ItemReferences.Length == 0
+                    ? null
+                    : new HashSet<string>(
+                        descriptor.ItemReferences,
+                        MSBuildNameIgnoreCaseComparer.Default);
+            Dictionary<string, MetadataReference>
+                consumedMetadataReferences = null;
+            if (descriptor.MetadataReferences.Length != 0)
+            {
+                consumedMetadataReferences =
+                    new Dictionary<string, MetadataReference>(
+                        descriptor.MetadataReferences.Length,
+                        MSBuildNameIgnoreCaseComparer.Default);
+                foreach (CompiledBatchingMetadataReference reference
+                    in descriptor.MetadataReferences)
+                {
+                    consumedMetadataReferences.Add(
+                        reference.QualifiedName,
+                        new MetadataReference(
+                            reference.ItemName,
+                            reference.MetadataName));
+                }
+            }
+
+            return PrepareBatchingBuckets(
+                consumedItemReferences,
+                consumedMetadataReferences,
+                lookup,
+                implicitBatchableItemType,
+                elementLocation,
+                loggingContext);
+        }
+
+        private static List<ItemBucket> PrepareBatchingBuckets(
+            HashSet<string> consumedItemReferences,
+            Dictionary<string, MetadataReference>
+                consumedMetadataReferences,
+            Lookup lookup,
+            string implicitBatchableItemType,
+            ElementLocation elementLocation,
+            LoggingContext loggingContext)
+        {
             List<ItemBucket> buckets = null;
             if (consumedMetadataReferences?.Count > 0)
             {

@@ -1924,6 +1924,21 @@ namespace Microsoft.Build.Evaluation
                                     NumberStyles.Integer,
                                     CultureInfo.InvariantCulture.NumberFormat));
                         break;
+                    case CompiledPropertyFunctionKind
+                        .IsTargetFrameworkCompatible:
+                    case CompiledPropertyFunctionKind.VersionEquals:
+                    case CompiledPropertyFunctionKind
+                        .VersionGreaterThanOrEquals:
+                        result = CompiledExpressionFunctionUtilities.Evaluate(
+                            function.Kind,
+                            receiver: null,
+                            argument0,
+                            EvaluateCompiledPropertyFunctionArgument(
+                                module,
+                                module.CompiledPropertyFunctionArguments[
+                                    arguments.Start + 1],
+                                location));
+                        break;
                     case CompiledPropertyFunctionKind.GetToolsDirectory32:
                         result = IntrinsicFunctions.GetToolsDirectory32();
                         break;

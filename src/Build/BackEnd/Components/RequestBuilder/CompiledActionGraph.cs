@@ -11,13 +11,21 @@ using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Threading.Tasks;
 #if NET && FEATURE_ASSEMBLYLOADCONTEXT
 using System.Runtime.Loader;
 #endif
+using Microsoft.Build.Collections;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
+using ElementLocation = Microsoft.Build.Construction.ElementLocation;
+using ILoggingService = Microsoft.Build.BackEnd.Logging.ILoggingService;
+#if NET
+using NuGet.Frameworks;
+#endif
 
 #nullable disable
 
@@ -37,21 +45,35 @@ namespace Microsoft.Build.BackEnd
 
         private static readonly ConditionalWeakTable<ProjectInstance, PartiallyEvaluatedProject> s_projects = new();
 
-        private readonly CompiledTaskAction[] _actions;
+        private readonly CompiledTargetSourceProgram _sourceProgram;
+        private readonly CompiledTargetActionRecord[] _actions;
 
         private CompiledTargetPlan(ProjectTargetInstance target, PartiallyEvaluatedProject project)
         {
-            _actions = new CompiledTaskAction[target.Children.Count];
-            for (int i = 0; i < target.Children.Count; i++)
+            _sourceProgram = CompiledTargetSourceProgram.GetOrCreate(target);
+            _actions = new CompiledTargetActionRecord[
+                _sourceProgram.ActionCount];
+            for (int actionIndex = 0;
+                 actionIndex < _actions.Length;
+                 actionIndex++)
             {
-                if (target.Children[i] is ProjectTaskInstance task)
-                {
-                    CompiledTaskSourceProgram program =
-                        CompiledTaskSourceProgram.GetOrCreate(task);
-                    _actions[i] = new CompiledTaskAction(
-                        program,
-                        project.GetTaskRegistration(program.Name));
-                }
+                CompiledTargetSourceActionRecord sourceAction =
+                    _sourceProgram.GetAction(actionIndex);
+                CompiledTaskAction taskAction =
+                    sourceAction.TaskProgram == null
+                        ? null
+                        : new CompiledTaskAction(
+                            sourceAction.TaskProgram,
+                            project.GetTaskRegistration(
+                                sourceAction.TaskProgram.Name));
+                _actions[actionIndex] =
+                    new CompiledTargetActionRecord(
+                        sourceAction.Kind,
+                        sourceAction.Child,
+                        taskAction,
+                        sourceAction.PropertyGroupAction,
+                        sourceAction.ItemGroupAction,
+                        sourceAction.FallbackKind);
             }
         }
 
@@ -60,12 +82,176 @@ namespace Microsoft.Build.BackEnd
             ArgumentNullException.ThrowIfNull(projectInstance);
             ArgumentNullException.ThrowIfNull(target);
 
+            if (!CompiledTargetSourceProgram.GetOrCreate(target).IsEligible)
+            {
+                return null;
+            }
+
             PartiallyEvaluatedProject project =
                 s_projects.GetValue(projectInstance, static _ => new PartiallyEvaluatedProject());
             return project.PartiallyEvaluate(target);
         }
 
-        internal CompiledTaskAction GetAction(int childIndex) => _actions[childIndex];
+        internal int ActionCount => _actions.Length;
+
+        internal bool HasCompiledCondition =>
+            _sourceProgram.HasCompiledCondition;
+
+        internal CompiledTargetSourceProgram SourceProgram =>
+            _sourceProgram;
+
+        internal string TargetName => _sourceProgram.TargetName;
+
+        internal string TargetCondition => _sourceProgram.TargetCondition;
+
+        internal ElementLocation TargetLocation =>
+            _sourceProgram.TargetLocation;
+
+        internal ElementLocation ConditionLocation =>
+            _sourceProgram.ConditionLocation;
+
+        internal bool HasDeclaredInputs =>
+            _sourceProgram.HasDeclaredInputs;
+
+        internal bool HasDeclaredOutputs =>
+            _sourceProgram.HasDeclaredOutputs;
+
+        internal CompiledTaskAction GetAction(int childIndex)
+            => _actions[childIndex].TaskAction;
+
+        internal CompiledTargetActionRecord GetActionRecord(
+            int childIndex) =>
+            _actions[childIndex];
+
+        internal bool TryEvaluateCondition(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
+            out bool result)
+        {
+            return _sourceProgram.TryEvaluateCondition(
+                expander,
+                out result);
+        }
+
+        internal bool TryGetConditionDecision(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
+            out CompiledTargetPreBodyDecision decision)
+        {
+            if (!TryEvaluateCondition(expander, out bool result))
+            {
+                decision =
+                    CompiledTargetPreBodyDecision
+                        .WholeTargetFallback();
+                return true;
+            }
+
+            if (!result)
+            {
+                decision =
+                    CompiledTargetPreBodyDecision.ConditionFalse();
+                return true;
+            }
+
+            decision = default;
+            return false;
+        }
+
+        internal List<TargetSpecification> EvaluateDependencies(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander) =>
+            _sourceProgram.EvaluateDependencies(expander);
+
+        internal List<ItemBucket> PrepareTargetBuckets(
+            Lookup lookup) =>
+            BatchingEngine.PrepareBatchingBuckets(
+                _sourceProgram.TargetBatching,
+                lookup,
+                implicitBatchableItemType: null,
+                _sourceProgram.TargetLocation,
+                loggingContext: null);
+
+        internal CompiledTargetPreBodyDecision EvaluateUpToDate(
+            ProjectInstance project,
+            ItemBucket bucket,
+            ILoggingService loggingService,
+            BuildEventContext buildEventContext,
+            bool question)
+        {
+            using var measurement = BuildExecutionInstrumentation.Measure(
+                BuildExecutionMetric.CompiledTargetPreBody,
+                TargetName);
+            var analysis = new TargetUpToDateAnalysis(
+                project,
+                _sourceProgram.UpToDateSpecification,
+                loggingService,
+                buildEventContext);
+            DependencyAnalysisResult result =
+                analysis.PerformDependencyAnalysis(
+                    bucket,
+                    question,
+                    out ItemDictionary<ProjectItemInstance>
+                        changedTargetInputs,
+                    out ItemDictionary<ProjectItemInstance>
+                        upToDateTargetInputs);
+            return CompiledTargetPreBodyDecision.FromAnalysis(
+                result,
+                changedTargetInputs,
+                upToDateTargetInputs);
+        }
+
+        internal async ValueTask<WorkUnitResult> ExecuteAsync(
+            CompiledTargetExecutionFrame frame)
+        {
+            using var measurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric
+                        .CompiledTargetActionArray,
+                    TargetName);
+            WorkUnitResultCode aggregatedTaskResult =
+                WorkUnitResultCode.Success;
+            WorkUnitActionCode finalActionCode =
+                WorkUnitActionCode.Continue;
+            WorkUnitResult lastResult = new(
+                WorkUnitResultCode.Success,
+                WorkUnitActionCode.Continue,
+                null);
+
+            for (int actionIndex = 0;
+                 actionIndex < _actions.Length &&
+                 !frame.IsCancellationRequested;
+                 actionIndex++)
+            {
+                lastResult = await frame.ExecuteAsync(
+                    _actions[actionIndex]);
+
+                if (lastResult.ResultCode == WorkUnitResultCode.Failed)
+                {
+                    aggregatedTaskResult = WorkUnitResultCode.Failed;
+                }
+                else if (lastResult.ResultCode ==
+                             WorkUnitResultCode.Success &&
+                         aggregatedTaskResult !=
+                             WorkUnitResultCode.Failed)
+                {
+                    aggregatedTaskResult = WorkUnitResultCode.Success;
+                }
+
+                if (lastResult.ActionCode == WorkUnitActionCode.Stop)
+                {
+                    finalActionCode = WorkUnitActionCode.Stop;
+                    break;
+                }
+            }
+
+            if (frame.IsCancellationRequested)
+            {
+                aggregatedTaskResult = WorkUnitResultCode.Canceled;
+                finalActionCode = WorkUnitActionCode.Stop;
+            }
+
+            return new WorkUnitResult(
+                aggregatedTaskResult,
+                finalActionCode,
+                lastResult.Exception);
+        }
 
         private sealed class PartiallyEvaluatedProject
         {
@@ -81,6 +267,1248 @@ namespace Microsoft.Build.BackEnd
                     taskName,
                     static _ => new PartiallyEvaluatedTaskRegistration());
         }
+    }
+
+    /// <summary>
+    /// Source-only lowering shared by every project instance built from the same target instance.
+    /// </summary>
+    internal sealed class CompiledTargetSourceProgram
+    {
+        private static readonly ConditionalWeakTable<
+            ProjectTargetInstance,
+            CompiledTargetSourceProgram> s_programs = new();
+
+        private readonly CompiledConditionProgram _condition;
+        private readonly IElementLocation _conditionLocation;
+        private readonly CompiledTargetListProgram _dependencies;
+        private readonly TargetUpToDateSpecification
+            _upToDateSpecification;
+        private readonly CompiledBatchingDescriptor _targetBatching;
+        private readonly CompiledTargetSourceActionRecord[] _actions;
+
+        private CompiledTargetSourceProgram(ProjectTargetInstance target)
+        {
+            TargetName = target.Name;
+            TargetCondition = target.Condition;
+            TargetLocation = target.Location;
+            ConditionLocation = target.ConditionLocation;
+            HasDeclaredInputs = target.Inputs.Length != 0;
+            HasDeclaredOutputs = target.Outputs.Length != 0;
+
+            if (!string.IsNullOrEmpty(target.Condition))
+            {
+                _condition = CompiledConditionProgram.TryCreateForTarget(
+                    target.Condition,
+                    target.ConditionLocation);
+                _conditionLocation = target.ConditionLocation;
+                if (_condition == null)
+                {
+                    return;
+                }
+            }
+
+            if (ExpressionShredder
+                    .ContainsMetadataExpressionOutsideTransform(
+                        target.Inputs) ||
+                ExpressionShredder
+                    .ContainsMetadataExpressionOutsideTransform(
+                        target.Outputs))
+            {
+                return;
+            }
+
+            _dependencies = CompiledTargetListProgram.TryCreate(
+                target.DependsOnTargets,
+                target.DependsOnTargetsLocation,
+                allowMetadata: false,
+                finalExpansion:
+                    ExpanderOptions.ExpandItems);
+            CompiledTargetListProgram inputs =
+                CompiledTargetListProgram.TryCreate(
+                    target.Inputs,
+                    target.InputsLocation,
+                    allowMetadata: true,
+                    finalExpansion:
+                        (ExpanderOptions)0);
+            CompiledTargetListProgram outputs =
+                CompiledTargetListProgram.TryCreate(
+                    target.Outputs,
+                    target.OutputsLocation,
+                    allowMetadata: true,
+                    finalExpansion:
+                        (ExpanderOptions)0);
+            if (_dependencies == null ||
+                inputs == null ||
+                outputs == null)
+            {
+                return;
+            }
+
+            _upToDateSpecification =
+                new TargetUpToDateSpecification(
+                    target.Name,
+                    target.Inputs,
+                    target.Outputs,
+                    target.InputsLocation,
+                    target.OutputsLocation,
+                    inputs,
+                    outputs);
+            _targetBatching = CompiledBatchingDescriptor.Create(
+                target.Inputs,
+                target.Outputs,
+                target.Returns);
+
+            _actions =
+                new CompiledTargetSourceActionRecord[
+                    target.Children.Count];
+            for (int childIndex = 0;
+                 childIndex < target.Children.Count;
+                 childIndex++)
+            {
+                ProjectTargetInstanceChild child =
+                    target.Children[childIndex];
+                _actions[childIndex] = child switch
+                {
+                    ProjectTaskInstance task =>
+                        CompiledTargetSourceActionRecord.CreateTask(
+                            task),
+                    ProjectPropertyGroupTaskInstance propertyGroup =>
+                        CompiledTargetSourceActionRecord.CreatePropertyGroup(
+                            propertyGroup),
+                    ProjectItemGroupTaskInstance itemGroup =>
+                        CompiledTargetSourceActionRecord.CreateItemGroup(
+                            itemGroup),
+                    _ =>
+                        CompiledTargetSourceActionRecord.CreateFallback(
+                            child),
+                };
+            }
+
+            IsEligible = true;
+        }
+
+        internal int ActionCount => _actions?.Length ?? 0;
+
+        internal bool HasCompiledCondition => _condition != null;
+
+        internal bool IsEligible { get; }
+
+        internal string TargetName { get; }
+
+        internal string TargetCondition { get; }
+
+        internal ElementLocation TargetLocation { get; }
+
+        internal ElementLocation ConditionLocation { get; }
+
+        internal bool HasDeclaredInputs { get; }
+
+        internal bool HasDeclaredOutputs { get; }
+
+        internal CompiledBatchingDescriptor TargetBatching =>
+            _targetBatching;
+
+        internal TargetUpToDateSpecification
+            UpToDateSpecification =>
+            _upToDateSpecification;
+
+        internal static CompiledTargetSourceProgram GetOrCreate(
+            ProjectTargetInstance target) =>
+            s_programs.GetValue(
+                target,
+                static targetInstance =>
+                    new CompiledTargetSourceProgram(targetInstance));
+
+        internal CompiledTargetSourceActionRecord GetAction(
+            int childIndex) =>
+            _actions[childIndex];
+
+        internal bool TryEvaluateCondition(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
+            out bool result)
+        {
+            if (_condition == null)
+            {
+                result = TargetCondition.Length == 0;
+                return result;
+            }
+
+            result = _condition.EvaluateForTarget(
+                new CompiledLookupExpressionEnvironment(expander),
+                _conditionLocation);
+            return true;
+        }
+
+        internal List<TargetSpecification> EvaluateDependencies(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander)
+        {
+            SemiColonTokenizer dependencies =
+                _dependencies.Evaluate(expander);
+            var dependencyTargets =
+                new List<TargetSpecification>();
+            foreach (string escapedDependency in dependencies)
+            {
+                dependencyTargets.Add(
+                    new TargetSpecification(
+                        EscapingUtilities.UnescapeAll(
+                            escapedDependency),
+                        _dependencies.Location));
+            }
+
+            return dependencyTargets;
+        }
+    }
+
+    internal sealed class CompiledTargetListProgram
+    {
+        private readonly CompiledScalarProgram _program;
+        private readonly ExpanderOptions _finalExpansion;
+
+        private CompiledTargetListProgram(
+            CompiledScalarProgram program,
+            ElementLocation location,
+            ExpanderOptions finalExpansion)
+        {
+            _program = program;
+            Location = location;
+            _finalExpansion = finalExpansion;
+        }
+
+        internal ElementLocation Location { get; }
+
+        internal static CompiledTargetListProgram TryCreate(
+            string expression,
+            ElementLocation location,
+            bool allowMetadata,
+            ExpanderOptions finalExpansion)
+        {
+            CompiledScalarProgram program =
+                CompiledScalarProgram.TryCreateListExpression(
+                    expression,
+                    allowMetadata);
+            return program == null
+                ? null
+                : new CompiledTargetListProgram(
+                    program,
+                    location,
+                    finalExpansion);
+        }
+
+        internal SemiColonTokenizer Evaluate(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander)
+        {
+            string value = _program.EvaluateLeaveEscaped(
+                new CompiledLookupExpressionEnvironment(expander),
+                Location);
+            return expander.ExpandIntoStringListLeaveEscaped(
+                value,
+                _finalExpansion,
+                Location);
+        }
+    }
+
+    internal enum CompiledTargetPreBodyDecisionKind : byte
+    {
+        ConditionFalse,
+        SkipUpToDate,
+        ExecuteIncrementally,
+        ExecuteFully,
+        WholeTargetFallback,
+    }
+
+    internal readonly struct CompiledTargetPreBodyDecision
+    {
+        private CompiledTargetPreBodyDecision(
+            CompiledTargetPreBodyDecisionKind kind,
+            DependencyAnalysisResult analysisResult,
+            ItemDictionary<ProjectItemInstance> changedTargetInputs,
+            ItemDictionary<ProjectItemInstance> upToDateTargetInputs)
+        {
+            Kind = kind;
+            AnalysisResult = analysisResult;
+            ChangedTargetInputs = changedTargetInputs;
+            UpToDateTargetInputs = upToDateTargetInputs;
+        }
+
+        internal CompiledTargetPreBodyDecisionKind Kind { get; }
+
+        internal DependencyAnalysisResult AnalysisResult { get; }
+
+        internal ItemDictionary<ProjectItemInstance>
+            ChangedTargetInputs { get; }
+
+        internal ItemDictionary<ProjectItemInstance>
+            UpToDateTargetInputs { get; }
+
+        internal static CompiledTargetPreBodyDecision ConditionFalse() =>
+            new(
+                CompiledTargetPreBodyDecisionKind.ConditionFalse,
+                default,
+                changedTargetInputs: null,
+                upToDateTargetInputs: null);
+
+        internal static CompiledTargetPreBodyDecision WholeTargetFallback() =>
+            new(
+                CompiledTargetPreBodyDecisionKind.WholeTargetFallback,
+                default,
+                changedTargetInputs: null,
+                upToDateTargetInputs: null);
+
+        internal static CompiledTargetPreBodyDecision FromAnalysis(
+            DependencyAnalysisResult result,
+            ItemDictionary<ProjectItemInstance> changedTargetInputs,
+            ItemDictionary<ProjectItemInstance> upToDateTargetInputs)
+        {
+            CompiledTargetPreBodyDecisionKind kind = result switch
+            {
+                DependencyAnalysisResult.FullBuild =>
+                    CompiledTargetPreBodyDecisionKind.ExecuteFully,
+                DependencyAnalysisResult.IncrementalBuild =>
+                    CompiledTargetPreBodyDecisionKind.ExecuteIncrementally,
+                _ =>
+                    CompiledTargetPreBodyDecisionKind.SkipUpToDate,
+            };
+            return new CompiledTargetPreBodyDecision(
+                kind,
+                result,
+                changedTargetInputs,
+                upToDateTargetInputs);
+        }
+    }
+
+    internal enum CompiledTargetActionKind : byte
+    {
+        Task,
+        PropertyGroup,
+        ItemGroup,
+        Fallback,
+    }
+
+    internal enum CompiledTargetFallbackKind : byte
+    {
+        TaskBuilder,
+        PropertyGroupIntrinsic,
+        ItemGroupIntrinsic,
+    }
+
+    internal readonly struct CompiledTargetSourceActionRecord
+    {
+        private CompiledTargetSourceActionRecord(
+            CompiledTargetActionKind kind,
+            ProjectTargetInstanceChild child,
+            CompiledTaskSourceProgram taskProgram,
+            CompiledPropertyGroupAction propertyGroupAction,
+            CompiledItemGroupAction itemGroupAction,
+            CompiledTargetFallbackKind fallbackKind)
+        {
+            Kind = kind;
+            Child = child;
+            TaskProgram = taskProgram;
+            PropertyGroupAction = propertyGroupAction;
+            ItemGroupAction = itemGroupAction;
+            FallbackKind = fallbackKind;
+        }
+
+        internal CompiledTargetActionKind Kind { get; }
+
+        internal ProjectTargetInstanceChild Child { get; }
+
+        internal CompiledTaskSourceProgram TaskProgram { get; }
+
+        internal CompiledPropertyGroupAction PropertyGroupAction { get; }
+
+        internal CompiledItemGroupAction ItemGroupAction { get; }
+
+        internal CompiledTargetFallbackKind FallbackKind { get; }
+
+        internal static CompiledTargetSourceActionRecord CreateTask(
+            ProjectTaskInstance task) =>
+            new(
+                CompiledTargetActionKind.Task,
+                task,
+                CompiledTaskSourceProgram.GetOrCreate(task),
+                propertyGroupAction: null,
+                itemGroupAction: null,
+                fallbackKind:
+                    CompiledTargetFallbackKind.TaskBuilder);
+
+        internal static CompiledTargetSourceActionRecord CreatePropertyGroup(
+            ProjectPropertyGroupTaskInstance propertyGroup)
+        {
+            CompiledPropertyGroupAction action =
+                CompiledPropertyGroupAction.TryCreate(propertyGroup);
+            return action == null
+                ? CreateFallback(
+                    propertyGroup,
+                    CompiledTargetFallbackKind.PropertyGroupIntrinsic)
+                : new CompiledTargetSourceActionRecord(
+                    CompiledTargetActionKind.PropertyGroup,
+                    propertyGroup,
+                    taskProgram: null,
+                    propertyGroupAction: action,
+                    itemGroupAction: null,
+                    fallbackKind:
+                        CompiledTargetFallbackKind.TaskBuilder);
+        }
+
+        internal static CompiledTargetSourceActionRecord CreateItemGroup(
+            ProjectItemGroupTaskInstance itemGroup)
+        {
+            CompiledItemGroupAction action =
+                CompiledItemGroupAction.TryCreate(itemGroup);
+            return action == null
+                ? CreateFallback(
+                    itemGroup,
+                    CompiledTargetFallbackKind.ItemGroupIntrinsic)
+                : new CompiledTargetSourceActionRecord(
+                    CompiledTargetActionKind.ItemGroup,
+                    itemGroup,
+                    taskProgram: null,
+                    propertyGroupAction: null,
+                    itemGroupAction: action,
+                    fallbackKind:
+                        CompiledTargetFallbackKind.TaskBuilder);
+        }
+
+        internal static CompiledTargetSourceActionRecord CreateFallback(
+            ProjectTargetInstanceChild child,
+            CompiledTargetFallbackKind fallbackKind =
+                CompiledTargetFallbackKind.TaskBuilder) =>
+            new(
+                CompiledTargetActionKind.Fallback,
+                child,
+                taskProgram: null,
+                propertyGroupAction: null,
+                itemGroupAction: null,
+                fallbackKind: fallbackKind);
+    }
+
+    /// <summary>
+    /// Ordered residual action for one target child.
+    /// </summary>
+    internal readonly struct CompiledTargetActionRecord
+    {
+        internal CompiledTargetActionRecord(
+            CompiledTargetActionKind kind,
+            ProjectTargetInstanceChild child,
+            CompiledTaskAction taskAction,
+            CompiledPropertyGroupAction propertyGroupAction,
+            CompiledItemGroupAction itemGroupAction,
+            CompiledTargetFallbackKind fallbackKind)
+        {
+            Kind = kind;
+            Child = child;
+            TaskAction = taskAction;
+            PropertyGroupAction = propertyGroupAction;
+            ItemGroupAction = itemGroupAction;
+            FallbackKind = fallbackKind;
+        }
+
+        internal CompiledTargetActionKind Kind { get; }
+
+        internal ProjectTargetInstanceChild Child { get; }
+
+        internal CompiledTaskAction TaskAction { get; }
+
+        internal CompiledPropertyGroupAction PropertyGroupAction { get; }
+
+        internal CompiledItemGroupAction ItemGroupAction { get; }
+
+        internal CompiledTargetFallbackKind FallbackKind { get; }
+    }
+
+    internal sealed class CompiledPropertyGroupAction
+    {
+        private readonly CompiledConditionProgram _condition;
+        private readonly IElementLocation _conditionLocation;
+        private readonly CompiledPropertyAssignment[] _assignments;
+
+        private CompiledPropertyGroupAction(
+            CompiledConditionProgram condition,
+            IElementLocation conditionLocation,
+            CompiledPropertyAssignment[] assignments)
+        {
+            _condition = condition;
+            _conditionLocation = conditionLocation;
+            _assignments = assignments;
+        }
+
+        internal int AssignmentCount => _assignments.Length;
+
+        internal static CompiledPropertyGroupAction TryCreate(
+            ProjectPropertyGroupTaskInstance propertyGroup)
+        {
+            CompiledConditionProgram condition = null;
+            if (!string.IsNullOrEmpty(propertyGroup.Condition))
+            {
+                condition = CompiledConditionProgram.TryCreate(
+                    propertyGroup.Condition,
+                    propertyGroup.ConditionLocation);
+                if (condition == null)
+                {
+                    return null;
+                }
+            }
+
+            var assignments =
+                new CompiledPropertyAssignment[
+                    propertyGroup.Properties.Count];
+            int assignmentIndex = 0;
+            foreach (ProjectPropertyGroupTaskPropertyInstance property
+                in propertyGroup.Properties)
+            {
+                if (ReservedPropertyNames.IsReservedProperty(property.Name))
+                {
+                    return null;
+                }
+
+                CompiledConditionProgram propertyCondition = null;
+                if (!string.IsNullOrEmpty(property.Condition))
+                {
+                    propertyCondition = CompiledConditionProgram.TryCreate(
+                        property.Condition,
+                        property.ConditionLocation);
+                    if (propertyCondition == null)
+                    {
+                        return null;
+                    }
+                }
+
+                CompiledScalarProgram value =
+                    CompiledScalarProgram.TryCreate(property.Value);
+                if (value == null)
+                {
+                    return null;
+                }
+
+                assignments[assignmentIndex++] =
+                    new CompiledPropertyAssignment(
+                        property,
+                        propertyCondition,
+                        value);
+            }
+
+            return new CompiledPropertyGroupAction(
+                condition,
+                propertyGroup.ConditionLocation,
+                assignments);
+        }
+
+        internal bool EvaluateCondition(
+            ICompiledExpressionEnvironment environment) =>
+            _condition?.Evaluate(environment, _conditionLocation) ?? true;
+
+        internal CompiledPropertyAssignment GetAssignment(int index) =>
+            _assignments[index];
+    }
+
+    internal readonly struct CompiledPropertyAssignment
+    {
+        internal CompiledPropertyAssignment(
+            ProjectPropertyGroupTaskPropertyInstance property,
+            CompiledConditionProgram condition,
+            CompiledScalarProgram value)
+        {
+            Property = property;
+            Condition = condition;
+            Value = value;
+        }
+
+        internal ProjectPropertyGroupTaskPropertyInstance Property { get; }
+
+        internal CompiledConditionProgram Condition { get; }
+
+        internal CompiledScalarProgram Value { get; }
+    }
+
+    internal enum CompiledItemOperationKind : byte
+    {
+        Include,
+        Remove,
+        Modify,
+    }
+
+    internal readonly struct CompiledBatchingMetadataReference
+    {
+        internal CompiledBatchingMetadataReference(
+            string qualifiedName,
+            MetadataReference reference)
+        {
+            QualifiedName = qualifiedName;
+            ItemName = reference.ItemName;
+            MetadataName = reference.MetadataName;
+        }
+
+        internal string QualifiedName { get; }
+
+        internal string ItemName { get; }
+
+        internal string MetadataName { get; }
+    }
+
+    internal sealed class CompiledBatchingDescriptor
+    {
+        private CompiledBatchingDescriptor(
+            string[] itemReferences,
+            CompiledBatchingMetadataReference[] metadataReferences)
+        {
+            ItemReferences = itemReferences;
+            MetadataReferences = metadataReferences;
+        }
+
+        internal string[] ItemReferences { get; }
+
+        internal CompiledBatchingMetadataReference[] MetadataReferences { get; }
+
+        internal bool RequiresBatching => MetadataReferences.Length != 0;
+
+        internal static CompiledBatchingDescriptor Create(
+            ProjectItemGroupTaskItemInstance item)
+        {
+            var values = new List<string>(item.Metadata.Count + 4);
+            AddIfNotEmpty(values, item.Include);
+            AddIfNotEmpty(values, item.Exclude);
+            AddIfNotEmpty(values, item.Remove);
+            AddIfNotEmpty(values, item.Condition);
+            foreach (ProjectItemGroupTaskMetadataInstance metadata
+                in item.Metadata)
+            {
+                AddIfNotEmpty(values, metadata.Value);
+                AddIfNotEmpty(values, metadata.Condition);
+            }
+
+            ItemsAndMetadataPair pair =
+                ExpressionShredder.GetReferencedItemNamesAndMetadata(values);
+            string[] itemReferences = pair.Items?.ToArray() ??
+                Array.Empty<string>();
+            CompiledBatchingMetadataReference[] metadataReferences =
+                pair.Metadata == null
+                    ? Array.Empty<CompiledBatchingMetadataReference>()
+                    : pair.Metadata.Select(
+                        entry => new CompiledBatchingMetadataReference(
+                            entry.Key,
+                            entry.Value)).ToArray();
+            return new CompiledBatchingDescriptor(
+                itemReferences,
+                metadataReferences);
+        }
+
+        internal static CompiledBatchingDescriptor Create(
+            params string[] values)
+        {
+            var nonEmptyValues = new List<string>(values.Length);
+            foreach (string value in values)
+            {
+                AddIfNotEmpty(nonEmptyValues, value);
+            }
+
+            ItemsAndMetadataPair pair =
+                ExpressionShredder.GetReferencedItemNamesAndMetadata(
+                    nonEmptyValues);
+            string[] itemReferences = pair.Items?.ToArray() ??
+                Array.Empty<string>();
+            CompiledBatchingMetadataReference[] metadataReferences =
+                pair.Metadata == null
+                    ? Array.Empty<CompiledBatchingMetadataReference>()
+                    : pair.Metadata.Select(
+                        entry => new CompiledBatchingMetadataReference(
+                            entry.Key,
+                            entry.Value)).ToArray();
+            return new CompiledBatchingDescriptor(
+                itemReferences,
+                metadataReferences);
+        }
+
+        private static void AddIfNotEmpty(
+            List<string> values,
+            string value)
+        {
+            if (!string.IsNullOrEmpty(value))
+            {
+                values.Add(value);
+            }
+        }
+    }
+
+    internal sealed class CompiledItemGroupAction
+    {
+        private readonly CompiledConditionProgram _condition;
+        private readonly IElementLocation _conditionLocation;
+        private readonly CompiledItemOperation[] _operations;
+        private readonly CompiledTargetFrameworkRoutingAction
+            _targetFrameworkRoutingAction;
+
+        private CompiledItemGroupAction(
+            CompiledConditionProgram condition,
+            IElementLocation conditionLocation,
+            CompiledItemOperation[] operations,
+            CompiledTargetFrameworkRoutingAction
+                targetFrameworkRoutingAction)
+        {
+            _condition = condition;
+            _conditionLocation = conditionLocation;
+            _operations = operations;
+            _targetFrameworkRoutingAction =
+                targetFrameworkRoutingAction;
+        }
+
+        internal int OperationCount => _operations.Length;
+
+        internal CompiledTargetFrameworkRoutingAction
+            TargetFrameworkRoutingAction =>
+            _targetFrameworkRoutingAction;
+
+        internal static CompiledItemGroupAction TryCreate(
+            ProjectItemGroupTaskInstance itemGroup)
+        {
+            CompiledConditionProgram condition = null;
+            if (!string.IsNullOrEmpty(itemGroup.Condition))
+            {
+                condition = CompiledConditionProgram.TryCreate(
+                    itemGroup.Condition,
+                    itemGroup.ConditionLocation);
+                if (condition == null)
+                {
+                    return null;
+                }
+            }
+
+            var operations =
+                new CompiledItemOperation[itemGroup.Items.Count];
+            int operationIndex = 0;
+            foreach (ProjectItemGroupTaskItemInstance item
+                in itemGroup.Items)
+            {
+                CompiledItemOperation operation =
+                    CompiledItemOperation.TryCreate(item);
+                if (operation == null)
+                {
+                    return null;
+                }
+
+                operations[operationIndex++] = operation;
+            }
+
+            return new CompiledItemGroupAction(
+                condition,
+                itemGroup.ConditionLocation,
+                operations,
+                CompiledTargetFrameworkRoutingAction.TryCreate(
+                    itemGroup,
+                    operations));
+        }
+
+        internal bool EvaluateCondition(
+            ICompiledExpressionEnvironment environment) =>
+            _condition?.EvaluateForItemGroup(
+                environment,
+                _conditionLocation) ?? true;
+
+        internal CompiledItemOperation GetOperation(int index) =>
+            _operations[index];
+    }
+
+    internal sealed class CompiledTargetFrameworkRoutingAction
+    {
+        private static readonly string[] s_decomposedMetadataNames =
+        {
+            "SupportsTrimming",
+            "SupportedByMinNonEolTargetFrameworkForTrimming",
+            "SupportsAot",
+            "SupportedByMinNonEolTargetFrameworkForAot",
+            "SupportsSingleFile",
+            "SupportedByMinNonEolTargetFrameworkForSingleFile",
+        };
+
+        private static readonly string[] s_decomposedMetadataValues =
+        {
+            "$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportTrimming)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForTrimming)', '%(Identity)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportAot)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForAot)', '%(Identity)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('%(Identity)', '$(_FirstTargetFrameworkToSupportSingleFile)'))",
+            "$([MSBuild]::IsTargetFrameworkCompatible('$(_MinNonEolTargetFrameworkForSingleFile)', '%(Identity)'))",
+        };
+
+        private CompiledTargetFrameworkRoutingAction(
+            CompiledItemOperation[] operations)
+        {
+            SourceInclude = operations[0];
+            Decomposition = operations[1];
+            TrimmingRoute = operations[2];
+            AotRoute = operations[3];
+            SingleFileRoute = operations[4];
+        }
+
+        internal CompiledItemOperation SourceInclude { get; }
+
+        internal CompiledItemOperation Decomposition { get; }
+
+        internal CompiledItemOperation TrimmingRoute { get; }
+
+        internal CompiledItemOperation AotRoute { get; }
+
+        internal CompiledItemOperation SingleFileRoute { get; }
+
+        internal static CompiledTargetFrameworkRoutingAction TryCreate(
+            ProjectItemGroupTaskInstance itemGroup,
+            CompiledItemOperation[] operations)
+        {
+            if (!string.IsNullOrEmpty(itemGroup.Condition) ||
+                operations.Length != 5 ||
+                !MatchesItem(
+                    operations[0].Item,
+                    "_TargetFramework",
+                    "$(TargetFrameworks)",
+                    condition: null,
+                    metadataNames: null,
+                    metadataValues: null) ||
+                !MatchesItem(
+                    operations[1].Item,
+                    "_DecomposedTargetFramework",
+                    "@(_TargetFramework)",
+                    condition: null,
+                    s_decomposedMetadataNames,
+                    s_decomposedMetadataValues) ||
+                !MatchesItem(
+                    operations[2].Item,
+                    "_TargetFrameworkToSilenceIsTrimmableUnsupportedWarning",
+                    "@(_DecomposedTargetFramework)",
+                    "'%(SupportsTrimming)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForTrimming)' == 'true'",
+                    metadataNames: null,
+                    metadataValues: null) ||
+                !MatchesItem(
+                    operations[3].Item,
+                    "_TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning",
+                    "@(_DecomposedTargetFramework->'%(Identity)')",
+                    "'%(SupportsAot)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForAot)' == 'true'",
+                    metadataNames: null,
+                    metadataValues: null) ||
+                !MatchesItem(
+                    operations[4].Item,
+                    "_TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning",
+                    "@(_DecomposedTargetFramework)",
+                    "'%(SupportsSingleFile)' == 'true' And '%(SupportedByMinNonEolTargetFrameworkForSingleFile)' == 'true'",
+                    metadataNames: null,
+                    metadataValues: null))
+            {
+                return null;
+            }
+
+            return new CompiledTargetFrameworkRoutingAction(operations);
+        }
+
+        private static bool MatchesItem(
+            ProjectItemGroupTaskItemInstance item,
+            string itemType,
+            string include,
+            string condition,
+            string[] metadataNames,
+            string[] metadataValues)
+        {
+            if (!item.ItemType.Equals(
+                    itemType,
+                    StringComparison.Ordinal) ||
+                !item.Include.Equals(
+                    include,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    item.Condition,
+                    condition ?? string.Empty,
+                    StringComparison.Ordinal) ||
+                !string.IsNullOrEmpty(item.Exclude) ||
+                !string.IsNullOrEmpty(item.Remove) ||
+                !string.IsNullOrEmpty(item.KeepDuplicates) ||
+                !string.IsNullOrEmpty(item.KeepMetadata) ||
+                !string.IsNullOrEmpty(item.RemoveMetadata) ||
+                !string.IsNullOrEmpty(item.MatchOnMetadata) ||
+                !string.IsNullOrEmpty(item.MatchOnMetadataOptions) ||
+                item.Metadata.Count != (metadataNames?.Length ?? 0))
+            {
+                return false;
+            }
+
+            if (metadataNames == null)
+            {
+                return true;
+            }
+
+            int metadataIndex = 0;
+            foreach (ProjectItemGroupTaskMetadataInstance metadata
+                in item.Metadata)
+            {
+                if (!metadata.Name.Equals(
+                        metadataNames[metadataIndex],
+                        StringComparison.Ordinal) ||
+                    !metadata.Value.Equals(
+                        metadataValues[metadataIndex],
+                        StringComparison.Ordinal) ||
+                    !string.IsNullOrEmpty(metadata.Condition))
+                {
+                    return false;
+                }
+
+                metadataIndex++;
+            }
+
+            return true;
+        }
+    }
+
+    internal sealed class CompiledItemOperation
+    {
+        private CompiledItemOperation(
+            ProjectItemGroupTaskItemInstance item,
+            CompiledItemOperationKind kind,
+            CompiledConditionProgram condition,
+            CompiledScalarProgram include,
+            CompiledScalarProgram exclude,
+            CompiledScalarProgram remove,
+            CompiledConditionProgram keepDuplicates,
+            CompiledScalarProgram keepMetadata,
+            CompiledScalarProgram removeMetadata,
+            CompiledScalarProgram matchOnMetadata,
+            MatchOnMetadataOptions matchOnMetadataOptions,
+            CompiledBatchingDescriptor batching,
+            CompiledItemMetadataAssignment[] metadata)
+        {
+            Item = item;
+            Kind = kind;
+            Condition = condition;
+            Include = include;
+            Exclude = exclude;
+            Remove = remove;
+            KeepDuplicates = keepDuplicates;
+            KeepMetadata = keepMetadata;
+            RemoveMetadata = removeMetadata;
+            MatchOnMetadata = matchOnMetadata;
+            MatchOnMetadataOptions = matchOnMetadataOptions;
+            Batching = batching;
+            Metadata = metadata;
+        }
+
+        internal ProjectItemGroupTaskItemInstance Item { get; }
+
+        internal CompiledItemOperationKind Kind { get; }
+
+        internal CompiledConditionProgram Condition { get; }
+
+        internal CompiledScalarProgram Include { get; }
+
+        internal CompiledScalarProgram Exclude { get; }
+
+        internal CompiledScalarProgram Remove { get; }
+
+        internal CompiledConditionProgram KeepDuplicates { get; }
+
+        internal CompiledScalarProgram KeepMetadata { get; }
+
+        internal CompiledScalarProgram RemoveMetadata { get; }
+
+        internal CompiledScalarProgram MatchOnMetadata { get; }
+
+        internal MatchOnMetadataOptions MatchOnMetadataOptions { get; }
+
+        internal CompiledBatchingDescriptor Batching { get; }
+
+        internal CompiledItemMetadataAssignment[] Metadata { get; }
+
+        internal static CompiledItemOperation TryCreate(
+            ProjectItemGroupTaskItemInstance item)
+        {
+            CompiledConditionProgram condition = null;
+            if (!string.IsNullOrEmpty(item.Condition))
+            {
+                condition =
+                    CompiledConditionProgram.TryCreateForItemGroup(
+                    item.Condition,
+                    item.ConditionLocation);
+                if (condition == null)
+                {
+                    return null;
+                }
+            }
+
+            CompiledItemOperationKind kind =
+                item.Include.Length != 0 || item.Exclude.Length != 0
+                    ? CompiledItemOperationKind.Include
+                    : item.Remove.Length != 0
+                        ? CompiledItemOperationKind.Remove
+                        : CompiledItemOperationKind.Modify;
+
+            CompiledScalarProgram include = null;
+            CompiledScalarProgram exclude = null;
+            CompiledScalarProgram remove = null;
+            CompiledConditionProgram keepDuplicates = null;
+            CompiledScalarProgram keepMetadata = null;
+            CompiledScalarProgram removeMetadata = null;
+            CompiledScalarProgram matchOnMetadata = null;
+            MatchOnMetadataOptions matchOnMetadataOptions =
+                MatchOnMetadataConstants.MatchOnMetadataOptionsDefaultValue;
+
+            if (kind == CompiledItemOperationKind.Include)
+            {
+                if (!string.IsNullOrEmpty(item.MatchOnMetadata) ||
+                    !string.IsNullOrEmpty(item.MatchOnMetadataOptions))
+                {
+                    return null;
+                }
+
+                if (!TryCompileItemSpecification(
+                        item.Include,
+                        allowItemVectors: true,
+                        out include) ||
+                    !TryCompileItemSpecification(
+                        item.Exclude,
+                        allowItemVectors: true,
+                        out exclude) ||
+                    !TryCompileItemSpecification(
+                        item.KeepMetadata,
+                        allowItemVectors: true,
+                        out keepMetadata) ||
+                    !TryCompileItemSpecification(
+                        item.RemoveMetadata,
+                        allowItemVectors: true,
+                        out removeMetadata))
+                {
+                    return null;
+                }
+
+                if (!string.IsNullOrEmpty(item.KeepDuplicates))
+                {
+                    keepDuplicates =
+                        CompiledConditionProgram.TryCreateForItemGroup(
+                        item.KeepDuplicates,
+                        item.KeepDuplicatesLocation);
+                    if (keepDuplicates == null)
+                    {
+                        return null;
+                    }
+                }
+            }
+            else if (kind == CompiledItemOperationKind.Remove)
+            {
+                if (!string.IsNullOrEmpty(item.KeepMetadata) ||
+                    !string.IsNullOrEmpty(item.RemoveMetadata) ||
+                    !string.IsNullOrEmpty(item.KeepDuplicates) ||
+                    (string.IsNullOrEmpty(item.MatchOnMetadata) &&
+                     !string.IsNullOrEmpty(item.MatchOnMetadataOptions)))
+                {
+                    return null;
+                }
+
+                if (!TryCompileItemSpecification(
+                        item.Remove,
+                        allowItemVectors: true,
+                        out remove) ||
+                    !TryCompileItemSpecification(
+                        item.MatchOnMetadata,
+                        allowItemVectors: true,
+                        out matchOnMetadata))
+                {
+                    return null;
+                }
+
+                if (matchOnMetadata != null)
+                {
+                    Enum.TryParse(
+                        item.MatchOnMetadataOptions,
+                        out matchOnMetadataOptions);
+                }
+            }
+            else if (!string.IsNullOrEmpty(item.KeepDuplicates) ||
+                     !string.IsNullOrEmpty(item.MatchOnMetadata) ||
+                     !string.IsNullOrEmpty(item.MatchOnMetadataOptions) ||
+                     !TryCompileItemSpecification(
+                         item.KeepMetadata,
+                         allowItemVectors: true,
+                         out keepMetadata) ||
+                     !TryCompileItemSpecification(
+                         item.RemoveMetadata,
+                         allowItemVectors: true,
+                         out removeMetadata))
+            {
+                return null;
+            }
+
+            var metadata =
+                new CompiledItemMetadataAssignment[item.Metadata.Count];
+            int metadataIndex = 0;
+            foreach (ProjectItemGroupTaskMetadataInstance metadataInstance
+                in item.Metadata)
+            {
+                CompiledConditionProgram metadataCondition = null;
+                if (!string.IsNullOrEmpty(metadataInstance.Condition))
+                {
+                    metadataCondition =
+                        CompiledConditionProgram.TryCreateForItemGroup(
+                            metadataInstance.Condition,
+                            metadataInstance.ConditionLocation);
+                    if (metadataCondition == null)
+                    {
+                        return null;
+                    }
+                }
+
+                CompiledScalarProgram value =
+                    CompiledScalarProgram.TryCreateItemSpecification(
+                        metadataInstance.Value);
+                if (value == null)
+                {
+                    return null;
+                }
+
+                metadata[metadataIndex++] =
+                    new CompiledItemMetadataAssignment(
+                        metadataInstance,
+                        metadataCondition,
+                        value);
+            }
+
+            return new CompiledItemOperation(
+                item,
+                kind,
+                condition,
+                include,
+                exclude,
+                remove,
+                keepDuplicates,
+                keepMetadata,
+                removeMetadata,
+                matchOnMetadata,
+                matchOnMetadataOptions,
+                CompiledBatchingDescriptor.Create(item),
+                metadata);
+        }
+
+        private static bool TryCompileItemSpecification(
+            string specification,
+            bool allowItemVectors,
+            out CompiledScalarProgram program)
+        {
+            program = null;
+            if (string.IsNullOrEmpty(specification))
+            {
+                return true;
+            }
+
+            if ((!allowItemVectors &&
+                 ExpressionShredder.ContainsItemVectorMarker(
+                     specification)))
+            {
+                return false;
+            }
+
+            program =
+                allowItemVectors
+                    ? CompiledScalarProgram.TryCreateItemSpecification(
+                        specification)
+                    : CompiledScalarProgram.TryCreate(specification);
+            return program != null;
+        }
+    }
+
+    internal readonly struct CompiledItemMetadataAssignment
+    {
+        internal CompiledItemMetadataAssignment(
+            ProjectItemGroupTaskMetadataInstance metadata,
+            CompiledConditionProgram condition,
+            CompiledScalarProgram value)
+        {
+            Metadata = metadata;
+            Condition = condition;
+            Value = value;
+        }
+
+        internal ProjectItemGroupTaskMetadataInstance Metadata { get; }
+
+        internal CompiledConditionProgram Condition { get; }
+
+        internal CompiledScalarProgram Value { get; }
+    }
+
+    internal sealed class CompiledLookupExpressionEnvironment :
+        ICompiledExpressionEnvironment
+    {
+        private readonly Expander<
+            ProjectPropertyInstance,
+            ProjectItemInstance> _expander;
+#if NET
+        private CompiledTargetFrameworkCache _targetFrameworkCache;
+#endif
+
+        internal CompiledLookupExpressionEnvironment(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander)
+        {
+            _expander = expander;
+        }
+
+#if NET
+        internal CompiledLookupExpressionEnvironment(
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander,
+            CompiledTargetFrameworkCache targetFrameworkCache)
+        {
+            _expander = expander;
+            _targetFrameworkCache = targetFrameworkCache;
+        }
+#endif
+
+        internal Expander<ProjectPropertyInstance, ProjectItemInstance>
+            Expander => _expander;
+
+        string ICompiledExpressionEnvironment.GetEscapedPropertyValue(
+            string propertyName,
+            IElementLocation location) =>
+            _expander.GetEscapedPropertyValue(propertyName, location);
+
+        string ICompiledExpressionEnvironment.GetEscapedMetadataValue(
+            string itemType,
+            string metadataName,
+            IElementLocation location) =>
+            _expander.Metadata.GetEscapedValue(
+                string.IsNullOrEmpty(itemType) ? null : itemType,
+                metadataName);
+
+        string ICompiledExpressionEnvironment.ExpandItems(
+            string escapedValue,
+            IElementLocation location) =>
+            _expander.ExpandIntoStringLeaveEscaped(
+                escapedValue,
+                ExpanderOptions.ExpandItems,
+                location);
+
+        bool ICompiledExpressionEnvironment.IsItemExpansionEmpty(
+            string escapedValue,
+            IElementLocation location) =>
+            _expander.ExpandIntoStringLeaveEscaped(
+                escapedValue,
+                ExpanderOptions.ExpandItems |
+                    ExpanderOptions.BreakOnNotEmpty,
+                location) is { Length: 0 };
+
+        void ICompiledExpressionEnvironment.EnterConditionEvaluation(
+            bool oneSideIsEmpty)
+        {
+            _expander.PropertiesUseTracker.PropertyReadContext =
+                oneSideIsEmpty
+                    ? PropertyReadContext
+                        .ConditionEvaluationWithOneSideEmpty
+                    : PropertyReadContext.ConditionEvaluation;
+        }
+
+        void ICompiledExpressionEnvironment.LeaveConditionEvaluation() =>
+            _expander.PropertiesUseTracker.ResetPropertyReadContext();
+
+#if NET
+        internal NuGetFramework GetOrParseTargetFramework(
+            string framework) =>
+            (_targetFrameworkCache ??=
+                new CompiledTargetFrameworkCache()).GetOrParse(framework);
+
+        NuGetFramework ICompiledExpressionEnvironment.GetOrParseTargetFramework(
+            string framework) =>
+            GetOrParseTargetFramework(framework);
+#endif
     }
 
     /// <summary>

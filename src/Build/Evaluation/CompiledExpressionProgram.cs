@@ -3,8 +3,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
+#if NET
+using NuGet.Frameworks;
+#endif
 using Microsoft.Build.Construction;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Exceptions;
@@ -387,6 +391,86 @@ namespace Microsoft.Build.Evaluation
     internal interface ICompiledExpressionEnvironment
     {
         string GetEscapedPropertyValue(string propertyName, IElementLocation location);
+
+        string GetEscapedMetadataValue(
+            string itemType,
+            string metadataName,
+            IElementLocation location);
+
+        string ExpandItems(string escapedValue, IElementLocation location);
+
+        bool IsItemExpansionEmpty(
+            string escapedValue,
+            IElementLocation location);
+
+        void EnterConditionEvaluation(bool oneSideIsEmpty);
+
+        void LeaveConditionEvaluation();
+
+#if NET
+        NuGetFramework GetOrParseTargetFramework(string framework);
+#endif
+    }
+
+#if NET
+    internal sealed class CompiledTargetFrameworkCache
+    {
+        private Dictionary<string, NuGetFramework> _frameworks;
+
+        internal NuGetFramework GetOrParse(string framework)
+        {
+            _frameworks ??=
+                new Dictionary<string, NuGetFramework>(
+                    StringComparer.Ordinal);
+            if (!_frameworks.TryGetValue(
+                    framework,
+                    out NuGetFramework parsed))
+            {
+                parsed = NuGetFramework.Parse(framework);
+                _frameworks.Add(framework, parsed);
+            }
+
+            return parsed;
+        }
+    }
+#endif
+
+    internal readonly struct CompiledExpressionFunction
+    {
+        internal CompiledExpressionFunction(
+            CompiledPropertyFunctionKind kind,
+            TableRange receiver,
+            TableRange arguments,
+            string expression,
+            bool hasTargetFrameworkCompatibilitySpecialization)
+        {
+            Kind = kind;
+            Receiver = receiver;
+            Arguments = arguments;
+            Expression = expression;
+            HasTargetFrameworkCompatibilitySpecialization =
+                hasTargetFrameworkCompatibilitySpecialization;
+        }
+
+        internal CompiledPropertyFunctionKind Kind { get; }
+
+        internal TableRange Receiver { get; }
+
+        internal TableRange Arguments { get; }
+
+        internal string Expression { get; }
+
+        internal bool HasTargetFrameworkCompatibilitySpecialization { get; }
+    }
+
+    internal readonly struct CompiledExpressionFunctionArgument
+    {
+        internal CompiledExpressionFunctionArgument(TableRange valueParts)
+        {
+            ValueParts = valueParts;
+        }
+
+        internal TableRange ValueParts { get; }
     }
 
     internal sealed class CompiledConditionProgram
@@ -406,7 +490,36 @@ namespace Microsoft.Build.Evaluation
                 condition,
                 ParserOptions.AllowProperties,
                 location,
-                out CompiledConditionProgramData program)
+                out CompiledConditionProgramData program,
+                allowExtendedExpressions: true)
+                ? new CompiledConditionProgram(program)
+                : null;
+        }
+
+        internal static CompiledConditionProgram TryCreateForItemGroup(
+            string condition,
+            ElementLocation location)
+        {
+            return CompiledConditionCompiler.TryCompile(
+                condition,
+                ParserOptions.AllowAll,
+                location,
+                out CompiledConditionProgramData program,
+                allowExtendedExpressions: true)
+                ? new CompiledConditionProgram(program)
+                : null;
+        }
+
+        internal static CompiledConditionProgram TryCreateForTarget(
+            string condition,
+            ElementLocation location)
+        {
+            return CompiledConditionCompiler.TryCompile(
+                condition,
+                ParserOptions.AllowPropertiesAndItemLists,
+                location,
+                out CompiledConditionProgramData program,
+                allowExtendedExpressions: true)
                 ? new CompiledConditionProgram(program)
                 : null;
         }
@@ -414,6 +527,37 @@ namespace Microsoft.Build.Evaluation
         internal bool Evaluate(
             ICompiledExpressionEnvironment environment,
             IElementLocation location)
+        {
+            return Evaluate(
+                environment,
+                location,
+                expandItems: false);
+        }
+
+        internal bool EvaluateForItemGroup(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location)
+        {
+            return Evaluate(
+                environment,
+                location,
+                expandItems: true);
+        }
+
+        internal bool EvaluateForTarget(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location)
+        {
+            return Evaluate(
+                environment,
+                location,
+                expandItems: true);
+        }
+
+        private bool Evaluate(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            bool expandItems)
         {
             int instructionIndex = 0;
             while (true)
@@ -424,18 +568,30 @@ namespace Microsoft.Build.Evaluation
                 {
                     case CompiledConditionInstructionKind.BranchIfComparisonFalse:
                         instructionIndex +=
-                            EvaluateComparison(environment, location, instruction.Argument0)
+                            EvaluateComparison(
+                                environment,
+                                location,
+                                instruction.Argument0,
+                                expandItems)
                                 ? 1
                                 : instruction.Argument1;
                         break;
                     case CompiledConditionInstructionKind.BranchIfComparisonTrue:
                         instructionIndex +=
-                            EvaluateComparison(environment, location, instruction.Argument0)
+                            EvaluateComparison(
+                                environment,
+                                location,
+                                instruction.Argument0,
+                                expandItems)
                                 ? instruction.Argument1
                                 : 1;
                         break;
                     case CompiledConditionInstructionKind.ReturnComparison:
-                        return EvaluateComparison(environment, location, instruction.Argument0);
+                        return EvaluateComparison(
+                            environment,
+                            location,
+                            instruction.Argument0,
+                            expandItems);
                     case CompiledConditionInstructionKind.ReturnFalse:
                         return false;
                     case CompiledConditionInstructionKind.ReturnTrue:
@@ -450,23 +606,141 @@ namespace Microsoft.Build.Evaluation
         private bool EvaluateComparison(
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
-            int comparisonId)
+            int comparisonId,
+            bool expandItems)
         {
             CompiledConditionComparison comparison =
                 _program.Comparisons[comparisonId];
-            bool equal = CompiledConditionUtilities.CompareValues(
-                EvaluateOperand(environment, location, comparison.Left),
-                EvaluateOperand(environment, location, comparison.Right),
-                out _);
-            return comparison.Kind == CompiledConditionKind.Equal
-                ? equal
-                : !equal;
+            environment.EnterConditionEvaluation(
+                IsUnexpandedValueEmpty(comparison.Left) ||
+                IsUnexpandedValueEmpty(comparison.Right));
+            try
+            {
+                bool leftIsStatic =
+                    TryGetStaticEmptiness(
+                        comparison.Left,
+                        comparison.LeftRawStringId,
+                        expandItems,
+                        out bool leftIsEmpty);
+                bool rightIsStatic =
+                    TryGetStaticEmptiness(
+                        comparison.Right,
+                        comparison.RightRawStringId,
+                        expandItems,
+                        out bool rightIsEmpty);
+                if ((leftIsStatic && leftIsEmpty) ||
+                    (rightIsStatic && rightIsEmpty))
+                {
+                    if (!leftIsStatic)
+                    {
+                        leftIsEmpty = EvaluateOperandIsEmpty(
+                            environment,
+                            location,
+                            comparison.Left,
+                            expandItems);
+                    }
+
+                    if (!rightIsStatic)
+                    {
+                        rightIsEmpty = EvaluateOperandIsEmpty(
+                            environment,
+                            location,
+                            comparison.Right,
+                            expandItems);
+                    }
+
+                    bool shortCircuitEqual =
+                        leftIsEmpty == rightIsEmpty;
+                    return comparison.Kind == CompiledConditionKind.Equal
+                        ? shortCircuitEqual
+                        : !shortCircuitEqual;
+                }
+
+                bool equal = CompiledConditionUtilities.CompareValues(
+                    EvaluateOperand(
+                        environment,
+                        location,
+                        comparison.Left,
+                        expandItems),
+                    EvaluateOperand(
+                        environment,
+                        location,
+                        comparison.Right,
+                        expandItems),
+                    out _);
+                return comparison.Kind == CompiledConditionKind.Equal
+                    ? equal
+                    : !equal;
+            }
+            finally
+            {
+                environment.LeaveConditionEvaluation();
+            }
+        }
+
+        private bool IsUnexpandedValueEmpty(
+            CompiledConditionOperand operand) =>
+            operand.Kind == CompiledConditionOperandKind.Literal &&
+            _program.Strings[operand.Value].Length == 0;
+
+        private bool TryGetStaticEmptiness(
+            CompiledConditionOperand operand,
+            int rawStringId,
+            bool expandItems,
+            out bool isEmpty)
+        {
+            if (operand.Kind == CompiledConditionOperandKind.Literal)
+            {
+                isEmpty = _program.Strings[operand.Value].Length == 0;
+                return true;
+            }
+
+            if (operand.Kind ==
+                CompiledConditionOperandKind.ExpandedValue)
+            {
+                if (expandItems)
+                {
+                    string value = _program.Strings[rawStringId];
+                    if (value.Length <= 2 ||
+                        value[1] != '(' ||
+                        (value[0] != '$' &&
+                         value[0] != '%' &&
+                         value[0] != '@') ||
+                        value[value.Length - 1] != ')')
+                    {
+                        isEmpty = false;
+                        return true;
+                    }
+
+                    isEmpty = false;
+                    return false;
+                }
+
+                for (int partIndex = operand.Value;
+                     partIndex < operand.Value + operand.Count;
+                     partIndex++)
+                {
+                    CompiledConditionValuePart part =
+                        _program.ValueParts[partIndex];
+                    if (part.Kind ==
+                            CompiledConditionValuePartKind.Literal &&
+                        _program.Strings[part.Value].Length != 0)
+                    {
+                        isEmpty = false;
+                        return true;
+                    }
+                }
+            }
+
+            isEmpty = false;
+            return false;
         }
 
         private string EvaluateOperand(
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
-            CompiledConditionOperand operand)
+            CompiledConditionOperand operand,
+            bool expandItems)
         {
             switch (operand.Kind)
             {
@@ -477,20 +751,78 @@ namespace Microsoft.Build.Evaluation
                         environment,
                         location,
                         operand.Value,
-                        unescape: true);
+                        unescape: true,
+                        expandItems: expandItems);
                 case CompiledConditionOperandKind.ExpandedValue:
                     return EvaluateExpandedValue(
                         environment,
                         location,
                         operand.Value,
-                        operand.Count);
+                        operand.Count,
+                        expandItems);
+                case CompiledConditionOperandKind.Metadata:
+                    return EscapingUtilities.UnescapeAll(
+                        FileUtilities.MaybeAdjustFilePath(
+                            environment.GetEscapedMetadataValue(
+                                _program.Strings[operand.Value],
+                                _program.Strings[operand.Count],
+                                location)));
                 default:
                     throw new InternalErrorException(
                         "Unknown compiled task condition operand.");
             }
         }
 
+        private bool EvaluateOperandIsEmpty(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            CompiledConditionOperand operand,
+            bool expandItems)
+        {
+            if (expandItems &&
+                operand.Kind ==
+                CompiledConditionOperandKind.ExpandedValue)
+            {
+                return environment.IsItemExpansionEmpty(
+                    EvaluateExpandedValueLeaveEscaped(
+                        environment,
+                        location,
+                        operand.Value,
+                        operand.Count),
+                    location);
+            }
+
+            return EvaluateOperand(
+                environment,
+                location,
+                operand,
+                expandItems).Length == 0;
+        }
+
         private string EvaluateExpandedValue(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            int firstPart,
+            int partCount,
+            bool expandItems)
+        {
+            string escapedValue = EvaluateExpandedValueLeaveEscaped(
+                environment,
+                location,
+                firstPart,
+                partCount);
+            if (expandItems)
+            {
+                escapedValue = environment.ExpandItems(
+                    escapedValue,
+                    location);
+            }
+
+            return EscapingUtilities.UnescapeAll(
+                FileUtilities.MaybeAdjustFilePath(escapedValue));
+        }
+
+        private string EvaluateExpandedValueLeaveEscaped(
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
             int firstPart,
@@ -503,29 +835,159 @@ namespace Microsoft.Build.Evaluation
             {
                 CompiledConditionValuePart part =
                     _program.ValueParts[partIndex];
-                builder.Append(
-                    part.Kind == CompiledConditionValuePartKind.Literal
-                        ? _program.Strings[part.Value]
-                        : ReadProperty(
-                            environment,
-                            location,
-                            part.Value,
-                            unescape: false));
+                builder.Append(EvaluateValuePart(
+                    environment,
+                    location,
+                    part));
             }
 
-            return EscapingUtilities.UnescapeAll(
-                FileUtilities.MaybeAdjustFilePath(builder.ToString()));
+            return builder.ToString();
+        }
+
+        private string EvaluateValuePart(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            CompiledConditionValuePart part)
+        {
+            return part.Kind switch
+            {
+                CompiledConditionValuePartKind.Literal =>
+                    _program.Strings[part.Value],
+                CompiledConditionValuePartKind.Property =>
+                    ReadProperty(
+                        environment,
+                        location,
+                        part.Value,
+                        unescape: false,
+                        expandItems: false),
+                CompiledConditionValuePartKind.Metadata =>
+                    environment.GetEscapedMetadataValue(
+                        _program.MetadataReferences[part.Value].ItemName,
+                        _program.MetadataReferences[part.Value].MetadataName,
+                        location),
+                CompiledConditionValuePartKind.Function =>
+                    EvaluateFunction(
+                        environment,
+                        location,
+                        part.Value),
+                _ => throw new InternalErrorException(
+                    "Unknown compiled condition value part."),
+            };
+        }
+
+        private string EvaluateFunction(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            int functionIndex)
+        {
+            CompiledExpressionFunction function =
+                _program.Functions[functionIndex];
+            try
+            {
+                string receiver = function.Receiver.Count == 0
+                    ? null
+                    : EscapingUtilities.UnescapeAll(
+                        EvaluateValue(
+                            environment,
+                            location,
+                            function.Receiver));
+                string argument0 = function.Arguments.Count > 0
+                    ? EvaluateFunctionArgument(
+                        environment,
+                        location,
+                        _program.FunctionArguments[
+                            function.Arguments.Start])
+                    : null;
+                string argument1 = function.Arguments.Count > 1
+                    ? EvaluateFunctionArgument(
+                        environment,
+                        location,
+                        _program.FunctionArguments[
+                            function.Arguments.Start + 1])
+                    : null;
+#if NET
+                if (function.HasTargetFrameworkCompatibilitySpecialization)
+                {
+                    return EscapingUtilities.Escape(
+                        CompiledExpressionFunctionUtilities
+                            .EvaluateTargetFrameworkCompatibility(
+                                environment,
+                                argument0,
+                                argument1));
+                }
+#endif
+                return EscapingUtilities.Escape(
+                    CompiledExpressionFunctionUtilities.Evaluate(
+                        function.Kind,
+                        receiver,
+                        argument0,
+                        argument1));
+            }
+            catch (Exception ex)
+                when (!ExceptionHandling.NotExpectedFunctionException(ex))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    location,
+                    "InvalidFunctionPropertyExpression",
+                    function.Expression,
+                    ex.Message.Replace("\r\n", " "));
+                return null;
+            }
+        }
+
+        private string EvaluateFunctionArgument(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            CompiledExpressionFunctionArgument argument) =>
+            EscapingUtilities.UnescapeAll(
+                FileUtilities.MaybeAdjustFilePath(
+                    EvaluateValue(
+                        environment,
+                        location,
+                        argument.ValueParts)));
+
+        private string EvaluateValue(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            TableRange range)
+        {
+            if (range.Count == 1)
+            {
+                return EvaluateValuePart(
+                    environment,
+                    location,
+                    _program.ValueParts[range.Start]);
+            }
+
+            var builder = new StringBuilder();
+            for (int i = 0; i < range.Count; i++)
+            {
+                builder.Append(EvaluateValuePart(
+                    environment,
+                    location,
+                    _program.ValueParts[range.Start + i]));
+            }
+
+            return builder.ToString();
         }
 
         private string ReadProperty(
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
             int propertyIndex,
-            bool unescape)
+            bool unescape,
+            bool expandItems)
         {
             string escapedValue = environment.GetEscapedPropertyValue(
                 _program.PropertyNames[propertyIndex],
                 location);
+            if (expandItems)
+            {
+                escapedValue = environment.ExpandItems(
+                    escapedValue,
+                    location);
+            }
+
             return unescape
                 ? EscapingUtilities.UnescapeAll(
                     FileUtilities.MaybeAdjustFilePath(escapedValue))
@@ -537,62 +999,126 @@ namespace Microsoft.Build.Evaluation
     {
         private readonly string[] _strings;
         private readonly string[] _propertyNames;
+        private readonly MetadataReference[] _metadataReferences;
         private readonly CompiledConditionValuePart[] _parts;
+        private readonly CompiledExpressionFunction[] _functions;
+        private readonly CompiledExpressionFunctionArgument[] _functionArguments;
+        private readonly TableRange _root;
+        private readonly bool _hasTargetFrameworkCompatibilitySpecialization;
 
-        private CompiledScalarProgram(
-            string[] strings,
-            string[] propertyNames,
-            CompiledConditionValuePart[] parts)
+        private CompiledScalarProgram(CompiledScalarProgramData program)
         {
-            _strings = strings;
-            _propertyNames = propertyNames;
-            _parts = parts;
+            _strings = program.Strings;
+            _propertyNames = program.PropertyNames;
+            _metadataReferences = program.MetadataReferences;
+            _parts = program.ValueParts;
+            _functions = program.Functions;
+            _functionArguments = program.FunctionArguments;
+            _root = program.Root;
+            for (int i = 0; i < _functions.Length; i++)
+            {
+                if (_functions[i]
+                    .HasTargetFrameworkCompatibilitySpecialization)
+                {
+                    _hasTargetFrameworkCompatibilitySpecialization = true;
+                    break;
+                }
+            }
         }
 
         internal static CompiledScalarProgram TryCreate(string expression)
         {
             return CompiledConditionCompiler.TryCompileScalar(
                 expression,
-                out string[] strings,
-                out string[] propertyNames,
-                out CompiledConditionValuePart[] parts)
-                ? new CompiledScalarProgram(strings, propertyNames, parts)
+                allowItemVectors: false,
+                allowMetadata: false,
+                allowPropertyFunctions: true,
+                out CompiledScalarProgramData program)
+                ? new CompiledScalarProgram(program)
                 : null;
         }
+
+        internal static CompiledScalarProgram TryCreateItemSpecification(
+            string expression)
+        {
+            return CompiledConditionCompiler.TryCompileScalar(
+                expression,
+                allowItemVectors: true,
+                allowMetadata: true,
+                allowPropertyFunctions: true,
+                out CompiledScalarProgramData program)
+                ? new CompiledScalarProgram(program)
+                : null;
+        }
+
+        internal static CompiledScalarProgram TryCreateListExpression(
+            string expression,
+            bool allowMetadata)
+        {
+            return CompiledConditionCompiler.TryCompileScalar(
+                expression,
+                allowItemVectors: true,
+                allowMetadata,
+                allowPropertyFunctions: true,
+                out CompiledScalarProgramData program)
+                ? new CompiledScalarProgram(program)
+                : null;
+        }
+
+        internal bool HasTargetFrameworkCompatibilitySpecialization =>
+            _hasTargetFrameworkCompatibilitySpecialization;
 
         internal string Evaluate(
             ICompiledExpressionEnvironment environment,
             IElementLocation location,
             string baseDirectory = "")
         {
+            string escapedValue = EvaluateLeaveEscaped(
+                environment,
+                location,
+                baseDirectory);
+            return EscapingUtilities.UnescapeAll(escapedValue);
+        }
+
+        internal string EvaluateLeaveEscaped(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            string baseDirectory = "")
+        {
             string escapedValue;
-            if (_parts.Length == 1)
+            if (_root.Count == 1)
             {
-                escapedValue = EvaluatePart(environment, location, _parts[0]);
+                escapedValue = EvaluatePart(
+                    environment,
+                    location,
+                    _parts[_root.Start]);
             }
             else
             {
                 var builder = new StringBuilder();
-                for (int i = 0; i < _parts.Length; i++)
+                for (int i = 0; i < _root.Count; i++)
                 {
-                    builder.Append(EvaluatePart(environment, location, _parts[i]));
+                    builder.Append(EvaluatePart(
+                        environment,
+                        location,
+                        _parts[_root.Start + i]));
                 }
 
                 escapedValue = builder.ToString();
             }
 
-            string adjustedValue =
-                escapedValue.IndexOf('\\') == -1
-                    ? escapedValue
-                    : FileUtilities.MaybeAdjustFilePath(escapedValue, baseDirectory);
-            return EscapingUtilities.UnescapeAll(adjustedValue);
+            return escapedValue.IndexOf('\\') == -1
+                ? escapedValue
+                : FileUtilities.MaybeAdjustFilePath(escapedValue, baseDirectory);
         }
 
         internal bool TryEvaluateConstant(
             IElementLocation location,
             out string value)
         {
-            if (_propertyNames.Length != 0)
+            if (_propertyNames.Length != 0 ||
+                _metadataReferences.Length != 0 ||
+                _functions.Length != 0)
             {
                 value = null;
                 return false;
@@ -600,7 +1126,9 @@ namespace Microsoft.Build.Evaluation
 
             for (int i = 0; i < _parts.Length; i++)
             {
-                if (_strings[_parts[i].Value].IndexOf('\\') != -1)
+                if (_parts[i].Kind ==
+                        CompiledConditionValuePartKind.Literal &&
+                    _strings[_parts[i].Value].IndexOf('\\') != -1)
                 {
                     // Unix path adjustment depends on the current project directory.
                     value = null;
@@ -617,12 +1145,170 @@ namespace Microsoft.Build.Evaluation
             IElementLocation location,
             CompiledConditionValuePart part)
         {
-            return part.Kind == CompiledConditionValuePartKind.Literal
-                ? _strings[part.Value]
-                : environment.GetEscapedPropertyValue(
-                    _propertyNames[part.Value],
-                    location);
+            return part.Kind switch
+            {
+                CompiledConditionValuePartKind.Literal =>
+                    _strings[part.Value],
+                CompiledConditionValuePartKind.Property =>
+                    environment.GetEscapedPropertyValue(
+                        _propertyNames[part.Value],
+                        location),
+                CompiledConditionValuePartKind.Metadata =>
+                    GetEscapedMetadataValue(
+                        environment,
+                        location,
+                        part.Value),
+                CompiledConditionValuePartKind.Function =>
+                    EvaluateFunction(
+                        environment,
+                        location,
+                        part.Value),
+                _ => throw new InternalErrorException(
+                    "Unknown compiled scalar value part."),
+            };
         }
+
+        private string EvaluateFunction(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            int functionIndex)
+        {
+            CompiledExpressionFunction function = _functions[functionIndex];
+            try
+            {
+                string receiver = function.Receiver.Count == 0
+                    ? null
+                    : EscapingUtilities.UnescapeAll(
+                        EvaluateValue(
+                            environment,
+                            location,
+                            function.Receiver));
+                string argument0 = function.Arguments.Count > 0
+                    ? EvaluateFunctionArgument(
+                        environment,
+                        location,
+                        _functionArguments[function.Arguments.Start])
+                    : null;
+                string argument1 = function.Arguments.Count > 1
+                    ? EvaluateFunctionArgument(
+                        environment,
+                        location,
+                        _functionArguments[function.Arguments.Start + 1])
+                    : null;
+#if NET
+                if (function.HasTargetFrameworkCompatibilitySpecialization)
+                {
+                    return EscapingUtilities.Escape(
+                        CompiledExpressionFunctionUtilities
+                            .EvaluateTargetFrameworkCompatibility(
+                                environment,
+                                argument0,
+                                argument1));
+                }
+#endif
+                string result = CompiledExpressionFunctionUtilities.Evaluate(
+                    function.Kind,
+                    receiver,
+                    argument0,
+                    argument1);
+                return EscapingUtilities.Escape(result);
+            }
+            catch (Exception ex)
+                when (!ExceptionHandling.NotExpectedFunctionException(ex))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    location,
+                    "InvalidFunctionPropertyExpression",
+                    function.Expression,
+                    ex.Message.Replace("\r\n", " "));
+                return null;
+            }
+        }
+
+        private string EvaluateFunctionArgument(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            CompiledExpressionFunctionArgument argument) =>
+            EscapingUtilities.UnescapeAll(
+                FileUtilities.MaybeAdjustFilePath(
+                    EvaluateValue(
+                        environment,
+                        location,
+                        argument.ValueParts)));
+
+        private string EvaluateValue(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            TableRange range)
+        {
+            if (range.Count == 1)
+            {
+                return EvaluatePart(
+                    environment,
+                    location,
+                    _parts[range.Start]);
+            }
+
+            var builder = new StringBuilder();
+            for (int i = 0; i < range.Count; i++)
+            {
+                builder.Append(
+                    EvaluatePart(
+                        environment,
+                        location,
+                        _parts[range.Start + i]));
+            }
+
+            return builder.ToString();
+        }
+
+        private string GetEscapedMetadataValue(
+            ICompiledExpressionEnvironment environment,
+            IElementLocation location,
+            int metadataReferenceIndex)
+        {
+            MetadataReference metadata =
+                _metadataReferences[metadataReferenceIndex];
+            return environment.GetEscapedMetadataValue(
+                metadata.ItemName,
+                metadata.MetadataName,
+                location);
+        }
+    }
+
+    internal sealed class CompiledScalarProgramData
+    {
+        internal CompiledScalarProgramData(
+            string[] strings,
+            string[] propertyNames,
+            MetadataReference[] metadataReferences,
+            CompiledConditionValuePart[] valueParts,
+            CompiledExpressionFunction[] functions,
+            CompiledExpressionFunctionArgument[] functionArguments,
+            TableRange root)
+        {
+            Strings = strings;
+            PropertyNames = propertyNames;
+            MetadataReferences = metadataReferences;
+            ValueParts = valueParts;
+            Functions = functions;
+            FunctionArguments = functionArguments;
+            Root = root;
+        }
+
+        internal string[] Strings { get; }
+
+        internal string[] PropertyNames { get; }
+
+        internal MetadataReference[] MetadataReferences { get; }
+
+        internal CompiledConditionValuePart[] ValueParts { get; }
+
+        internal CompiledExpressionFunction[] Functions { get; }
+
+        internal CompiledExpressionFunctionArgument[] FunctionArguments { get; }
+
+        internal TableRange Root { get; }
     }
 
     internal sealed class CompiledConditionProgramData
@@ -630,26 +1316,38 @@ namespace Microsoft.Build.Evaluation
         internal CompiledConditionProgramData(
             string[] strings,
             string[] propertyNames,
+            MetadataReference[] metadataReferences,
             CompiledConditionInstruction[] instructions,
             CompiledConditionComparison[] comparisons,
-            CompiledConditionValuePart[] valueParts)
+            CompiledConditionValuePart[] valueParts,
+            CompiledExpressionFunction[] functions,
+            CompiledExpressionFunctionArgument[] functionArguments)
         {
             Strings = strings;
             PropertyNames = propertyNames;
+            MetadataReferences = metadataReferences;
             Instructions = instructions;
             Comparisons = comparisons;
             ValueParts = valueParts;
+            Functions = functions;
+            FunctionArguments = functionArguments;
         }
 
         internal string[] Strings { get; }
 
         internal string[] PropertyNames { get; }
 
+        internal MetadataReference[] MetadataReferences { get; }
+
         internal CompiledConditionInstruction[] Instructions { get; }
 
         internal CompiledConditionComparison[] Comparisons { get; }
 
         internal CompiledConditionValuePart[] ValueParts { get; }
+
+        internal CompiledExpressionFunction[] Functions { get; }
+
+        internal CompiledExpressionFunctionArgument[] FunctionArguments { get; }
     }
 
     internal static class CompiledConditionCompiler
@@ -658,7 +1356,8 @@ namespace Microsoft.Build.Evaluation
             string condition,
             ParserOptions parserOptions,
             ElementLocation location,
-            out CompiledConditionProgramData program)
+            out CompiledConditionProgramData program,
+            bool allowExtendedExpressions = false)
         {
             program = null;
             if (string.IsNullOrEmpty(condition))
@@ -684,7 +1383,13 @@ namespace Microsoft.Build.Evaluation
                 return false;
             }
 
-            var builder = new Builder();
+            var builder = new Builder(
+                allowItemVectors: allowExtendedExpressions &&
+                    parserOptions != ParserOptions.AllowProperties,
+                allowMetadata:
+                    parserOptions == ParserOptions.AllowAll,
+                allowPropertyFunctions: allowExtendedExpressions,
+                allowMetadataValueParts: allowExtendedExpressions);
             if (!builder.TryCompile(expression))
             {
                 return false;
@@ -696,36 +1401,73 @@ namespace Microsoft.Build.Evaluation
 
         internal static bool TryCompileScalar(
             string expression,
-            out string[] strings,
-            out string[] propertyNames,
-            out CompiledConditionValuePart[] parts)
+            bool allowItemVectors,
+            bool allowMetadata,
+            bool allowPropertyFunctions,
+            out CompiledScalarProgramData program)
         {
-            var builder = new Builder();
-            if (!builder.TryCompileValue(expression, out _))
+            bool containsItemVector =
+                ExpressionShredder.ContainsItemVectorMarker(expression);
+            if (allowMetadata &&
+                containsItemVector &&
+                ExpressionShredder
+                    .ContainsMetadataExpressionOutsideTransform(expression))
             {
-                strings = null;
-                propertyNames = null;
-                parts = null;
+                program = null;
                 return false;
             }
 
-            strings = builder._strings.ToArray();
-            propertyNames = builder._propertyNames.ToArray();
-            parts = builder._valueParts.ToArray();
+            var builder = new Builder(
+                allowItemVectors,
+                allowMetadata,
+                allowPropertyFunctions && !containsItemVector,
+                allowMetadataValueParts:
+                    allowMetadata && !containsItemVector);
+            if (!builder.TryCompileValue(
+                    expression,
+                    out TableRange root))
+            {
+                program = null;
+                return false;
+            }
+
+            program = builder.ToScalarProgram(root);
             return true;
         }
 
         private sealed class Builder
         {
+            private readonly bool _allowItemVectors;
+            private readonly bool _allowMetadata;
+            private readonly bool _allowPropertyFunctions;
+            private readonly bool _allowMetadataValueParts;
             internal readonly List<string> _strings = new();
             internal readonly List<string> _propertyNames = new();
             internal readonly List<CompiledConditionValuePart> _valueParts = new();
+            private readonly List<MetadataReference> _metadataReferences = new();
+            private readonly List<CompiledExpressionFunction> _functions = new();
+            private readonly List<CompiledExpressionFunctionArgument>
+                _functionArguments = new();
             private readonly Dictionary<string, int> _stringIds =
                 new(StringComparer.Ordinal);
             private readonly Dictionary<string, int> _propertyIds =
                 new(StringComparer.OrdinalIgnoreCase);
+            private readonly Dictionary<string, int> _metadataReferenceIds =
+                new(StringComparer.OrdinalIgnoreCase);
             private readonly List<CompiledConditionInstruction> _instructions = new();
             private readonly List<CompiledConditionComparison> _comparisons = new();
+
+            internal Builder(
+                bool allowItemVectors,
+                bool allowMetadata,
+                bool allowPropertyFunctions,
+                bool allowMetadataValueParts)
+            {
+                _allowItemVectors = allowItemVectors;
+                _allowMetadata = allowMetadata;
+                _allowPropertyFunctions = allowPropertyFunctions;
+                _allowMetadataValueParts = allowMetadataValueParts;
+            }
 
             internal bool TryCompile(GenericExpressionNode expression)
             {
@@ -777,9 +1519,23 @@ namespace Microsoft.Build.Evaluation
                 new(
                     _strings.ToArray(),
                     _propertyNames.ToArray(),
+                    _metadataReferences.ToArray(),
                     _instructions.ToArray(),
                     _comparisons.ToArray(),
-                    _valueParts.ToArray());
+                    _valueParts.ToArray(),
+                    _functions.ToArray(),
+                    _functionArguments.ToArray());
+
+            internal CompiledScalarProgramData ToScalarProgram(
+                TableRange root) =>
+                new(
+                    _strings.ToArray(),
+                    _propertyNames.ToArray(),
+                    _metadataReferences.ToArray(),
+                    _valueParts.ToArray(),
+                    _functions.ToArray(),
+                    _functionArguments.ToArray(),
+                    root);
 
             private bool TryEmitBranchIfFalse(
                 GenericExpressionNode expression,
@@ -871,6 +1627,27 @@ namespace Microsoft.Build.Evaluation
                 GenericExpressionNode expression,
                 out int comparisonId)
             {
+                if (expression is StringExpressionNode booleanExpression &&
+                    booleanExpression.IsExpandable &&
+                    TryCompileOperand(
+                        booleanExpression,
+                        out CompiledConditionOperand booleanOperand) &&
+                    IsSingleFunction(booleanOperand))
+                {
+                    comparisonId = _comparisons.Count;
+                    int trueStringId = GetStringId("true");
+                    _comparisons.Add(
+                        new CompiledConditionComparison(
+                            CompiledConditionKind.Equal,
+                            booleanOperand,
+                            new CompiledConditionOperand(
+                                CompiledConditionOperandKind.Literal,
+                                trueStringId),
+                            GetStringId(booleanExpression.UnexpandedValue),
+                            trueStringId));
+                    return true;
+                }
+
                 CompiledConditionKind kind;
                 if (expression is EqualExpressionNode)
                 {
@@ -907,12 +1684,21 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
 
+            private bool IsSingleFunction(
+                CompiledConditionOperand operand) =>
+                operand.Kind ==
+                    CompiledConditionOperandKind.ExpandedValue &&
+                operand.Count == 1 &&
+                _valueParts[operand.Value].Kind ==
+                    CompiledConditionValuePartKind.Function;
+
             private bool TryCompileOperand(
                 StringExpressionNode operand,
                 out CompiledConditionOperand compiledOperand)
             {
                 string value = operand.UnexpandedValue;
-                if (value.StartsWith("%(", StringComparison.Ordinal))
+                if (_allowMetadata &&
+                    value.StartsWith("%(", StringComparison.Ordinal))
                 {
                     int metadataEnd = 2;
                     if (ExpressionShredder.TryParseMetadataExpression(
@@ -976,88 +1762,463 @@ namespace Microsoft.Build.Evaluation
                 string value,
                 out TableRange parts)
             {
-                if (value.Contains("@(", StringComparison.Ordinal) ||
-                    value.Contains("%(", StringComparison.Ordinal))
+                if ((!_allowItemVectors &&
+                     value.Contains("@(", StringComparison.Ordinal)) ||
+                    (!_allowMetadata &&
+                     value.Contains("%(", StringComparison.Ordinal)))
+                {
+                    parts = default;
+                    return false;
+                }
+
+                if (!TryCompileValueParts(
+                        value,
+                        out List<CompiledConditionValuePart> compiledParts))
                 {
                     parts = default;
                     return false;
                 }
 
                 int partStart = _valueParts.Count;
-                int propertyCount = _propertyNames.Count;
-                int sourceIndex = 0;
-                int propertyStart = value.IndexOf("$(", StringComparison.Ordinal);
-                while (propertyStart >= 0)
-                {
-                    if (propertyStart > sourceIndex)
-                    {
-                        _valueParts.Add(
-                            new CompiledConditionValuePart(
-                                CompiledConditionValuePartKind.Literal,
-                                GetStringId(value.Substring(
-                                    sourceIndex,
-                                    propertyStart - sourceIndex))));
-                    }
-
-                    int propertyEnd = value.IndexOf(')', propertyStart + 2);
-                    if (propertyEnd < 0)
-                    {
-                        RollBackValue(partStart, propertyCount);
-                        parts = default;
-                        return false;
-                    }
-
-                    string propertyName = value.Substring(
-                        propertyStart + 2,
-                        propertyEnd - propertyStart - 2);
-                    if (!CanCompileProperty(propertyName))
-                    {
-                        RollBackValue(partStart, propertyCount);
-                        parts = default;
-                        return false;
-                    }
-
-                    _valueParts.Add(
-                        new CompiledConditionValuePart(
-                            CompiledConditionValuePartKind.Property,
-                            GetPropertyId(propertyName)));
-                    sourceIndex = propertyEnd + 1;
-                    propertyStart = value.IndexOf(
-                        "$(",
-                        sourceIndex,
-                        StringComparison.Ordinal);
-                }
-
-                if (sourceIndex < value.Length || partStart == _valueParts.Count)
-                {
-                    _valueParts.Add(
-                        new CompiledConditionValuePart(
-                            CompiledConditionValuePartKind.Literal,
-                            GetStringId(value.Substring(sourceIndex))));
-                }
-
+                _valueParts.AddRange(compiledParts);
                 parts = new TableRange(
                     partStart,
-                    _valueParts.Count - partStart);
+                    compiledParts.Count);
                 return true;
             }
 
-            private void RollBackValue(int partStart, int propertyCount)
+            private bool TryCompileValueParts(
+                string value,
+                out List<CompiledConditionValuePart> parts)
             {
-                _valueParts.RemoveRange(
-                    partStart,
-                    _valueParts.Count - partStart);
-                if (_propertyNames.Count > propertyCount)
+                parts = new List<CompiledConditionValuePart>();
+                int sourceIndex = 0;
+                while (sourceIndex < value.Length)
                 {
-                    _propertyNames.RemoveRange(
-                        propertyCount,
-                        _propertyNames.Count - propertyCount);
-                    _propertyIds.Clear();
-                    for (int i = 0; i < _propertyNames.Count; i++)
+                    int propertyStart = value.IndexOf(
+                        "$(",
+                        sourceIndex,
+                        StringComparison.Ordinal);
+                    int metadataStart = _allowMetadataValueParts
+                        ? value.IndexOf(
+                            "%(",
+                            sourceIndex,
+                            StringComparison.Ordinal)
+                        : -1;
+                    int expansionStart =
+                        propertyStart < 0
+                            ? metadataStart
+                            : metadataStart < 0
+                                ? propertyStart
+                                : Math.Min(propertyStart, metadataStart);
+                    if (expansionStart < 0)
                     {
-                        _propertyIds[_propertyNames[i]] = i;
+                        AddLiteral(
+                            value,
+                            sourceIndex,
+                            value.Length - sourceIndex,
+                            parts);
+                        sourceIndex = value.Length;
+                        break;
+                    }
+
+                    AddLiteral(
+                        value,
+                        sourceIndex,
+                        expansionStart - sourceIndex,
+                        parts);
+                    if (expansionStart == metadataStart)
+                    {
+                        int metadataEnd = metadataStart + 2;
+                        if (!ExpressionShredder.TryParseMetadataExpression(
+                                value,
+                                ref metadataEnd,
+                                value.Length,
+                                out string itemType,
+                                out string metadataName))
+                        {
+                            parts = null;
+                            return false;
+                        }
+
+                        parts.Add(new CompiledConditionValuePart(
+                            CompiledConditionValuePartKind.Metadata,
+                            GetMetadataReferenceId(
+                                itemType,
+                                metadataName)));
+                        sourceIndex = metadataEnd;
+                        continue;
+                    }
+
+                    int propertyEnd =
+                        FindClosingParenthesis(
+                            value,
+                            propertyStart + 2);
+                    if (propertyEnd < 0)
+                    {
+                        parts = null;
+                        return false;
+                    }
+
+                    string propertyBody = value.Substring(
+                        propertyStart + 2,
+                        propertyEnd - propertyStart - 2);
+                    if (CanCompileProperty(propertyBody))
+                    {
+                        parts.Add(new CompiledConditionValuePart(
+                            CompiledConditionValuePartKind.Property,
+                            GetPropertyId(propertyBody)));
+                    }
+                    else if (!_allowPropertyFunctions ||
+                             !TryCompilePropertyFunction(
+                                 propertyBody,
+                                 out int functionIndex))
+                    {
+                        parts = null;
+                        return false;
+                    }
+                    else
+                    {
+                        parts.Add(new CompiledConditionValuePart(
+                            CompiledConditionValuePartKind.Function,
+                            functionIndex));
+                    }
+
+                    sourceIndex = propertyEnd + 1;
+                }
+
+                if (parts.Count == 0)
+                {
+                    parts.Add(new CompiledConditionValuePart(
+                        CompiledConditionValuePartKind.Literal,
+                        GetStringId(string.Empty)));
+                }
+
+                return true;
+            }
+
+            private void AddLiteral(
+                string value,
+                int start,
+                int length,
+                List<CompiledConditionValuePart> parts)
+            {
+                if (length != 0)
+                {
+                    parts.Add(new CompiledConditionValuePart(
+                        CompiledConditionValuePartKind.Literal,
+                        GetStringId(value.Substring(start, length))));
+                }
+            }
+
+            private bool TryCompilePropertyFunction(
+                string body,
+                out int functionIndex)
+            {
+                const string intrinsicPrefix = "[MSBuild]::";
+                string receiverName = null;
+                string methodName;
+                int argumentsStart;
+                if (body.StartsWith(
+                        intrinsicPrefix,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    int methodStart = intrinsicPrefix.Length;
+                    argumentsStart = body.IndexOf('(', methodStart);
+                    if (argumentsStart < 0)
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    methodName = body.Substring(
+                            methodStart,
+                            argumentsStart - methodStart)
+                        .Trim();
+                    if (!CompiledExpressionFunctionUtilities
+                            .TryGetIntrinsicKind(
+                                methodName,
+                                out CompiledPropertyFunctionKind kind))
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    return TryAddFunction(
+                        body,
+                        kind,
+                        receiverName,
+                        argumentsStart,
+                        minimumArgumentCount: 2,
+                        maximumArgumentCount: 2,
+                        out functionIndex);
+                }
+
+                int receiverEnd = body.IndexOf('.');
+                if (receiverEnd <= 0)
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                receiverName = body.Substring(0, receiverEnd).Trim();
+                if (!CanCompileProperty(receiverName))
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                int receiverMethodStart = receiverEnd + 1;
+                argumentsStart = body.IndexOf(
+                    '(',
+                    receiverMethodStart);
+                if (argumentsStart < 0)
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                methodName = body.Substring(
+                        receiverMethodStart,
+                        argumentsStart - receiverMethodStart)
+                    .Trim();
+                if (!methodName.Equals(
+                        nameof(string.Contains),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                return TryAddFunction(
+                    body,
+                    CompiledPropertyFunctionKind.StringContains,
+                    receiverName,
+                    argumentsStart,
+                    minimumArgumentCount: 1,
+                    maximumArgumentCount: 1,
+                    out functionIndex);
+            }
+
+            private bool TryAddFunction(
+                string body,
+                CompiledPropertyFunctionKind kind,
+                string receiverName,
+                int argumentsStart,
+                int minimumArgumentCount,
+                int maximumArgumentCount,
+                out int functionIndex)
+            {
+                int argumentsEnd =
+                    FindClosingParenthesis(
+                        body,
+                        argumentsStart + 1);
+                if (argumentsEnd < 0 ||
+                    body.Substring(argumentsEnd + 1).Trim().Length != 0 ||
+                    !TrySplitFunctionArguments(
+                        body,
+                        argumentsStart + 1,
+                        argumentsEnd,
+                        out List<string> argumentValues) ||
+                    argumentValues.Count < minimumArgumentCount ||
+                    argumentValues.Count > maximumArgumentCount)
+                {
+                    functionIndex = 0;
+                    return false;
+                }
+
+                TableRange receiver = default;
+                if (receiverName != null)
+                {
+                    int receiverStart = _valueParts.Count;
+                    _valueParts.Add(new CompiledConditionValuePart(
+                        CompiledConditionValuePartKind.Property,
+                        GetPropertyId(receiverName)));
+                    receiver = new TableRange(receiverStart, 1);
+                }
+
+                var argumentRanges =
+                    new List<TableRange>(argumentValues.Count);
+                foreach (string argumentValue in argumentValues)
+                {
+                    if (argumentValue == null ||
+                        !TryCompileValueParts(
+                            argumentValue,
+                            out List<CompiledConditionValuePart>
+                                argumentParts))
+                    {
+                        functionIndex = 0;
+                        return false;
+                    }
+
+                    int valueStart = _valueParts.Count;
+                    _valueParts.AddRange(argumentParts);
+                    argumentRanges.Add(new TableRange(
+                        valueStart,
+                        argumentParts.Count));
+                }
+
+                int argumentStart = _functionArguments.Count;
+                foreach (TableRange argumentRange in argumentRanges)
+                {
+                    _functionArguments.Add(
+                        new CompiledExpressionFunctionArgument(
+                            argumentRange));
+                }
+
+#if NET
+                bool hasTargetFrameworkCompatibilitySpecialization =
+                    kind ==
+                        CompiledPropertyFunctionKind
+                            .IsTargetFrameworkCompatible &&
+                    argumentRanges.Count == 2 &&
+                    IsDirectTargetFrameworkOperand(argumentRanges[0]) &&
+                    IsDirectTargetFrameworkOperand(argumentRanges[1]);
+#else
+                const bool hasTargetFrameworkCompatibilitySpecialization =
+                    false;
+#endif
+                functionIndex = _functions.Count;
+                _functions.Add(new CompiledExpressionFunction(
+                    kind,
+                    receiver,
+                    new TableRange(
+                        argumentStart,
+                        argumentValues.Count),
+                    body,
+                    hasTargetFrameworkCompatibilitySpecialization));
+                return true;
+            }
+
+#if NET
+            private bool IsDirectTargetFrameworkOperand(TableRange range)
+            {
+                if (range.Count != 1)
+                {
+                    return false;
+                }
+
+                return _valueParts[range.Start].Kind is
+                    CompiledConditionValuePartKind.Literal or
+                    CompiledConditionValuePartKind.Property or
+                    CompiledConditionValuePartKind.Metadata;
+            }
+#endif
+
+            private static bool TrySplitFunctionArguments(
+                string expression,
+                int start,
+                int end,
+                out List<string> arguments)
+            {
+                arguments = new List<string>();
+                if (start == end)
+                {
+                    return true;
+                }
+
+                int argumentStart = start;
+                for (int i = start; i < end; i++)
+                {
+                    char current = expression[i];
+                    if (current is '\'' or '"' or '`')
+                    {
+                        int quoteEnd =
+                            expression.IndexOf(current, i + 1);
+                        if (quoteEnd < 0 || quoteEnd >= end)
+                        {
+                            arguments = null;
+                            return false;
+                        }
+
+                        i = quoteEnd;
+                    }
+                    else if (current == '$' &&
+                             i + 1 < end &&
+                             expression[i + 1] == '(')
+                    {
+                        int propertyEnd =
+                            FindClosingParenthesis(
+                                expression,
+                                i + 2);
+                        if (propertyEnd < 0 || propertyEnd >= end)
+                        {
+                            arguments = null;
+                            return false;
+                        }
+
+                        i = propertyEnd;
+                    }
+                    else if (current == ',')
+                    {
+                        arguments.Add(ExtractFunctionArgument(
+                            expression,
+                            argumentStart,
+                            i - argumentStart));
+                        argumentStart = i + 1;
                     }
                 }
+
+                arguments.Add(ExtractFunctionArgument(
+                    expression,
+                    argumentStart,
+                    end - argumentStart));
+                return true;
+            }
+
+            private static string ExtractFunctionArgument(
+                string expression,
+                int start,
+                int length)
+            {
+                string argument =
+                    expression.Substring(start, length).Trim();
+                if (argument.Equals(
+                        "null",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
+                if (argument.Length >= 2 &&
+                    argument[0] == argument[argument.Length - 1] &&
+                    argument[0] is '\'' or '"' or '`')
+                {
+                    return argument.Substring(
+                        1,
+                        argument.Length - 2);
+                }
+
+                return argument;
+            }
+
+            private static int FindClosingParenthesis(
+                string expression,
+                int start)
+            {
+                int nesting = 1;
+                for (int i = start; i < expression.Length; i++)
+                {
+                    char current = expression[i];
+                    if (current is '\'' or '"' or '`')
+                    {
+                        i = expression.IndexOf(current, i + 1);
+                        if (i < 0)
+                        {
+                            return -1;
+                        }
+                    }
+                    else if (current == '(')
+                    {
+                        nesting++;
+                    }
+                    else if (current == ')' && --nesting == 0)
+                    {
+                        return i;
+                    }
+                }
+
+                return -1;
             }
 
             private int GetStringId(string value)
@@ -1079,6 +2240,24 @@ namespace Microsoft.Build.Evaluation
                     id = _propertyNames.Count;
                     _propertyNames.Add(propertyName);
                     _propertyIds.Add(propertyName, id);
+                }
+
+                return id;
+            }
+
+            private int GetMetadataReferenceId(
+                string itemType,
+                string metadataName)
+            {
+                string key = itemType == null
+                    ? metadataName
+                    : $"{itemType}.{metadataName}";
+                if (!_metadataReferenceIds.TryGetValue(key, out int id))
+                {
+                    id = _metadataReferences.Count;
+                    _metadataReferences.Add(
+                        new MetadataReference(itemType, metadataName));
+                    _metadataReferenceIds.Add(key, id);
                 }
 
                 return id;
@@ -1133,6 +2312,92 @@ namespace Microsoft.Build.Evaluation
                     ReservedPropertyNames.thisFileName,
                     StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    internal static class CompiledExpressionFunctionUtilities
+    {
+        internal static bool TryGetIntrinsicKind(
+            string methodName,
+            out CompiledPropertyFunctionKind kind)
+        {
+            if (methodName.Equals(
+                    nameof(IntrinsicFunctions.IsTargetFrameworkCompatible),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                kind =
+                    CompiledPropertyFunctionKind.IsTargetFrameworkCompatible;
+                return true;
+            }
+
+            if (methodName.Equals(
+                    nameof(IntrinsicFunctions.VersionEquals),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                kind = CompiledPropertyFunctionKind.VersionEquals;
+                return true;
+            }
+
+            if (methodName.Equals(
+                    nameof(IntrinsicFunctions.VersionGreaterThanOrEquals),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                kind =
+                    CompiledPropertyFunctionKind.VersionGreaterThanOrEquals;
+                return true;
+            }
+
+            kind = default;
+            return false;
+        }
+
+        internal static string Evaluate(
+            CompiledPropertyFunctionKind kind,
+            string receiver,
+            string argument0,
+            string argument1)
+        {
+            bool result = kind switch
+            {
+                CompiledPropertyFunctionKind.IsTargetFrameworkCompatible =>
+                    IntrinsicFunctions.IsTargetFrameworkCompatible(
+                        argument0,
+                        argument1),
+                CompiledPropertyFunctionKind.VersionEquals =>
+                    IntrinsicFunctions.VersionEquals(
+                        argument0,
+                        argument1),
+                CompiledPropertyFunctionKind.VersionGreaterThanOrEquals =>
+                    IntrinsicFunctions.VersionGreaterThanOrEquals(
+                        argument0,
+                        argument1),
+                CompiledPropertyFunctionKind.StringContains =>
+                    receiver.Contains(argument0),
+                _ => throw new InternalErrorException(
+                    "Unknown shared compiled property function."),
+            };
+            return Convert.ToString(
+                result,
+                CultureInfo.InvariantCulture);
+        }
+
+#if NET
+        internal static string EvaluateTargetFrameworkCompatibility(
+            ICompiledExpressionEnvironment environment,
+            string target,
+            string candidate)
+        {
+            NuGetFramework parsedTarget =
+                environment.GetOrParseTargetFramework(target);
+            NuGetFramework parsedCandidate =
+                environment.GetOrParseTargetFramework(candidate);
+            bool result = DefaultCompatibilityProvider.Instance.IsCompatible(
+                parsedTarget,
+                parsedCandidate);
+            return Convert.ToString(
+                result,
+                CultureInfo.InvariantCulture);
+        }
+#endif
     }
 
     internal static class CompiledConditionUtilities

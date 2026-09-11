@@ -43,17 +43,110 @@ namespace Microsoft.Build.BackEnd
         FullBuild
     }
 
+    internal sealed class TargetUpToDateSpecification
+    {
+        internal TargetUpToDateSpecification(
+            string name,
+            string inputs,
+            string outputs,
+            ElementLocation inputsLocation,
+            ElementLocation outputsLocation,
+            CompiledTargetListProgram inputsProgram,
+            CompiledTargetListProgram outputsProgram)
+        {
+            Name = name;
+            Inputs = inputs;
+            Outputs = outputs;
+            InputsLocation = inputsLocation;
+            OutputsLocation = outputsLocation;
+            InputsProgram = inputsProgram;
+            OutputsProgram = outputsProgram;
+        }
+
+        internal string Name { get; }
+
+        internal string Inputs { get; }
+
+        internal string Outputs { get; }
+
+        internal ElementLocation InputsLocation { get; }
+
+        internal ElementLocation OutputsLocation { get; }
+
+        internal CompiledTargetListProgram InputsProgram { get; }
+
+        internal CompiledTargetListProgram OutputsProgram { get; }
+    }
+
     /// <summary>
     /// This class is used for performing dependency analysis on targets to determine if they should be built/rebuilt/skipped.
     /// </summary>
     internal sealed class TargetUpToDateChecker
     {
-        #region Constructors
+        private readonly TargetUpToDateAnalysis _analysis;
 
         /// <summary>
         /// Creates an instance of this class for the given target.
         /// </summary>
         internal TargetUpToDateChecker(ProjectInstance project, ProjectTargetInstance targetToAnalyze, ILoggingService loggingServices, BuildEventContext buildEventContext)
+        {
+            Assumed.NotNull(project, "Need a project.");
+            Assumed.NotNull(targetToAnalyze, "Need a target to analyze.");
+
+            _analysis = new TargetUpToDateAnalysis(
+                project,
+                new TargetUpToDateSpecification(
+                    targetToAnalyze.Name,
+                    targetToAnalyze.Inputs,
+                    targetToAnalyze.Outputs,
+                    targetToAnalyze.InputsLocation,
+                    targetToAnalyze.OutputsLocation,
+                    inputsProgram: null,
+                    outputsProgram: null),
+                loggingServices,
+                buildEventContext);
+        }
+
+        internal DependencyAnalysisResult PerformDependencyAnalysis(
+            ItemBucket bucket,
+            bool question,
+            out ItemDictionary<ProjectItemInstance> changedTargetInputs,
+            out ItemDictionary<ProjectItemInstance> upToDateTargetInputs)
+        {
+            using var measurement = BuildExecutionInstrumentation.Measure(
+                BuildExecutionMetric.FallbackTargetPreBody,
+                _analysis.TargetToAnalyze.Name);
+            return _analysis.PerformDependencyAnalysis(
+                bucket,
+                question,
+                out changedTargetInputs,
+                out upToDateTargetInputs);
+        }
+
+        internal static bool IsAnyOutOfDate<T>(
+            out DependencyAnalysisLogDetail dependencyAnalysisDetailEntry,
+            string projectDirectory,
+            IList<T> inputs,
+            IList<T> outputs) =>
+            TargetUpToDateAnalysis.IsAnyOutOfDate(
+                out dependencyAnalysisDetailEntry,
+                projectDirectory,
+                inputs,
+                outputs);
+    }
+
+    internal sealed class TargetUpToDateAnalysis
+    {
+        #region Constructors
+
+        /// <summary>
+        /// Creates an analysis instance for an immutable target specification.
+        /// </summary>
+        internal TargetUpToDateAnalysis(
+            ProjectInstance project,
+            TargetUpToDateSpecification targetToAnalyze,
+            ILoggingService loggingServices,
+            BuildEventContext buildEventContext)
         {
             Assumed.NotNull(project, "Need a project.");
             Assumed.NotNull(targetToAnalyze, "Need a target to analyze.");
@@ -70,17 +163,8 @@ namespace Microsoft.Build.BackEnd
 
         #region Properties
 
-        /// <summary>
-        /// Gets the target to perform dependency analysis on.
-        /// </summary>
-        /// <value>Target object.</value>
-        internal ProjectTargetInstance TargetToAnalyze
-        {
-            get
-            {
-                return _targetToAnalyze;
-            }
-        }
+        internal TargetUpToDateSpecification TargetToAnalyze =>
+            _targetToAnalyze;
 
         /// <summary>
         /// Gets the value of the target's "Inputs" attribute.
@@ -410,8 +494,20 @@ namespace Microsoft.Build.BackEnd
         {
             // break down the input/output specifications along the standard separator, after expanding all embedded properties
             // and item metadata
-            var targetInputs = bucket.Expander.ExpandIntoStringListLeaveEscaped(TargetInputSpecification, ExpanderOptions.ExpandPropertiesAndMetadata, _targetToAnalyze.InputsLocation);
-            var targetOutputs = bucket.Expander.ExpandIntoStringListLeaveEscaped(TargetOutputSpecification, ExpanderOptions.ExpandPropertiesAndMetadata, _targetToAnalyze.OutputsLocation);
+            SemiColonTokenizer targetInputs =
+                _targetToAnalyze.InputsProgram?.Evaluate(
+                    bucket.Expander) ??
+                bucket.Expander.ExpandIntoStringListLeaveEscaped(
+                    TargetInputSpecification,
+                    ExpanderOptions.ExpandPropertiesAndMetadata,
+                    _targetToAnalyze.InputsLocation);
+            SemiColonTokenizer targetOutputs =
+                _targetToAnalyze.OutputsProgram?.Evaluate(
+                    bucket.Expander) ??
+                bucket.Expander.ExpandIntoStringListLeaveEscaped(
+                    TargetOutputSpecification,
+                    ExpanderOptions.ExpandPropertiesAndMetadata,
+                    _targetToAnalyze.OutputsLocation);
 
             itemVectorTransformsInTargetInputs = new ItemVectorPartitionCollection(MSBuildNameIgnoreCaseComparer.Default);
 
@@ -1233,7 +1329,7 @@ namespace Microsoft.Build.BackEnd
         // the project whose target we are analyzing.
         private ProjectInstance _project;
         // the target to analyze
-        private ProjectTargetInstance _targetToAnalyze;
+        private TargetUpToDateSpecification _targetToAnalyze;
 
         // the value of the target's "Inputs" attribute
         private string _targetInputSpecification;

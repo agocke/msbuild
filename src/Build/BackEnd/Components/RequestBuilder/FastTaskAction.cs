@@ -11,17 +11,24 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 #endif
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Build.BackEnd.Components.RequestBuilder;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Exceptions;
+using Microsoft.Build.Experimental.BuildCheck.Infrastructure;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
+#if NET
+using NuGet.Frameworks;
+#endif
 using Microsoft.Build.Shared.FileSystem;
+using EngineFileUtilities = Microsoft.Build.Internal.EngineFileUtilities;
+using ProjectItemInstanceFactory = Microsoft.Build.Execution.ProjectItemInstance.TaskItem.ProjectItemInstanceFactory;
 using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 
 #nullable disable
@@ -51,10 +58,10 @@ namespace Microsoft.Build.BackEnd
         internal bool IsValid =>
             _action != null && _taskFactoryWrapper != null;
 
-        internal bool CanExecute(FastTaskExecutionFrame frame) =>
+        internal bool CanExecute(CompiledTargetExecutionFrame frame) =>
             _action.CanExecute(frame);
 
-        internal WorkUnitResult Execute(FastTaskExecutionFrame frame) =>
+        internal WorkUnitResult Execute(CompiledTargetExecutionFrame frame) =>
             _action.Execute(frame, _taskFactoryWrapper);
     }
 
@@ -266,7 +273,7 @@ namespace Microsoft.Build.BackEnd
                 requiresTaskEnvironment);
         }
 
-        internal bool CanExecute(FastTaskExecutionFrame frame)
+        internal bool CanExecute(CompiledTargetExecutionFrame frame)
         {
             return frame.RequestEntry.Request.HostServices == null &&
                 !frame.Host.BuildParameters.LogTaskInputs &&
@@ -276,7 +283,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         internal WorkUnitResult Execute(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             TaskFactoryWrapper taskFactoryWrapper)
         {
             using var actionMeasurement =
@@ -400,7 +407,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private WorkUnitResult ExecuteCore(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             TaskLoggingContext taskLoggingContext,
             TaskFactoryWrapper taskFactoryWrapper,
             out ContinueOnError continueOnError)
@@ -654,7 +661,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private ITask CreateTask(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             TaskLoggingContext taskLoggingContext,
             TaskFactoryWrapper taskFactoryWrapper,
             TaskEnvironment taskEnvironment)
@@ -720,7 +727,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private void SetInputs(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             FastTaskEnvironmentMode executionEnvironmentMode,
@@ -764,7 +771,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private ContinueOnError EvaluateContinueOnError(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             out string expandedValue)
         {
             if (_continueOnError == null)
@@ -818,7 +825,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private bool GatherOutputs(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext)
         {
@@ -837,7 +844,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private bool ExecuteBody(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             ContinueOnError continueOnError,
@@ -1124,7 +1131,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         internal bool Apply(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             FastTaskEnvironmentMode environmentMode,
@@ -1190,7 +1197,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private bool ApplyScalar(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             FastTaskEnvironmentMode environmentMode,
@@ -1265,7 +1272,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private bool ApplyVector(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext,
             FastTaskEnvironmentMode environmentMode,
@@ -1366,7 +1373,7 @@ namespace Microsoft.Build.BackEnd
             ITask task,
             object value,
             TaskLoggingContext taskLoggingContext,
-            FastTaskExecutionFrame frame)
+            CompiledTargetExecutionFrame frame)
         {
             try
             {
@@ -1392,7 +1399,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         private string GetDisplayValue(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             FastTaskEnvironmentMode environmentMode,
             TaskEnvironment taskEnvironment) =>
             _source.Kind == CompiledTaskValueKind.Scalar
@@ -1406,7 +1413,7 @@ namespace Microsoft.Build.BackEnd
                 : _source.Value;
 
         private static string GetScalarBaseDirectory(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             FastTaskEnvironmentMode environmentMode,
             TaskEnvironment taskEnvironment) =>
             environmentMode == FastTaskEnvironmentMode.AmbientProcess
@@ -1584,7 +1591,7 @@ namespace Microsoft.Build.BackEnd
         }
 
         internal bool Apply(
-            FastTaskExecutionFrame frame,
+            CompiledTargetExecutionFrame frame,
             ITask task,
             TaskLoggingContext taskLoggingContext)
         {
@@ -1737,37 +1744,51 @@ namespace Microsoft.Build.BackEnd
     }
 
     /// <summary>
-    /// Reused dynamic state for all fast actions in one target bucket.
+    /// Reused dynamic state for all compiled actions in one target bucket.
     /// </summary>
-    internal sealed class FastTaskExecutionFrame :
+    internal sealed class CompiledTargetExecutionFrame :
         IDisposable,
         ICompiledExpressionEnvironment
     {
-        private readonly FastTaskCancellationState _cancellationState;
+        private FastTaskCancellationState _cancellationState;
+        private Expander<
+            ProjectPropertyInstance,
+            ProjectItemInstance> _fastTaskExpander;
+        private Expander<
+            ProjectPropertyInstance,
+            ProjectItemInstance> _executionConditionExpander;
+        private Expander<
+            ProjectPropertyInstance,
+            ProjectItemInstance> _inferenceConditionExpander;
+        private CompiledLookupExpressionEnvironment
+            _executionExpressionEnvironment;
+        private CompiledLookupExpressionEnvironment
+            _inferenceExpressionEnvironment;
+#if NET
+        private CompiledTargetFrameworkCache _targetFrameworkCache;
+#endif
 
-        internal FastTaskExecutionFrame(
+        internal CompiledTargetExecutionFrame(
             IBuildComponentHost host,
             BuildRequestEntry requestEntry,
             ITargetBuilderCallback targetBuilderCallback,
             TargetLoggingContext targetLoggingContext,
-            ProjectTaskInstance taskInstance,
-            Lookup lookup,
+            ITaskBuilder taskBuilder,
+            TaskExecutionMode mode,
+            Lookup lookupForInference,
+            Lookup lookupForExecution,
             CancellationToken cancellationToken)
         {
             Host = host;
             RequestEntry = requestEntry;
             TargetBuilderCallback = targetBuilderCallback;
             TargetLoggingContext = targetLoggingContext;
-            TaskInstance = taskInstance;
-            Lookup = lookup;
+            TaskBuilder = taskBuilder;
+            Mode = mode;
+            LookupForInference = lookupForInference;
+            LookupForExecution = lookupForExecution;
+            Lookup = lookupForExecution;
             CancellationToken = cancellationToken;
-            Expander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(
-                lookup,
-                lookup,
-                new StringMetadataTable(metadata: null),
-                FileSystems.Default,
-                targetLoggingContext);
-            _cancellationState = new FastTaskCancellationState(cancellationToken);
         }
 
         internal IBuildComponentHost Host { get; }
@@ -1778,25 +1799,1572 @@ namespace Microsoft.Build.BackEnd
 
         internal TargetLoggingContext TargetLoggingContext { get; }
 
+        internal ITaskBuilder TaskBuilder { get; }
+
+        internal TaskExecutionMode Mode { get; }
+
         internal ProjectTaskInstance TaskInstance { get; private set; }
 
         internal Lookup Lookup { get; }
 
+        internal Lookup LookupForInference { get; }
+
+        internal Lookup LookupForExecution { get; }
+
         internal CancellationToken CancellationToken { get; }
 
-        internal bool IsCancellationRequested => _cancellationState.IsCancellationRequested;
+        internal bool IsCancellationRequested =>
+            CancellationToken.IsCancellationRequested;
 
-        internal Expander<ProjectPropertyInstance, ProjectItemInstance> Expander { get; }
+        internal Expander<ProjectPropertyInstance, ProjectItemInstance>
+            Expander =>
+            _fastTaskExpander ??= CreateExpander(LookupForExecution);
 
         string ICompiledExpressionEnvironment.GetEscapedPropertyValue(
             string propertyName,
+            IElementLocation location) =>
+            Expander.GetEscapedPropertyValue(propertyName, location);
+
+        string ICompiledExpressionEnvironment.GetEscapedMetadataValue(
+            string itemType,
+            string metadataName,
+            IElementLocation location) =>
+            Expander.Metadata.GetEscapedValue(
+                string.IsNullOrEmpty(itemType) ? null : itemType,
+                metadataName);
+
+        string ICompiledExpressionEnvironment.ExpandItems(
+            string escapedValue,
+            IElementLocation location) =>
+            Expander.ExpandIntoStringLeaveEscaped(
+                escapedValue,
+                ExpanderOptions.ExpandItems,
+                location);
+
+        bool ICompiledExpressionEnvironment.IsItemExpansionEmpty(
+            string escapedValue,
+            IElementLocation location) =>
+            Expander.ExpandIntoStringLeaveEscaped(
+                escapedValue,
+                ExpanderOptions.ExpandItems |
+                    ExpanderOptions.BreakOnNotEmpty,
+                location) is { Length: 0 };
+
+        void ICompiledExpressionEnvironment.EnterConditionEvaluation(
+            bool oneSideIsEmpty)
+        {
+            Expander.PropertiesUseTracker.PropertyReadContext =
+                oneSideIsEmpty
+                    ? PropertyReadContext
+                        .ConditionEvaluationWithOneSideEmpty
+                    : PropertyReadContext.ConditionEvaluation;
+        }
+
+        void ICompiledExpressionEnvironment.LeaveConditionEvaluation() =>
+            Expander.PropertiesUseTracker.ResetPropertyReadContext();
+
+#if NET
+        NuGetFramework ICompiledExpressionEnvironment.GetOrParseTargetFramework(
+            string framework) =>
+            GetTargetFrameworkCache().GetOrParse(framework);
+#endif
+
+        internal ValueTask<WorkUnitResult> ExecuteAsync(
+            CompiledTargetActionRecord record)
+        {
+            if (record.Kind == CompiledTargetActionKind.PropertyGroup &&
+                record.PropertyGroupAction != null)
+            {
+                return new ValueTask<WorkUnitResult>(
+                    ExecuteCompiledPropertyGroupAction(record));
+            }
+
+            if (record.Kind == CompiledTargetActionKind.ItemGroup &&
+                record.ItemGroupAction != null)
+            {
+                return new ValueTask<WorkUnitResult>(
+                    ExecuteCompiledItemGroupAction(record));
+            }
+
+            if (record.Kind == CompiledTargetActionKind.Fallback &&
+                record.FallbackKind !=
+                    CompiledTargetFallbackKind.TaskBuilder)
+            {
+                return new ValueTask<WorkUnitResult>(
+                    ExecuteIntrinsicFallbackAction(record));
+            }
+
+            CompiledTaskAction action = record.TaskAction;
+            ProjectTaskInstance taskInstance =
+                record.Child as ProjectTaskInstance;
+            string fastTaskName = taskInstance?.Name;
+            long fastTaskSiteStart =
+                action == null
+                    ? 0
+                    : BuildExecutionInstrumentation.StartTimestamp();
+            FastTaskInvocation fastInvocation;
+            using (action != null
+                       ? BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                           BuildExecutionMetric.FastTaskLookup,
+                           fastTaskName,
+                           TargetLoggingContext.Target.Name)
+                       : default)
+            {
+                fastInvocation = action == null
+                    ? default
+                    : action.GetFastInvocation();
+            }
+
+            if (fastInvocation.IsValid &&
+                Mode == TaskExecutionMode.ExecuteTaskAndGatherOutputs &&
+                taskInstance != null)
+            {
+                SetTaskInstance(taskInstance);
+                if (fastInvocation.CanExecute(this))
+                {
+                    try
+                    {
+                        return new ValueTask<WorkUnitResult>(
+                            fastInvocation.Execute(this));
+                    }
+                    finally
+                    {
+                        BuildExecutionInstrumentation.RecordSince(
+                            BuildExecutionMetric.FastTaskSite,
+                            fastTaskSiteStart,
+                            taskInstance.Name,
+                            TargetLoggingContext.Target.Name);
+                    }
+                }
+            }
+
+            return new ValueTask<WorkUnitResult>(
+                TaskBuilder.ExecuteTask(
+                    TargetLoggingContext,
+                    RequestEntry,
+                    TargetBuilderCallback,
+                    record.Child,
+                    action,
+                    Mode,
+                    LookupForInference,
+                    LookupForExecution,
+                    CancellationToken));
+        }
+
+        private WorkUnitResult ExecuteCompiledPropertyGroupAction(
+            CompiledTargetActionRecord record)
+        {
+            WorkUnitResult result = new(
+                WorkUnitResultCode.Failed,
+                WorkUnitActionCode.Stop,
+                null);
+
+            if ((Mode & TaskExecutionMode.InferOutputsOnly) ==
+                TaskExecutionMode.InferOutputsOnly)
+            {
+                result = ExecuteCompiledPropertyGroup(
+                    record,
+                    LookupForInference);
+            }
+
+            if ((Mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) ==
+                TaskExecutionMode.ExecuteTaskAndGatherOutputs)
+            {
+                result = ExecuteCompiledPropertyGroup(
+                    record,
+                    LookupForExecution);
+            }
+
+            return result;
+        }
+
+        private WorkUnitResult ExecuteCompiledPropertyGroup(
+            CompiledTargetActionRecord record,
+            Lookup lookup)
+        {
+            CompiledPropertyGroupAction action =
+                record.PropertyGroupAction;
+            CompiledLookupExpressionEnvironment environment =
+                GetExpressionEnvironment(lookup);
+            if (!action.EvaluateCondition(environment))
+            {
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Skipped,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+
+            using var intrinsicTaskMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.IntrinsicTask,
+                    BuildExecutionInstrumentation.DetailsEnabled
+                        ? record.Child.GetType().Name
+                        : null,
+                    TargetLoggingContext.Target.Name);
+            using var compiledPropertyGroupMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.CompiledPropertyGroup,
+                    parentName: TargetLoggingContext.Target.Name);
+            try
+            {
+                bool logTaskInputs =
+                    Host.BuildParameters.LogTaskInputs ||
+                    Traits.Instance.EscapeHatches.LogTaskInputs;
+                ProjectInstance project =
+                    RequestEntry.RequestConfiguration.Project;
+                PropertyTrackingSetting propertyTrackingSettings =
+                    (PropertyTrackingSetting)
+                    Traits.Instance.LogPropertyTracking;
+                PropertiesUseTracker propertiesUseTracker =
+                    environment.Expander.PropertiesUseTracker;
+
+                for (int assignmentIndex = 0;
+                     assignmentIndex < action.AssignmentCount;
+                     assignmentIndex++)
+                {
+                    CompiledPropertyAssignment assignment =
+                        action.GetAssignment(assignmentIndex);
+                    ProjectPropertyGroupTaskPropertyInstance property =
+                        assignment.Property;
+                    if (assignment.Condition != null &&
+                        !assignment.Condition.Evaluate(
+                            environment,
+                            property.ConditionLocation))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        ProjectErrorUtilities.VerifyThrowInvalidProject(
+                            !ReservedPropertyNames.IsReservedProperty(
+                                property.Name),
+                            property.Location,
+                            "CannotModifyReservedProperty",
+                            property.Name);
+
+                        propertiesUseTracker
+                                .CurrentlyEvaluatingPropertyElementName =
+                            property.Name;
+                        propertiesUseTracker.PropertyReadContext =
+                            PropertyReadContext.PropertyEvaluation;
+
+                        string evaluatedValue =
+                            assignment.Value.EvaluateLeaveEscaped(
+                                environment,
+                                property.Location);
+                        propertiesUseTracker.CheckPreexistingUndefinedUsage(
+                            property,
+                            evaluatedValue,
+                            TargetLoggingContext);
+
+                        PropertyTrackingUtils.LogPropertyAssignment(
+                            propertyTrackingSettings,
+                            property.Name,
+                            evaluatedValue,
+                            property.Location,
+                            project.GetProperty(property.Name)
+                                ?.EvaluatedValue,
+                            TargetLoggingContext);
+
+                        if (logTaskInputs &&
+                            !TargetLoggingContext.LoggingService
+                                .OnlyLogCriticalEvents)
+                        {
+                            TargetLoggingContext.LogComment(
+                                MessageImportance.Low,
+                                "PropertyGroupLogMessage",
+                                property.Name,
+                                evaluatedValue);
+                        }
+
+                        lookup.SetProperty(
+                            ProjectPropertyInstance.Create(
+                                property.Name,
+                                evaluatedValue,
+                                property.Location,
+                                project.IsImmutable));
+                        TargetLoggingContext.ProcessPropertyWrite(
+                            new PropertyWriteInfo(
+                                property.Name,
+                                string.IsNullOrEmpty(evaluatedValue),
+                                property.Location));
+                    }
+                    finally
+                    {
+                        propertiesUseTracker.ResetPropertyGroupAssignment();
+                    }
+                }
+
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Success,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+            catch (InvalidProjectFileException exception)
+            {
+                TargetLoggingContext.LogInvalidProjectFileError(exception);
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Failed,
+                    WorkUnitActionCode.Stop,
+                    exception);
+            }
+        }
+
+        private WorkUnitResult ExecuteCompiledItemGroupAction(
+            CompiledTargetActionRecord record)
+        {
+            WorkUnitResult result = new(
+                WorkUnitResultCode.Failed,
+                WorkUnitActionCode.Stop,
+                null);
+
+            if ((Mode & TaskExecutionMode.InferOutputsOnly) ==
+                TaskExecutionMode.InferOutputsOnly)
+            {
+                result = ExecuteCompiledItemGroup(
+                    record,
+                    LookupForInference);
+            }
+
+            if ((Mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) ==
+                TaskExecutionMode.ExecuteTaskAndGatherOutputs)
+            {
+                result = ExecuteCompiledItemGroup(
+                    record,
+                    LookupForExecution);
+            }
+
+            return result;
+        }
+
+        private WorkUnitResult ExecuteIntrinsicFallbackAction(
+            CompiledTargetActionRecord record)
+        {
+            WorkUnitResult result = new(
+                WorkUnitResultCode.Failed,
+                WorkUnitActionCode.Stop,
+                null);
+
+            if ((Mode & TaskExecutionMode.InferOutputsOnly) ==
+                TaskExecutionMode.InferOutputsOnly)
+            {
+                result = ExecuteIntrinsicFallback(
+                    record,
+                    LookupForInference);
+            }
+
+            if ((Mode & TaskExecutionMode.ExecuteTaskAndGatherOutputs) ==
+                TaskExecutionMode.ExecuteTaskAndGatherOutputs)
+            {
+                result = ExecuteIntrinsicFallback(
+                    record,
+                    LookupForExecution);
+            }
+
+            return result;
+        }
+
+        private WorkUnitResult ExecuteCompiledItemGroup(
+            CompiledTargetActionRecord record,
+            Lookup lookup)
+        {
+            CompiledItemGroupAction action = record.ItemGroupAction;
+            CompiledLookupExpressionEnvironment environment =
+                GetExpressionEnvironment(lookup);
+            if (!action.EvaluateCondition(environment))
+            {
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Skipped,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+
+            using var intrinsicTaskMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.IntrinsicTask,
+                    BuildExecutionInstrumentation.DetailsEnabled
+                        ? record.Child.GetType().Name
+                        : null,
+                    TargetLoggingContext.Target.Name);
+            using var compiledItemGroupMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.CompiledItemGroup,
+                    parentName: TargetLoggingContext.Target.Name);
+            try
+            {
+                bool logTaskInputs =
+                    Host.BuildParameters.LogTaskInputs ||
+                    Traits.Instance.EscapeHatches.LogTaskInputs;
+                ProjectInstance project =
+                    RequestEntry.RequestConfiguration.Project;
+
+                int firstOperationIndex = 0;
+#if NET
+                if (action.TargetFrameworkRoutingAction != null)
+                {
+                    ExecuteCompiledItemOperation(
+                        action.TargetFrameworkRoutingAction.SourceInclude,
+                        environment,
+                        lookup,
+                        project,
+                        logTaskInputs);
+                    if (TryExecuteCompiledTargetFrameworkRouting(
+                        action.TargetFrameworkRoutingAction,
+                        environment,
+                        lookup,
+                        project,
+                        logTaskInputs))
+                    {
+                        return new WorkUnitResult(
+                            WorkUnitResultCode.Success,
+                            WorkUnitActionCode.Continue,
+                            null);
+                    }
+
+                    firstOperationIndex = 1;
+                }
+#endif
+
+                for (int operationIndex = firstOperationIndex;
+                     operationIndex < action.OperationCount;
+                     operationIndex++)
+                {
+                    CompiledItemOperation operation =
+                        action.GetOperation(operationIndex);
+                    if (!operation.Batching.RequiresBatching)
+                    {
+                        ExecuteCompiledItemOperation(
+                            operation,
+                            environment,
+                            lookup,
+                            project,
+                            logTaskInputs);
+                        continue;
+                    }
+
+                    List<ItemBucket> buckets = null;
+                    try
+                    {
+                        buckets = BatchingEngine.PrepareBatchingBuckets(
+                            operation.Batching,
+                            lookup,
+                            operation.Item.ItemType,
+                            record.Child.Location,
+                            TargetLoggingContext);
+                        foreach (ItemBucket bucket in buckets)
+                        {
+                            ExecuteCompiledItemOperation(
+                                operation,
+                                CreateExpressionEnvironment(bucket.Expander),
+                                bucket.Lookup,
+                                project,
+                                logTaskInputs);
+                        }
+                    }
+                    finally
+                    {
+                        if (buckets != null)
+                        {
+                            foreach (ItemBucket bucket in buckets)
+                            {
+                                bucket.LeaveScope();
+                            }
+                        }
+                    }
+                }
+
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Success,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+            catch (InvalidProjectFileException exception)
+            {
+                TargetLoggingContext.LogInvalidProjectFileError(exception);
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Failed,
+                    WorkUnitActionCode.Stop,
+                    exception);
+            }
+        }
+
+#if NET
+        private bool TryExecuteCompiledTargetFrameworkRouting(
+            CompiledTargetFrameworkRoutingAction action,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            bool logTaskInputs)
+        {
+            ICollection<ProjectItemInstance> targetFrameworks =
+                lookup.GetItems(action.SourceInclude.Item.ItemType);
+            ICollection<ProjectItemInstance> existingDecomposedFrameworks =
+                lookup.GetItems(action.Decomposition.Item.ItemType);
+            if (targetFrameworks?.Count is not > 0 ||
+                existingDecomposedFrameworks?.Count > 0 ||
+                HasExistingRouteItems(action, lookup) ||
+                HasRelevantItemDefinitions(action, project) ||
+                !HasUniqueTargetFrameworkIdentities(targetFrameworks))
+            {
+                return false;
+            }
+
+            using (BuildExecutionInstrumentation.Measure(
+                       BuildExecutionMetric
+                           .CompiledTargetFrameworkRouting,
+                       parentName:
+                           TargetLoggingContext.Target.Name))
+            {
+                DecomposeAndRouteTargetFrameworks(
+                    action,
+                    environment,
+                    lookup,
+                    project,
+                    targetFrameworks,
+                    logTaskInputs);
+            }
+
+            return true;
+        }
+
+        private static bool HasExistingRouteItems(
+            CompiledTargetFrameworkRoutingAction action,
+            Lookup lookup) =>
+            lookup.GetItems(action.TrimmingRoute.Item.ItemType)?.Count > 0 ||
+            lookup.GetItems(action.AotRoute.Item.ItemType)?.Count > 0 ||
+            lookup.GetItems(action.SingleFileRoute.Item.ItemType)?.Count > 0;
+
+        private static bool HasRelevantItemDefinitions(
+            CompiledTargetFrameworkRoutingAction action,
+            ProjectInstance project) =>
+            project.ItemDefinitions.ContainsKey(
+                action.Decomposition.Item.ItemType) ||
+            project.ItemDefinitions.ContainsKey(
+                action.TrimmingRoute.Item.ItemType) ||
+            project.ItemDefinitions.ContainsKey(
+                action.AotRoute.Item.ItemType) ||
+            project.ItemDefinitions.ContainsKey(
+                action.SingleFileRoute.Item.ItemType);
+
+        private void DecomposeAndRouteTargetFrameworks(
+            CompiledTargetFrameworkRoutingAction action,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            ICollection<ProjectItemInstance> targetFrameworks,
+            bool logTaskInputs)
+        {
+            CompiledItemMetadataAssignment[] metadata =
+                action.Decomposition.Metadata;
+            string firstTrimmingFramework = GetRoutingPropertyValue(
+                environment,
+                "_FirstTargetFrameworkToSupportTrimming",
+                metadata[0].Metadata.Location);
+            string minimumTrimmingFramework = GetRoutingPropertyValue(
+                environment,
+                "_MinNonEolTargetFrameworkForTrimming",
+                metadata[1].Metadata.Location);
+            string firstAotFramework = GetRoutingPropertyValue(
+                environment,
+                "_FirstTargetFrameworkToSupportAot",
+                metadata[2].Metadata.Location);
+            string minimumAotFramework = GetRoutingPropertyValue(
+                environment,
+                "_MinNonEolTargetFrameworkForAot",
+                metadata[3].Metadata.Location);
+            string firstSingleFileFramework = GetRoutingPropertyValue(
+                environment,
+                "_FirstTargetFrameworkToSupportSingleFile",
+                metadata[4].Metadata.Location);
+            string minimumSingleFileFramework = GetRoutingPropertyValue(
+                environment,
+                "_MinNonEolTargetFrameworkForSingleFile",
+                metadata[5].Metadata.Location);
+
+            var decomposedFactory = new ProjectItemInstanceFactory(
+                project,
+                action.Decomposition.Item.ItemType);
+            var trimmingFactory = new ProjectItemInstanceFactory(
+                project,
+                action.TrimmingRoute.Item.ItemType);
+            var aotFactory = new ProjectItemInstanceFactory(
+                project,
+                action.AotRoute.Item.ItemType);
+            var singleFileFactory = new ProjectItemInstanceFactory(
+                project,
+                action.SingleFileRoute.Item.ItemType);
+            var decomposedItems =
+                new List<ProjectItemInstance>(targetFrameworks.Count);
+            var trimmingItems = new List<ProjectItemInstance>();
+            var aotItems = new List<ProjectItemInstance>();
+            var singleFileItems = new List<ProjectItemInstance>();
+
+            NuGetFramework parsedFirstTrimmingFramework = null;
+            NuGetFramework parsedMinimumTrimmingFramework = null;
+            NuGetFramework parsedFirstAotFramework = null;
+            NuGetFramework parsedMinimumAotFramework = null;
+            NuGetFramework parsedFirstSingleFileFramework = null;
+            NuGetFramework parsedMinimumSingleFileFramework = null;
+
+            foreach (ProjectItemInstance targetFramework in targetFrameworks)
+            {
+                string identity = FileUtilities.MaybeAdjustFilePath(
+                    targetFramework.EvaluatedInclude);
+                NuGetFramework parsedIdentity = ParseRoutingFramework(
+                    environment,
+                    identity,
+                    metadata[0].Metadata);
+                parsedFirstTrimmingFramework ??= ParseRoutingFramework(
+                    environment,
+                    firstTrimmingFramework,
+                    metadata[0].Metadata);
+                bool supportsTrimming = EvaluateRoutingCompatibility(
+                    parsedIdentity,
+                    parsedFirstTrimmingFramework,
+                    metadata[0].Metadata);
+                parsedMinimumTrimmingFramework ??= ParseRoutingFramework(
+                    environment,
+                    minimumTrimmingFramework,
+                    metadata[1].Metadata);
+                bool supportedByMinimumTrimmingFramework =
+                    EvaluateRoutingCompatibility(
+                        parsedMinimumTrimmingFramework,
+                        parsedIdentity,
+                        metadata[1].Metadata);
+                parsedFirstAotFramework ??= ParseRoutingFramework(
+                    environment,
+                    firstAotFramework,
+                    metadata[2].Metadata);
+                bool supportsAot = EvaluateRoutingCompatibility(
+                    parsedIdentity,
+                    parsedFirstAotFramework,
+                    metadata[2].Metadata);
+                parsedMinimumAotFramework ??= ParseRoutingFramework(
+                    environment,
+                    minimumAotFramework,
+                    metadata[3].Metadata);
+                bool supportedByMinimumAotFramework =
+                    EvaluateRoutingCompatibility(
+                        parsedMinimumAotFramework,
+                        parsedIdentity,
+                        metadata[3].Metadata);
+                parsedFirstSingleFileFramework ??= ParseRoutingFramework(
+                    environment,
+                    firstSingleFileFramework,
+                    metadata[4].Metadata);
+                bool supportsSingleFile = EvaluateRoutingCompatibility(
+                    parsedIdentity,
+                    parsedFirstSingleFileFramework,
+                    metadata[4].Metadata);
+                parsedMinimumSingleFileFramework ??= ParseRoutingFramework(
+                    environment,
+                    minimumSingleFileFramework,
+                    metadata[5].Metadata);
+                bool supportedByMinimumSingleFileFramework =
+                    EvaluateRoutingCompatibility(
+                        parsedMinimumSingleFileFramework,
+                        parsedIdentity,
+                        metadata[5].Metadata);
+
+                ProjectItemInstance decomposed = decomposedFactory.CreateItem(
+                    targetFramework,
+                    action.Decomposition.Item.Location.File);
+                decomposed.SetMetadata(
+                    metadata[0].Metadata.Name,
+                    GetBooleanMetadataValue(supportsTrimming));
+                decomposed.SetMetadata(
+                    metadata[1].Metadata.Name,
+                    GetBooleanMetadataValue(
+                        supportedByMinimumTrimmingFramework));
+                decomposed.SetMetadata(
+                    metadata[2].Metadata.Name,
+                    GetBooleanMetadataValue(supportsAot));
+                decomposed.SetMetadata(
+                    metadata[3].Metadata.Name,
+                    GetBooleanMetadataValue(
+                        supportedByMinimumAotFramework));
+                decomposed.SetMetadata(
+                    metadata[4].Metadata.Name,
+                    GetBooleanMetadataValue(supportsSingleFile));
+                decomposed.SetMetadata(
+                    metadata[5].Metadata.Name,
+                    GetBooleanMetadataValue(
+                        supportedByMinimumSingleFileFramework));
+                decomposedItems.Add(decomposed);
+
+                if (supportsTrimming &&
+                    supportedByMinimumTrimmingFramework)
+                {
+                    trimmingItems.Add(trimmingFactory.CreateItem(
+                        decomposed,
+                        action.TrimmingRoute.Item.Location.File));
+                }
+
+                if (supportsAot && supportedByMinimumAotFramework)
+                {
+                    aotItems.Add(aotFactory.CreateItem(
+                        decomposed,
+                        action.AotRoute.Item.Location.File));
+                }
+
+                if (supportsSingleFile &&
+                    supportedByMinimumSingleFileFramework)
+                {
+                    singleFileItems.Add(singleFileFactory.CreateItem(
+                        decomposed,
+                        action.SingleFileRoute.Item.Location.File));
+                }
+            }
+
+            AddSpecializedItems(
+                lookup,
+                action.Decomposition,
+                decomposedItems,
+                logTaskInputs,
+                logItemsIndividually: true);
+            AddSpecializedItems(
+                lookup,
+                action.TrimmingRoute,
+                trimmingItems,
+                logTaskInputs,
+                logItemsIndividually: false);
+            AddSpecializedItems(
+                lookup,
+                action.AotRoute,
+                aotItems,
+                logTaskInputs,
+                logItemsIndividually: false);
+            AddSpecializedItems(
+                lookup,
+                action.SingleFileRoute,
+                singleFileItems,
+                logTaskInputs,
+                logItemsIndividually: false);
+        }
+
+        private static string GetBooleanMetadataValue(bool value) =>
+            value ? bool.TrueString : bool.FalseString;
+
+        private void AddSpecializedItems(
+            Lookup lookup,
+            CompiledItemOperation operation,
+            List<ProjectItemInstance> items,
+            bool logTaskInputs,
+            bool logItemsIndividually)
+        {
+            Action<IList> logFunction = null;
+            if (logTaskInputs &&
+                !TargetLoggingContext.LoggingService
+                    .OnlyLogCriticalEvents &&
+                items.Count > 0)
+            {
+                if (logItemsIndividually)
+                {
+                    foreach (ProjectItemInstance item in items)
+                    {
+                        ItemGroupLoggingHelper.LogTaskParameter(
+                            TargetLoggingContext,
+                            TaskParameterMessageKind.AddItem,
+                            parameterName: null,
+                            propertyName: null,
+                            operation.Item.ItemType,
+                            new List<ProjectItemInstance>(1) { item },
+                            logItemMetadata: true,
+                            operation.Item.Location);
+                    }
+                }
+                else
+                {
+                    logFunction = itemList =>
+                        ItemGroupLoggingHelper.LogTaskParameter(
+                            TargetLoggingContext,
+                            TaskParameterMessageKind.AddItem,
+                            parameterName: null,
+                            propertyName: null,
+                            operation.Item.ItemType,
+                            itemList,
+                            logItemMetadata: true,
+                            operation.Item.Location);
+                }
+            }
+
+            lookup.AddNewItemsOfItemType(
+                operation.Item.ItemType,
+                items,
+                doNotAddDuplicates: false,
+                logFunction);
+        }
+
+        private static bool HasUniqueTargetFrameworkIdentities(
+            ICollection<ProjectItemInstance> targetFrameworks)
+        {
+            if (targetFrameworks == null || targetFrameworks.Count < 2)
+            {
+                return true;
+            }
+
+            int outerIndex = 0;
+            foreach (ProjectItemInstance outer in targetFrameworks)
+            {
+                int innerIndex = 0;
+                foreach (ProjectItemInstance inner in targetFrameworks)
+                {
+                    if (innerIndex++ >= outerIndex)
+                    {
+                        break;
+                    }
+
+                    if (MSBuildNameIgnoreCaseComparer.Default.Equals(
+                            outer.EvaluatedInclude,
+                            inner.EvaluatedInclude))
+                    {
+                        return false;
+                    }
+                }
+
+                outerIndex++;
+            }
+
+            return true;
+        }
+
+        private static string GetRoutingPropertyValue(
+            ICompiledExpressionEnvironment environment,
+            string propertyName,
+            IElementLocation location) =>
+            EscapingUtilities.UnescapeAll(
+                FileUtilities.MaybeAdjustFilePath(
+                    environment.GetEscapedPropertyValue(
+                        propertyName,
+                        location)));
+
+        private static NuGetFramework ParseRoutingFramework(
+            CompiledLookupExpressionEnvironment environment,
+            string framework,
+            ProjectItemGroupTaskMetadataInstance metadata)
+        {
+            try
+            {
+                return environment.GetOrParseTargetFramework(framework);
+            }
+            catch (Exception ex)
+                when (!ExceptionHandling.NotExpectedFunctionException(ex))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    metadata.Location,
+                    "InvalidFunctionPropertyExpression",
+                    GetRoutingFunctionBody(metadata),
+                    ex.Message.Replace("\r\n", " "));
+                return null;
+            }
+        }
+
+        private static bool EvaluateRoutingCompatibility(
+            NuGetFramework target,
+            NuGetFramework candidate,
+            ProjectItemGroupTaskMetadataInstance metadata)
+        {
+            try
+            {
+                return DefaultCompatibilityProvider.Instance.IsCompatible(
+                    target,
+                    candidate);
+            }
+            catch (Exception ex)
+                when (!ExceptionHandling.NotExpectedFunctionException(ex))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(
+                    metadata.Location,
+                    "InvalidFunctionPropertyExpression",
+                    GetRoutingFunctionBody(metadata),
+                    ex.Message.Replace("\r\n", " "));
+                return false;
+            }
+        }
+
+        private static string GetRoutingFunctionBody(
+            ProjectItemGroupTaskMetadataInstance metadata) =>
+            metadata.Value.Substring(2, metadata.Value.Length - 3);
+#endif
+
+        private void ExecuteCompiledItemOperation(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            bool logTaskInputs)
+        {
+            ProjectItemGroupTaskItemInstance item = operation.Item;
+            if (operation.Condition != null &&
+                !operation.Condition.EvaluateForItemGroup(
+                    environment,
+                    item.ConditionLocation))
+            {
+                return;
+            }
+
+            switch (operation.Kind)
+            {
+                case CompiledItemOperationKind.Include:
+                    ExecuteCompiledItemInclude(
+                        operation,
+                        environment,
+                        lookup,
+                        project,
+                        logTaskInputs);
+                    break;
+                case CompiledItemOperationKind.Remove:
+                    ExecuteCompiledItemRemove(
+                        operation,
+                        environment,
+                        lookup,
+                        project,
+                        logTaskInputs);
+                    break;
+                case CompiledItemOperationKind.Modify:
+                    ExecuteCompiledItemModify(
+                        operation,
+                        environment,
+                        lookup);
+                    break;
+                default:
+                    throw new InternalErrorException(
+                        "Unexpected compiled item operation.");
+            }
+        }
+
+        private void ExecuteCompiledItemInclude(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            bool logTaskInputs)
+        {
+            ProjectItemGroupTaskItemInstance item = operation.Item;
+            HashSet<string> keepMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.KeepMetadata,
+                    environment,
+                    item.KeepMetadataLocation);
+            HashSet<string> removeMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.RemoveMetadata,
+                    environment,
+                    item.RemoveMetadataLocation);
+            ProjectErrorUtilities.VerifyThrowInvalidProject(
+                !(keepMetadata != null && removeMetadata != null),
+                item.KeepMetadataLocation,
+                "KeepAndRemoveMetadataMutuallyExclusive");
+
+            var itemsToAdd = new List<ProjectItemInstance>();
+            ProjectItemDefinitionInstance itemDefinition;
+            project.ItemDefinitions.TryGetValue(
+                item.ItemType,
+                out itemDefinition);
+            IMetadataTable originalMetadataTable =
+                environment.Expander.Metadata;
+            var metadataTable =
+                new ItemGroupIntrinsicTask.NestedMetadataTable(
+                    item.ItemType,
+                    originalMetadataTable,
+                    itemDefinition);
+            environment.Expander.Metadata = metadataTable;
+            try
+            {
+                string evaluatedInclude =
+                    operation.Include?.EvaluateLeaveEscaped(
+                        environment,
+                        item.IncludeLocation) ?? string.Empty;
+
+                List<string> excludes = null;
+                if (evaluatedInclude.Length != 0 &&
+                    operation.Exclude != null)
+                {
+                    string evaluatedExclude =
+                        operation.Exclude.EvaluateLeaveEscaped(
+                            environment,
+                            item.ExcludeLocation);
+                    if (evaluatedExclude.Length != 0)
+                    {
+                        excludes = environment.Expander
+                            .ExpandIntoStringListLeaveEscaped(
+                                evaluatedExclude,
+                                ExpanderOptions.ExpandItems,
+                                item.ExcludeLocation)
+                            .ToList();
+                    }
+                }
+
+                var itemFactory =
+                    new ProjectItemInstanceFactory(project, item.ItemType);
+                bool expandedItemVector = false;
+
+                if (evaluatedInclude.Length != 0)
+                {
+                    foreach (string includeSplit
+                        in ExpressionShredder.SplitSemiColonSeparatedList(
+                            evaluatedInclude))
+                    {
+                        IList<ProjectItemInstance> itemsFromSplit =
+                            environment.Expander
+                                .ExpandSingleItemVectorExpressionIntoItems(
+                                    includeSplit,
+                                    itemFactory,
+                                    ExpanderOptions.ExpandItems,
+                                    includeNullItems: false,
+                                    out _,
+                                    item.IncludeLocation);
+
+                        if (itemsFromSplit != null)
+                        {
+                            itemsToAdd.AddRange(itemsFromSplit);
+                            expandedItemVector = true;
+                            continue;
+                        }
+
+                        string[] includeSplitFiles =
+                            EngineFileUtilities.GetFileListEscaped(
+                                project.Directory,
+                                includeSplit,
+                                excludes,
+                                loggingMechanism: TargetLoggingContext,
+                                includeLocation: item.IncludeLocation,
+                                excludeLocation: item.ExcludeLocation,
+                                disableExcludeDriveEnumerationWarning: true);
+                        foreach (string includeSplitFile in includeSplitFiles)
+                        {
+                            itemsToAdd.Add(
+                                new ProjectItemInstance(
+                                    project,
+                                    item.ItemType,
+                                    includeSplitFile,
+                                    includeSplit,
+                                    directMetadata: null,
+                                    itemDefinitions: null,
+                                    definingFileEscaped: item.Location.File,
+                                    useItemDefinitionsWithoutModification: false));
+                        }
+                    }
+                }
+
+                if (expandedItemVector && excludes?.Count > 0)
+                {
+                    HashSet<string> excludedPaths =
+                        EvaluateCompiledExcludePaths(
+                            excludes,
+                            item.ExcludeLocation,
+                            project);
+                    itemsToAdd.RemoveAll(
+                        candidate =>
+                            excludedPaths.Contains(
+                                ((IItem)candidate).EvaluatedInclude
+                                    .NormalizeForPathComparison()));
+                }
+
+                FilterCompiledItemMetadata(
+                    itemsToAdd,
+                    keepMetadata,
+                    removeMetadata);
+
+                EvaluateCompiledItemMetadata(
+                    operation,
+                    environment,
+                    metadataTable);
+                ProjectItemInstance.SetMetadata(
+                    metadataTable.AddedMetadata,
+                    itemsToAdd);
+            }
+            finally
+            {
+                environment.Expander.Metadata = originalMetadataTable;
+            }
+
+            bool keepDuplicates =
+                operation.KeepDuplicates?.EvaluateForItemGroup(
+                    environment,
+                    item.KeepDuplicatesLocation) ?? true;
+            Action<IList> logFunction = null;
+            if (logTaskInputs &&
+                !TargetLoggingContext.LoggingService.OnlyLogCriticalEvents &&
+                itemsToAdd.Count > 0)
+            {
+                logFunction = itemList =>
+                    ItemGroupLoggingHelper.LogTaskParameter(
+                        TargetLoggingContext,
+                        TaskParameterMessageKind.AddItem,
+                        parameterName: null,
+                        propertyName: null,
+                        item.ItemType,
+                        itemList,
+                        logItemMetadata: true,
+                        item.Location);
+            }
+
+            lookup.AddNewItemsOfItemType(
+                item.ItemType,
+                itemsToAdd,
+                doNotAddDuplicates: !keepDuplicates,
+                logFunction);
+        }
+
+        private void ExecuteCompiledItemRemove(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup,
+            ProjectInstance project,
+            bool logTaskInputs)
+        {
+            ProjectItemGroupTaskItemInstance item = operation.Item;
+            HashSet<string> matchOnMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.MatchOnMetadata,
+                    environment,
+                    item.MatchOnMetadataLocation);
+            ICollection<ProjectItemInstance> group =
+                lookup.GetItems(item.ItemType);
+            if (group == null || group.Count == 0)
+            {
+                return;
+            }
+
+            string evaluatedRemove =
+                operation.Remove.EvaluateLeaveEscaped(
+                    environment,
+                    item.RemoveLocation);
+            if (evaluatedRemove.Length == 0)
+            {
+                return;
+            }
+
+            List<ProjectItemInstance> itemsToRemove;
+            if (matchOnMetadata != null)
+            {
+                var itemSpec =
+                    new ItemSpec<
+                        ProjectPropertyInstance,
+                        ProjectItemInstance>(
+                        evaluatedRemove,
+                        environment.Expander,
+                        item.RemoveLocation,
+                        project.Directory,
+                        expandProperties: false);
+                ProjectFileErrorUtilities.VerifyThrowInvalidProjectFile(
+                    itemSpec.Fragments.All(
+                        fragment =>
+                            fragment is ItemSpec<
+                                ProjectPropertyInstance,
+                                ProjectItemInstance>.ItemExpressionFragment),
+                    BuildEventFileInfo.Empty,
+                    "OM_MatchOnMetadataIsRestrictedToReferencedItems",
+                    item.RemoveLocation,
+                    item.Remove);
+                var metadataSet =
+                    new MetadataTrie<
+                        ProjectPropertyInstance,
+                        ProjectItemInstance>(
+                        operation.MatchOnMetadataOptions,
+                        matchOnMetadata,
+                        itemSpec);
+                itemsToRemove = group.Where(
+                    candidate => metadataSet.Contains(
+                        matchOnMetadata.Select(
+                            metadataName =>
+                                candidate.GetMetadataValue(
+                                    metadataName)))).ToList();
+            }
+            else
+            {
+                var specificationsToFind =
+                    new HashSet<string>(
+                        StringComparer.OrdinalIgnoreCase);
+                foreach (string piece
+                    in environment.Expander
+                        .ExpandIntoStringListLeaveEscaped(
+                            evaluatedRemove,
+                            ExpanderOptions.ExpandItems,
+                            item.RemoveLocation))
+                {
+                    string[] fileList =
+                        EngineFileUtilities.GetFileListEscaped(
+                            project.Directory,
+                            piece,
+                            loggingMechanism: TargetLoggingContext,
+                            includeLocation: item.RemoveLocation,
+                            excludeLocation: item.RemoveLocation);
+                    foreach (string file in fileList)
+                    {
+                        specificationsToFind.Add(
+                            EscapingUtilities.UnescapeAll(file));
+                    }
+                }
+
+                if (specificationsToFind.Count == 0)
+                {
+                    return;
+                }
+
+                itemsToRemove = new List<ProjectItemInstance>();
+                foreach (ProjectItemInstance candidate in group)
+                {
+                    if (specificationsToFind.Contains(
+                            candidate.EvaluatedInclude))
+                    {
+                        itemsToRemove.Add(candidate);
+                    }
+                }
+            }
+
+            if (itemsToRemove.Count == 0)
+            {
+                return;
+            }
+
+            if (logTaskInputs &&
+                !TargetLoggingContext.LoggingService.OnlyLogCriticalEvents)
+            {
+                ItemGroupLoggingHelper.LogTaskParameter(
+                    TargetLoggingContext,
+                    TaskParameterMessageKind.RemoveItem,
+                    parameterName: null,
+                    propertyName: null,
+                    item.ItemType,
+                    itemsToRemove,
+                    logItemMetadata: true,
+                    item.Location);
+            }
+
+            lookup.RemoveItems(item.ItemType, itemsToRemove);
+        }
+
+        private void ExecuteCompiledItemModify(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            Lookup lookup)
+        {
+            ProjectItemGroupTaskItemInstance item = operation.Item;
+            HashSet<string> keepMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.KeepMetadata,
+                    environment,
+                    item.KeepMetadataLocation);
+            HashSet<string> removeMetadata =
+                EvaluateCompiledItemMetadataList(
+                    operation.RemoveMetadata,
+                    environment,
+                    item.RemoveMetadataLocation);
+            ICollection<ProjectItemInstance> group =
+                lookup.GetItems(item.ItemType);
+            if (group == null || group.Count == 0)
+            {
+                return;
+            }
+
+            var metadataToSet = new Lookup.MetadataModifications(
+                keepOnlySpecified: keepMetadata != null);
+            if (keepMetadata != null)
+            {
+                foreach (string metadataName in keepMetadata)
+                {
+                    metadataToSet[metadataName] =
+                        Lookup.MetadataModification.CreateFromNoChange();
+                }
+            }
+            else if (removeMetadata != null)
+            {
+                foreach (string metadataName in removeMetadata)
+                {
+                    metadataToSet[metadataName] =
+                        Lookup.MetadataModification.CreateFromRemove();
+                }
+            }
+
+            foreach (CompiledItemMetadataAssignment assignment
+                in operation.Metadata)
+            {
+                if (assignment.Condition != null &&
+                    !assignment.Condition.EvaluateForItemGroup(
+                        environment,
+                        assignment.Metadata.ConditionLocation))
+                {
+                    continue;
+                }
+
+                string evaluatedValue =
+                    EvaluateCompiledItemMetadataValue(
+                        assignment,
+                        environment);
+                metadataToSet[assignment.Metadata.Name] =
+                    Lookup.MetadataModification.CreateFromNewValue(
+                        evaluatedValue);
+            }
+
+            lookup.ModifyItems(item.ItemType, group, metadataToSet);
+        }
+
+        private void EvaluateCompiledItemMetadata(
+            CompiledItemOperation operation,
+            CompiledLookupExpressionEnvironment environment,
+            ItemGroupIntrinsicTask.NestedMetadataTable metadataTable)
+        {
+            foreach (CompiledItemMetadataAssignment assignment
+                in operation.Metadata)
+            {
+                if (assignment.Condition != null &&
+                    !assignment.Condition.EvaluateForItemGroup(
+                        environment,
+                        assignment.Metadata.ConditionLocation))
+                {
+                    continue;
+                }
+
+                metadataTable.SetValue(
+                    assignment.Metadata.Name,
+                    EvaluateCompiledItemMetadataValue(
+                        assignment,
+                        environment));
+            }
+        }
+
+        private string EvaluateCompiledItemMetadataValue(
+            CompiledItemMetadataAssignment assignment,
+            CompiledLookupExpressionEnvironment environment)
+        {
+            string escapedValue =
+                assignment.Value.EvaluateLeaveEscaped(
+                    environment,
+                    assignment.Metadata.Location);
+            return environment.Expander.ExpandIntoStringLeaveEscaped(
+                escapedValue,
+                ExpanderOptions.ExpandItems,
+                assignment.Metadata.Location);
+        }
+
+        private static HashSet<string> EvaluateCompiledItemMetadataList(
+            CompiledScalarProgram program,
+            CompiledLookupExpressionEnvironment environment,
             IElementLocation location)
         {
-            ProjectPropertyInstance property = Lookup.GetProperty(propertyName);
-            return property == null
-                ? string.Empty
-                : ((IProperty)property).GetEvaluatedValueEscaped(location);
+            if (program == null)
+            {
+                return null;
+            }
+
+            string evaluatedValue =
+                program.EvaluateLeaveEscaped(environment, location);
+            List<string> values = environment.Expander
+                .ExpandIntoStringListLeaveEscaped(
+                    evaluatedValue,
+                    ExpanderOptions.ExpandItems,
+                    location)
+                .ToList();
+            return values.Count == 0
+                ? null
+                : new HashSet<string>(values);
         }
+
+        private static void FilterCompiledItemMetadata(
+            List<ProjectItemInstance> items,
+            HashSet<string> keepMetadata,
+            HashSet<string> removeMetadata)
+        {
+            if (keepMetadata == null && removeMetadata == null)
+            {
+                return;
+            }
+
+            var metadataToRemove = new List<string>();
+            foreach (ProjectItemInstance item in items)
+            {
+                metadataToRemove.Clear();
+                foreach (string metadataName in item.EnumerableMetadataNames)
+                {
+                    if ((keepMetadata != null &&
+                         !keepMetadata.Contains(metadataName)) ||
+                        (removeMetadata != null &&
+                         removeMetadata.Contains(metadataName)))
+                    {
+                        metadataToRemove.Add(metadataName);
+                    }
+                }
+
+                foreach (string metadataName in metadataToRemove)
+                {
+                    item.RemoveMetadata(metadataName);
+                }
+            }
+        }
+
+        private HashSet<string> EvaluateCompiledExcludePaths(
+            IReadOnlyList<string> excludes,
+            IElementLocation excludeLocation,
+            ProjectInstance project)
+        {
+            var excludedPaths = new HashSet<string>(
+                excludes.Count,
+                StringComparer.OrdinalIgnoreCase);
+            foreach (string excludeSplit in excludes)
+            {
+                string[] excludeSplitFiles =
+                    EngineFileUtilities.GetFileListUnescaped(
+                        project.Directory,
+                        excludeSplit,
+                        loggingMechanism: TargetLoggingContext,
+                        excludeLocation: excludeLocation);
+                foreach (string excludeSplitFile in excludeSplitFiles)
+                {
+                    excludedPaths.Add(
+                        excludeSplitFile.NormalizeForPathComparison());
+                }
+            }
+
+            return excludedPaths;
+        }
+
+        private WorkUnitResult ExecuteIntrinsicFallback(
+            CompiledTargetActionRecord record,
+            Lookup lookup)
+        {
+            bool condition =
+                string.IsNullOrEmpty(record.Child.Condition) ||
+                ConditionEvaluator.EvaluateCondition(
+                    record.Child.Condition,
+                    ParserOptions.AllowPropertiesAndItemLists,
+                    GetConditionExpander(lookup),
+                    ExpanderOptions.ExpandAll,
+                    RequestEntry.ProjectRootDirectory,
+                    record.Child.ConditionLocation,
+                    FileSystems.Default,
+                    loggingContext: TargetLoggingContext);
+
+            if (!condition)
+            {
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Skipped,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+
+            using var intrinsicTaskMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.IntrinsicTask,
+                    BuildExecutionInstrumentation.DetailsEnabled
+                        ? record.Child.GetType().Name
+                        : null,
+                    TargetLoggingContext.Target.Name);
+            using var fallbackPropertyGroupMeasurement =
+                record.FallbackKind ==
+                    CompiledTargetFallbackKind.PropertyGroupIntrinsic
+                    ? BuildExecutionInstrumentation.Measure(
+                        BuildExecutionMetric.FallbackPropertyGroup,
+                        parentName: TargetLoggingContext.Target.Name)
+                    : default;
+            using var fallbackItemGroupMeasurement =
+                record.FallbackKind ==
+                    CompiledTargetFallbackKind.ItemGroupIntrinsic
+                    ? BuildExecutionInstrumentation.Measure(
+                        BuildExecutionMetric.FallbackItemGroup,
+                        parentName: TargetLoggingContext.Target.Name)
+                    : default;
+            try
+            {
+                bool logTaskInputs =
+                    Host.BuildParameters.LogTaskInputs ||
+                    Traits.Instance.EscapeHatches.LogTaskInputs;
+                switch (record.FallbackKind)
+                {
+                    case CompiledTargetFallbackKind.PropertyGroupIntrinsic:
+                        PropertyGroupIntrinsicTask.Execute(
+                            (ProjectPropertyGroupTaskInstance)record.Child,
+                            TargetLoggingContext,
+                            RequestEntry.RequestConfiguration.Project,
+                            logTaskInputs,
+                            lookup);
+                        break;
+                    case CompiledTargetFallbackKind.ItemGroupIntrinsic:
+                        ItemGroupIntrinsicTask.Execute(
+                            (ProjectItemGroupTaskInstance)record.Child,
+                            TargetLoggingContext,
+                            RequestEntry.RequestConfiguration.Project,
+                            logTaskInputs,
+                            lookup);
+                        break;
+                    default:
+                        throw new InternalErrorException(
+                            "Unexpected intrinsic fallback kind.");
+                }
+
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Success,
+                    WorkUnitActionCode.Continue,
+                    null);
+            }
+            catch (InvalidProjectFileException exception)
+            {
+                TargetLoggingContext.LogInvalidProjectFileError(exception);
+                return new WorkUnitResult(
+                    WorkUnitResultCode.Failed,
+                    WorkUnitActionCode.Stop,
+                    exception);
+            }
+        }
+
+        private Expander<ProjectPropertyInstance, ProjectItemInstance>
+            GetConditionExpander(Lookup lookup)
+        {
+            if (ReferenceEquals(lookup, LookupForExecution))
+            {
+                return _executionConditionExpander ??=
+                    CreateExpander(lookup);
+            }
+
+            return _inferenceConditionExpander ??=
+                CreateExpander(lookup);
+        }
+
+        private CompiledLookupExpressionEnvironment
+            GetExpressionEnvironment(Lookup lookup)
+        {
+            if (ReferenceEquals(lookup, LookupForExecution))
+            {
+                return _executionExpressionEnvironment ??=
+                    CreateExpressionEnvironment(
+                        GetConditionExpander(lookup));
+            }
+
+            return _inferenceExpressionEnvironment ??=
+                CreateExpressionEnvironment(
+                    GetConditionExpander(lookup));
+        }
+
+        private CompiledLookupExpressionEnvironment
+            CreateExpressionEnvironment(
+                Expander<ProjectPropertyInstance, ProjectItemInstance>
+                    expander)
+        {
+#if NET
+            return new CompiledLookupExpressionEnvironment(
+                expander,
+                GetTargetFrameworkCache());
+#else
+            return new CompiledLookupExpressionEnvironment(expander);
+#endif
+        }
+
+#if NET
+        private CompiledTargetFrameworkCache GetTargetFrameworkCache() =>
+            _targetFrameworkCache ??=
+                new CompiledTargetFrameworkCache();
+#endif
+
+        private Expander<ProjectPropertyInstance, ProjectItemInstance>
+            CreateExpander(Lookup lookup) =>
+            new(
+                lookup,
+                lookup,
+                new StringMetadataTable(metadata: null),
+                FileSystems.Default,
+                TargetLoggingContext);
 
         internal void SetTaskInstance(ProjectTaskInstance taskInstance) => TaskInstance = taskInstance;
 
@@ -1804,11 +3372,14 @@ namespace Microsoft.Build.BackEnd
             ITask task,
             TaskLoggingContext taskLoggingContext,
             CompiledTaskSourceProgram template) =>
-            _cancellationState.SetCurrentTask(task, taskLoggingContext, template);
+            (_cancellationState ??=
+                new FastTaskCancellationState(CancellationToken))
+                .SetCurrentTask(task, taskLoggingContext, template);
 
-        internal void ClearCurrentTask(ITask task) => _cancellationState.ClearCurrentTask(task);
+        internal void ClearCurrentTask(ITask task) =>
+            _cancellationState?.ClearCurrentTask(task);
 
-        public void Dispose() => _cancellationState.Dispose();
+        public void Dispose() => _cancellationState?.Dispose();
     }
 
     /// <summary>

@@ -1191,6 +1191,127 @@ namespace Microsoft.Build.UnitTests.Logging
             mockLogger.BuildMessageEvents[0].Message.ShouldBe("Test message during active build");
         }
 
+        [Fact]
+        public void ProcessLoggingEventAsynchronous_DeliversDeferredEvent()
+        {
+            LoggingService loggingService = CreateAsynchronousLoggingService(out MockLogger mockLogger);
+
+            try
+            {
+                loggingService.ProcessLoggingEvent(
+                    new BuildMessageEventArgs(
+                        "Deferred message",
+                        null,
+                        null,
+                        MessageImportance.Low));
+
+                SpinWait.SpinUntil(
+                    () => mockLogger.BuildMessageEvents.Count == 1,
+                    TimeSpan.FromSeconds(5)).ShouldBeTrue(
+                        "The coalesced logging notification did not deliver the event.");
+            }
+            finally
+            {
+                ((IBuildComponent)loggingService).ShutdownComponent();
+            }
+        }
+
+        [Fact]
+        public void WaitForLoggingToProcessEvents_FlushesEventsInOrder()
+        {
+            LoggingService loggingService = CreateAsynchronousLoggingService(out MockLogger mockLogger);
+
+            try
+            {
+                const int eventCount = 100;
+                for (int i = 0; i < eventCount; i++)
+                {
+                    loggingService.ProcessLoggingEvent(
+                        new BuildMessageEventArgs(
+                            $"Message {i}",
+                            null,
+                            null,
+                            MessageImportance.Low));
+                }
+
+                loggingService.WaitForLoggingToProcessEvents();
+
+                mockLogger.BuildMessageEvents.Count.ShouldBe(eventCount);
+                for (int i = 0; i < eventCount; i++)
+                {
+                    mockLogger.BuildMessageEvents[i].Message.ShouldBe($"Message {i}");
+                }
+            }
+            finally
+            {
+                ((IBuildComponent)loggingService).ShutdownComponent();
+            }
+        }
+
+        [Fact]
+        public void ShutdownComponent_FlushesScheduledEvents()
+        {
+            LoggingService loggingService = CreateAsynchronousLoggingService(out MockLogger mockLogger);
+
+            loggingService.ProcessLoggingEvent(
+                new BuildMessageEventArgs(
+                    "Message before shutdown",
+                    null,
+                    null,
+                    MessageImportance.Low));
+
+            ((IBuildComponent)loggingService).ShutdownComponent();
+
+            mockLogger.BuildMessageEvents.Count.ShouldBe(1);
+            mockLogger.BuildMessageEvents[0].Message.ShouldBe("Message before shutdown");
+        }
+
+        [Fact]
+        public void WaitForLoggingToProcessEvents_DoesNotWaitForStoppedProcessor()
+        {
+            var loggingService =
+                (LoggingService)LoggingService.CreateLoggingService(
+                    LoggerMode.Asynchronous,
+                    1);
+            ((IBuildComponent)loggingService).InitializeComponent(new MockHost());
+
+            using var logger = new BlockingShutdownLogger();
+            loggingService.RegisterLogger(logger);
+
+            Exception shutdownException = null;
+            var shutdownThread = new Thread(
+                () =>
+                {
+                    try
+                    {
+                        ((IBuildComponent)loggingService).ShutdownComponent();
+                    }
+                    catch (Exception ex)
+                    {
+                        shutdownException = ex;
+                    }
+                });
+            shutdownThread.Start();
+
+            logger.ShutdownStarted.Wait(TimeSpan.FromSeconds(5)).ShouldBeTrue(
+                "Logger shutdown did not start.");
+
+            var waitThread = new Thread(loggingService.WaitForLoggingToProcessEvents)
+            {
+                IsBackground = true,
+            };
+            waitThread.Start();
+            bool waitCompleted = waitThread.Join(TimeSpan.FromSeconds(1));
+
+            logger.ContinueShutdown.Set();
+            shutdownThread.Join(TimeSpan.FromSeconds(5)).ShouldBeTrue(
+                "Logging service shutdown did not complete.");
+
+            waitCompleted.ShouldBeTrue(
+                "Waiting for logging blocked after the processor stopped.");
+            shutdownException.ShouldBeNull();
+        }
+
         /// <summary>
         /// Verify that concurrent shutdown and ProcessLoggingEvent calls from multiple
         /// threads do not cause a crash (simulates the race condition scenario).
@@ -1251,6 +1372,20 @@ namespace Microsoft.Build.UnitTests.Logging
         #endregion
 
         #region PrivateMethods
+
+        private static LoggingService CreateAsynchronousLoggingService(
+            out MockLogger mockLogger)
+        {
+            var loggingService =
+                (LoggingService)LoggingService.CreateLoggingService(
+                    LoggerMode.Asynchronous,
+                    1);
+            ((IBuildComponent)loggingService).InitializeComponent(new MockHost());
+
+            mockLogger = new MockLogger();
+            loggingService.RegisterLogger(mockLogger);
+            return loggingService;
+        }
 
         /// <summary>
         /// Instantiate and Initialize a new loggingService.
@@ -1694,6 +1829,33 @@ namespace Microsoft.Build.UnitTests.Logging
             }
 
             #endregion
+        }
+
+        private sealed class BlockingShutdownLogger : ILogger, IDisposable
+        {
+            internal ManualResetEventSlim ShutdownStarted { get; } = new(false);
+
+            internal ManualResetEventSlim ContinueShutdown { get; } = new(false);
+
+            public LoggerVerbosity Verbosity { get; set; }
+
+            public string Parameters { get; set; }
+
+            public void Initialize(IEventSource eventSource)
+            {
+            }
+
+            public void Shutdown()
+            {
+                ShutdownStarted.Set();
+                ContinueShutdown.Wait();
+            }
+
+            public void Dispose()
+            {
+                ShutdownStarted.Dispose();
+                ContinueShutdown.Dispose();
+            }
         }
 
         /// <summary>

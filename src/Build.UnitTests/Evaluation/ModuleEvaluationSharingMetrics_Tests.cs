@@ -2081,6 +2081,59 @@ namespace Microsoft.Build.UnitTests.Evaluation
         }
 
         [Fact]
+        public void CompactModuleInterpreterFallsBackForItemVectorConditions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "item-vector-condition.proj",
+                """
+                <Project>
+                  <ItemGroup>
+                    <EnabledGenerator Include="Generator" />
+                  </ItemGroup>
+                  <ItemGroup Condition="'@(EnabledGenerator)' != ''">
+                    <ProjectReference Include="generated.proj" />
+                  </ItemGroup>
+                  <ItemGroup Condition="'@(MissingGenerator)' != ''">
+                    <ProjectReference Include="unexpected.proj" />
+                  </ItemGroup>
+                </Project>
+                """);
+            EvaluationContext optimizedContext =
+                EvaluationContext.CreateForCompiledModuleEvaluation();
+            Project optimized = EvaluateWithGlobals(
+                projectFile.Path,
+                environment.CreateProjectCollection().Collection,
+                optimizedContext,
+                new Dictionary<string, string>());
+            Project scalar = EvaluateWithGlobals(
+                projectFile.Path,
+                environment.CreateProjectCollection().Collection,
+                EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared),
+                new Dictionary<string, string>());
+
+            optimized.GetItems("ProjectReference")
+                .Select(item => item.EvaluatedInclude)
+                .ShouldBe(
+                    scalar.GetItems("ProjectReference")
+                        .Select(item => item.EvaluatedInclude));
+            Assert.Equal(
+                "generated.proj",
+                Assert.Single(optimized.GetItems("ProjectReference"))
+                    .EvaluatedInclude);
+            EvaluationModule module =
+                optimizedContext.EvaluationModuleCache.GetModule(
+                    optimized.Xml);
+            module.ItemGroups
+                .Where(group =>
+                    module.GetSource(group.SourceId).Condition.Contains(
+                        "@(",
+                        StringComparison.Ordinal))
+                .All(group => group.CompiledConditionId == -1)
+                .ShouldBeTrue();
+        }
+
+        [Fact]
         public void CompactModuleInterpreterPreservesDeferredLeafSemantics()
         {
             using TestEnvironment environment = TestEnvironment.Create();
