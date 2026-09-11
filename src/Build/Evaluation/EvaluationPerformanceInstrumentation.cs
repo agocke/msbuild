@@ -2,15 +2,10 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
-using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading;
-using Microsoft.Build.Framework;
+#if !NETFRAMEWORK
+using System.Diagnostics.Metrics;
+#endif
 
 #nullable disable
 
@@ -66,80 +61,126 @@ namespace Microsoft.Build.Evaluation
 
     internal static class EvaluationPerformanceInstrumentation
     {
-        private const string OutputDirectoryEnvironmentVariable =
-            "MSBUILDEVALUATIONPROFILEDIRECTORY";
-        private static readonly int s_metricCount =
-            Enum.GetValues(typeof(EvaluationPerformanceMetric)).Length;
-        private static readonly ThreadLocal<MetricAccumulator>
-            s_threadMetrics =
-                new ThreadLocal<MetricAccumulator>(
-                    () => new MetricAccumulator(s_metricCount),
-                    trackAllValues: true);
-        private static readonly ConcurrentDictionary<
-            string,
-            ConditionContentionAccumulator> s_conditionContentions =
-                new ConcurrentDictionary<
-                    string,
-                    ConditionContentionAccumulator>(
-                        StringComparer.Ordinal);
-        private static readonly ConcurrentDictionary<
-            string,
-            CompiledPropertyModuleAccumulator>
-            s_compiledPropertyModules =
-                new ConcurrentDictionary<
-                    string,
-                    CompiledPropertyModuleAccumulator>(
-                        StringComparer.OrdinalIgnoreCase);
-        private static readonly ConcurrentDictionary<
-            string,
-            CompiledPropertyExpansionAccumulator>
-            s_compiledPropertyExpansions =
-                new ConcurrentDictionary<
-                    string,
-                    CompiledPropertyExpansionAccumulator>(
-                        StringComparer.Ordinal);
-        private static readonly ConcurrentDictionary<
-            (string Shape, string Condition),
-            long> s_conditionShapes = new();
-        private static readonly ConcurrentDictionary<
-            string,
-            long> s_conditionContexts =
-                new(StringComparer.Ordinal);
-        private static readonly ConcurrentDictionary<
-            (string Context, string Condition),
-            long> s_conditionContextShapes = new();
-        private static readonly ConcurrentDictionary<
-            (EvaluationPerformanceMetric Kind, string ItemType, string Expression),
-            LazyItemOperationShapeAccumulator>
-            s_lazyItemOperationShapes = new();
-        private static readonly object s_reportLock = new object();
-        private static long s_completedEvaluations;
-        private static long s_compiledPropertyModuleCount;
-        private static long s_compiledPropertyValuePartCount;
-        private static long s_compiledPropertyFunctionCount;
-        private static long s_compiledPropertyFunctionArgumentCount;
-        private static readonly string s_outputDirectory =
-            Environment.GetEnvironmentVariable(
-                OutputDirectoryEnvironmentVariable);
+        internal const string MeterName = "Microsoft.Build.Evaluation";
+        internal const string DetailsMeterName =
+            "Microsoft.Build.Evaluation.Details";
+        internal const string DurationInstrumentName =
+            "msbuild.evaluation.elapsed";
+        internal const string EventInstrumentName =
+            "msbuild.evaluation.events";
+        internal const string ConditionShapeInstrumentName =
+            "msbuild.evaluation.condition.shape";
+        internal const string ConditionContextInstrumentName =
+            "msbuild.evaluation.condition.context";
+        internal const string LazyItemElapsedInstrumentName =
+            "msbuild.evaluation.lazy_item.elapsed";
+        internal const string LazyItemEventInstrumentName =
+            "msbuild.evaluation.lazy_item.operations";
 
-        static EvaluationPerformanceInstrumentation()
-        {
-            if (Enabled)
-            {
-                AppDomain.CurrentDomain.ProcessExit +=
-                    (_, _) => WriteReport();
-            }
-        }
+#if !NETFRAMEWORK
+        private static readonly string[] s_metricNames =
+            Enum.GetNames(typeof(EvaluationPerformanceMetric));
+        private static readonly Meter s_meter = new(MeterName);
+        private static readonly Meter s_detailsMeter =
+            new(DetailsMeterName);
+        private static readonly Counter<double> s_duration =
+            s_meter.CreateCounter<double>(
+                DurationInstrumentName,
+                "ms",
+                "Cumulative elapsed evaluation time.");
+        private static readonly Counter<long> s_events =
+            s_meter.CreateCounter<long>(
+                EventInstrumentName,
+                "{event}",
+                "Evaluation event count.");
+        private static readonly Counter<double> s_detailDuration =
+            s_detailsMeter.CreateCounter<double>(
+                DurationInstrumentName,
+                "ms",
+                "Cumulative elapsed evaluation time by diagnostic detail.");
+        private static readonly Counter<long> s_detailEvents =
+            s_detailsMeter.CreateCounter<long>(
+                EventInstrumentName,
+                "{event}",
+                "Evaluation event count by diagnostic detail.");
+        private static readonly Counter<long> s_conditionShapes =
+            s_detailsMeter.CreateCounter<long>(
+                ConditionShapeInstrumentName,
+                "{condition}",
+                "Condition evaluations by expression shape.");
+        private static readonly Counter<long> s_conditionContexts =
+            s_detailsMeter.CreateCounter<long>(
+                ConditionContextInstrumentName,
+                "{condition}",
+                "Condition evaluations by source context.");
+        private static readonly Counter<double> s_lazyItemDuration =
+            s_detailsMeter.CreateCounter<double>(
+                LazyItemElapsedInstrumentName,
+                "ms",
+                "Cumulative elapsed lazy item operation time.");
+        private static readonly Counter<long> s_lazyItemEvents =
+            s_detailsMeter.CreateCounter<long>(
+                LazyItemEventInstrumentName,
+                "{operation}",
+                "Lazy item operation count.");
+#endif
 
         internal static bool Enabled =>
-            !string.IsNullOrEmpty(s_outputDirectory);
+#if NETFRAMEWORK
+            false;
+#else
+            s_duration.Enabled ||
+            s_events.Enabled ||
+            s_detailDuration.Enabled ||
+            s_detailEvents.Enabled ||
+            s_conditionShapes.Enabled ||
+            s_conditionContexts.Enabled ||
+            s_lazyItemDuration.Enabled ||
+            s_lazyItemEvents.Enabled;
+#endif
+
+        internal static bool ConditionContentionEnabled =>
+#if NETFRAMEWORK
+            false;
+#else
+            s_duration.Enabled || s_detailDuration.Enabled;
+#endif
+
+        internal static bool LazyItemOperationMetricsEnabled =>
+#if NETFRAMEWORK
+            false;
+#else
+            s_duration.Enabled ||
+            s_events.Enabled ||
+            s_lazyItemDuration.Enabled ||
+            s_lazyItemEvents.Enabled;
+#endif
+
+        internal static bool LazyItemShapeEnabled =>
+#if NETFRAMEWORK
+            false;
+#else
+            s_lazyItemDuration.Enabled ||
+            s_lazyItemEvents.Enabled;
+#endif
 
         internal static Scope Measure(
             EvaluationPerformanceMetric metric) =>
-            new Scope(metric);
+            new(metric);
 
         internal static long StartTimestamp() =>
-            Enabled ? Stopwatch.GetTimestamp() : 0;
+#if NETFRAMEWORK
+            0;
+#else
+            s_duration.Enabled ? Stopwatch.GetTimestamp() : 0;
+#endif
+
+        internal static long StartContentionTimestamp() =>
+#if NETFRAMEWORK
+            0;
+#else
+            ConditionContentionEnabled ? Stopwatch.GetTimestamp() : 0;
+#endif
 
         internal static void RecordSince(
             EvaluationPerformanceMetric metric,
@@ -147,9 +188,10 @@ namespace Microsoft.Build.Evaluation
         {
             if (startTimestamp != 0)
             {
-                Record(
+                RecordDuration(
                     metric,
                     Stopwatch.GetTimestamp() - startTimestamp);
+                RecordEvent(metric);
             }
         }
 
@@ -161,26 +203,28 @@ namespace Microsoft.Build.Evaluation
             EvaluationPerformanceMetric metric,
             int count)
         {
-            if (Enabled && count != 0)
+#if !NETFRAMEWORK
+            if (count != 0 && s_events.Enabled)
             {
-                s_threadMetrics.Value.Counts[(int)metric] += count;
+                TagList tags = default;
+                tags.Add("metric", GetMetricName(metric));
+                s_events.Add(count, tags);
             }
+#endif
         }
 
         internal static void RecordCompiledPropertyExpansion(
             string expression)
         {
-            if (!Enabled)
+#if !NETFRAMEWORK
+            if (s_detailEvents.Enabled)
             {
-                return;
+                TagList tags = default;
+                tags.Add("metric", "compiled_property_expansion");
+                tags.Add("expression", expression);
+                s_detailEvents.Add(1, tags);
             }
-
-            CompiledPropertyExpansionAccumulator accumulator =
-                s_compiledPropertyExpansions.GetOrAdd(
-                    expression,
-                    static _ =>
-                        new CompiledPropertyExpansionAccumulator());
-            Interlocked.Increment(ref accumulator.Count);
+#endif
         }
 
         internal static void RecordCompiledPropertyModuleShape(
@@ -188,21 +232,29 @@ namespace Microsoft.Build.Evaluation
             int functionCount,
             int functionArgumentCount)
         {
-            if (!Enabled)
+#if !NETFRAMEWORK
+            if (!s_events.Enabled)
             {
                 return;
             }
 
-            Interlocked.Increment(ref s_compiledPropertyModuleCount);
-            Interlocked.Add(
-                ref s_compiledPropertyValuePartCount,
+            AddEvent(
+                s_events,
+                "compiled_property_module",
+                1);
+            AddEvent(
+                s_events,
+                "compiled_property_value_part",
                 valuePartCount);
-            Interlocked.Add(
-                ref s_compiledPropertyFunctionCount,
+            AddEvent(
+                s_events,
+                "compiled_property_function",
                 functionCount);
-            Interlocked.Add(
-                ref s_compiledPropertyFunctionArgumentCount,
+            AddEvent(
+                s_events,
+                "compiled_property_function_argument",
                 functionArgumentCount);
+#endif
         }
 
         internal static void RecordConditionContention(
@@ -216,47 +268,46 @@ namespace Microsoft.Build.Evaluation
 
             long elapsedTicks =
                 Stopwatch.GetTimestamp() - startTimestamp;
-            Record(
+            RecordDuration(
                 EvaluationPerformanceMetric.ConditionPoolContention,
                 elapsedTicks);
-            ConditionContentionAccumulator accumulator =
-                s_conditionContentions.GetOrAdd(
-                    condition,
-                    static _ => new ConditionContentionAccumulator());
-            Interlocked.Increment(ref accumulator.Count);
-            Interlocked.Add(
-                ref accumulator.ElapsedTicks,
-                elapsedTicks);
+            RecordDetailDuration(
+                EvaluationPerformanceMetric.ConditionPoolContention,
+                elapsedTicks,
+                "condition",
+                condition);
+            RecordEvent(
+                EvaluationPerformanceMetric.ConditionPoolContention);
         }
 
         internal static void RecordConditionShape(
             string shape,
             string condition)
         {
-            if (Enabled)
+#if !NETFRAMEWORK
+            if (s_conditionShapes.Enabled)
             {
-                s_conditionShapes.AddOrUpdate(
-                    (shape, condition),
-                    1,
-                    static (_, count) => count + 1);
+                TagList tags = default;
+                tags.Add("shape", shape);
+                tags.Add("condition", condition);
+                s_conditionShapes.Add(1, tags);
             }
+#endif
         }
 
         internal static void RecordConditionContext(
             string context,
             string condition)
         {
-            if (Enabled)
+#if !NETFRAMEWORK
+            if (s_conditionContexts.Enabled)
             {
-                s_conditionContexts.AddOrUpdate(
-                    context,
-                    1,
-                    static (_, count) => count + 1);
-                s_conditionContextShapes.AddOrUpdate(
-                    (context, condition),
-                    1,
-                    static (_, count) => count + 1);
+                TagList tags = default;
+                tags.Add("context", context);
+                tags.Add("condition", condition);
+                s_conditionContexts.Add(1, tags);
             }
+#endif
         }
 
         internal static LazyItemOperationShapeScope
@@ -264,55 +315,67 @@ namespace Microsoft.Build.Evaluation
             EvaluationPerformanceMetric kind,
             string itemType,
             string expression) =>
-            new LazyItemOperationShapeScope(
-                kind,
-                itemType,
-                expression);
+            new(kind, itemType, expression);
 
         internal static void RecordConstantPropertyBlock(
             EvaluationModule module,
             int effectCount)
         {
-            if (!Enabled)
+#if !NETFRAMEWORK
+            if (!s_events.Enabled && !s_detailEvents.Enabled)
             {
                 return;
             }
 
-            CompiledPropertyModuleAccumulator accumulator =
-                GetCompiledPropertyModuleAccumulator(module);
-            Interlocked.Increment(
-                ref accumulator.ConstantApplications);
-            Interlocked.Add(
-                ref accumulator.AppliedEffects,
+            AddEvent(
+                s_events,
+                "compiled_property_constant_application",
+                1);
+            AddEvent(
+                s_events,
+                "compiled_property_applied_effect",
                 effectCount);
+            if (s_detailEvents.Enabled)
+            {
+                string modulePath = GetModulePath(module);
+                AddEvent(
+                    s_detailEvents,
+                    "compiled_property_constant_application",
+                    1,
+                    "module",
+                    modulePath);
+                AddEvent(
+                    s_detailEvents,
+                    "compiled_property_applied_effect",
+                    effectCount,
+                    "module",
+                    modulePath);
+            }
+#endif
         }
 
         internal static void RecordPropertyBlockFallback(
             EvaluationModule module,
             CompiledPropertyBlockFallback fallback)
         {
-            if (!Enabled)
+#if !NETFRAMEWORK
+            if (s_events.Enabled)
             {
-                return;
+                TagList tags = default;
+                tags.Add("metric", "compiled_property_fallback");
+                tags.Add("reason", fallback.ToString());
+                s_events.Add(1, tags);
             }
 
-            CompiledPropertyModuleAccumulator accumulator =
-                GetCompiledPropertyModuleAccumulator(module);
-            switch (fallback)
+            if (s_detailEvents.Enabled)
             {
-                case CompiledPropertyBlockFallback.GlobalProperty:
-                    Interlocked.Increment(
-                        ref accumulator.GlobalPropertyFallbacks);
-                    break;
-                case CompiledPropertyBlockFallback.UndefinedInput:
-                    Interlocked.Increment(
-                        ref accumulator.UndefinedInputFallbacks);
-                    break;
-                case CompiledPropertyBlockFallback.Destination:
-                    Interlocked.Increment(
-                        ref accumulator.DestinationFallbacks);
-                    break;
+                TagList tags = default;
+                tags.Add("metric", "compiled_property_fallback");
+                tags.Add("module", GetModulePath(module));
+                tags.Add("reason", fallback.ToString());
+                s_detailEvents.Add(1, tags);
             }
+#endif
         }
 
         internal static void RecordPropertyBlockSpecialization(
@@ -322,509 +385,240 @@ namespace Microsoft.Build.Evaluation
             int effectCount,
             bool applied)
         {
-            if (!Enabled)
+#if !NETFRAMEWORK
+            EvaluationPerformanceMetric metric = cacheHit
+                ? EvaluationPerformanceMetric
+                    .CompiledPropertyBlockCacheHit
+                : EvaluationPerformanceMetric
+                    .CompiledPropertyBlockCacheMiss;
+            RecordEvent(metric);
+            if (startTimestamp != 0)
             {
-                return;
-            }
-
-            CompiledPropertyModuleAccumulator accumulator =
-                GetCompiledPropertyModuleAccumulator(module);
-            long elapsedTicks = Stopwatch.GetTimestamp() - startTimestamp;
-            if (cacheHit)
-            {
-                Interlocked.Increment(
-                    ref accumulator.SpecializationHits);
-                Interlocked.Add(
-                    ref accumulator.SpecializationHitTicks,
+                long elapsedTicks =
+                    Stopwatch.GetTimestamp() - startTimestamp;
+                RecordDuration(
+                    metric,
                     elapsedTicks);
-            }
-            else
-            {
-                Interlocked.Increment(
-                    ref accumulator.SpecializationMisses);
-                Interlocked.Add(
-                    ref accumulator.SpecializationMissTicks,
-                    elapsedTicks);
-            }
-
-            if (applied)
-            {
-                Interlocked.Increment(
-                    ref accumulator.SpecializationApplications);
-                Interlocked.Add(
-                    ref accumulator.AppliedEffects,
-                    effectCount);
-            }
-        }
-
-        internal static void WriteReportSnapshot()
-        {
-            if (Enabled)
-            {
-                WriteReport();
-            }
-        }
-
-        internal static void RecordEvaluationCompleted()
-        {
-            if (!Enabled)
-            {
-                return;
-            }
-
-            long completed =
-                Interlocked.Increment(ref s_completedEvaluations);
-            if (completed == 1 || (completed & 255) == 0)
-            {
-                WriteReport();
-            }
-        }
-
-        private static CompiledPropertyModuleAccumulator
-            GetCompiledPropertyModuleAccumulator(EvaluationModule module)
-        {
-            string path = module.Source.FullPath;
-            if (string.IsNullOrEmpty(path))
-            {
-                path = module.Source.Location?.File ?? "<in-memory>";
-            }
-
-            return s_compiledPropertyModules.GetOrAdd(
-                path,
-                static _ => new CompiledPropertyModuleAccumulator());
-        }
-
-        private static void Record(
-            EvaluationPerformanceMetric metric,
-            long elapsedTicks)
-        {
-            int index = (int)metric;
-            MetricAccumulator metrics = s_threadMetrics.Value;
-            metrics.Counts[index]++;
-            metrics.ElapsedTicks[index] += elapsedTicks;
-        }
-
-        private static void WriteReport()
-        {
-            lock (s_reportLock)
-            {
-                WriteReportCore();
-            }
-        }
-
-        private static void WriteReportCore()
-        {
-            Directory.CreateDirectory(s_outputDirectory);
-            int processId;
-            string processName;
-            using (Process process = Process.GetCurrentProcess())
-            {
-                processId = process.Id;
-                processName = process.ProcessName;
-            }
-
-            var report = new StringBuilder();
-            report.Append("process_id\t");
-            report.AppendLine(processId.ToString(CultureInfo.InvariantCulture));
-            report.Append("process_name\t");
-            report.AppendLine(Escape(processName));
-            report.Append("compiled_modules\t");
-            report.AppendLine(
-                Traits.Instance.EnableCompiledModuleEvaluation
-                    ? "true"
-                    : "false");
-            report.Append("compiled_module_replay\t");
-            report.AppendLine(
-                Traits.Instance.EnableCompiledModuleReplay
-                    ? "true"
-                    : "false");
-            report.Append("compiled_module_effect_batching\t");
-            report.AppendLine(
-                Traits.Instance.EnableCompiledModuleEffectBatching
-                    ? "true"
-                    : "false");
-            report.Append("command_line\t");
-            report.AppendLine(Escape(Environment.CommandLine));
-#if NETCOREAPP
-            GCMemoryInfo memoryInfo = GC.GetGCMemoryInfo();
-            report.Append("managed_heap_bytes\t");
-            report.AppendLine(
-                GC.GetTotalMemory(false)
-                    .ToString(CultureInfo.InvariantCulture));
-            report.Append("gc_heap_size_bytes\t");
-            report.AppendLine(
-                memoryInfo.HeapSizeBytes
-                    .ToString(CultureInfo.InvariantCulture));
-            report.Append("gc_fragmented_bytes\t");
-            report.AppendLine(
-                memoryInfo.FragmentedBytes
-                    .ToString(CultureInfo.InvariantCulture));
-            report.Append("gc_total_committed_bytes\t");
-            report.AppendLine(
-                memoryInfo.TotalCommittedBytes
-                    .ToString(CultureInfo.InvariantCulture));
-#endif
-            report.Append("compiled_property_module_count\t");
-            report.AppendLine(
-                Read(ref s_compiledPropertyModuleCount));
-            report.Append("compiled_property_value_part_count\t");
-            report.AppendLine(
-                Read(ref s_compiledPropertyValuePartCount));
-            report.Append("compiled_property_function_record_count\t");
-            report.AppendLine(
-                Read(ref s_compiledPropertyFunctionCount));
-            report.Append("compiled_property_function_argument_count\t");
-            report.AppendLine(
-                Read(ref s_compiledPropertyFunctionArgumentCount));
-            report.Append("timestamp_frequency\t");
-            report.AppendLine(
-                Stopwatch.Frequency.ToString(CultureInfo.InvariantCulture));
-            report.AppendLine("metric\tcount\telapsed_ticks\telapsed_ms");
-
-            var counts = new long[s_metricCount];
-            var elapsedTicksByMetric = new long[s_metricCount];
-            foreach (MetricAccumulator threadMetrics
-                     in s_threadMetrics.Values)
-            {
-                for (int i = 0; i < s_metricCount; i++)
+                if (s_detailDuration.Enabled)
                 {
-                    counts[i] += threadMetrics.Counts[i];
-                    elapsedTicksByMetric[i] +=
-                        threadMetrics.ElapsedTicks[i];
+                    RecordDetailDuration(
+                        metric,
+                        elapsedTicks,
+                        "module",
+                        GetModulePath(module));
                 }
             }
 
-            foreach (EvaluationPerformanceMetric metric
-                     in Enum.GetValues(
-                         typeof(EvaluationPerformanceMetric)))
+            if (applied && s_events.Enabled)
             {
-                long count = counts[(int)metric];
-                long elapsedTicks =
-                    elapsedTicksByMetric[(int)metric];
-                double elapsedMilliseconds =
-                    elapsedTicks * 1000.0 / Stopwatch.Frequency;
-                report.Append(metric);
-                report.Append('\t');
-                report.Append(
-                    count.ToString(CultureInfo.InvariantCulture));
-                report.Append('\t');
-                report.Append(
-                    elapsedTicks.ToString(CultureInfo.InvariantCulture));
-                report.Append('\t');
-                report.AppendLine(
-                    elapsedMilliseconds.ToString(
-                        "F3",
-                        CultureInfo.InvariantCulture));
+                AddEvent(
+                    s_events,
+                    "compiled_property_specialization_application",
+                    1);
+                AddEvent(
+                    s_events,
+                    "compiled_property_applied_effect",
+                    effectCount);
             }
 
-            report.AppendLine(
-                "condition_contention\tcount\telapsed_ticks\telapsed_ms");
-            foreach (KeyValuePair<
-                         string,
-                         ConditionContentionAccumulator> entry
-                     in s_conditionContentions
-                         .ToArray()
-                         .OrderByDescending(
-                             pair => Interlocked.Read(
-                                 ref pair.Value.ElapsedTicks))
-                         .Take(20))
+            if (applied && s_detailEvents.Enabled)
             {
-                long count = Interlocked.Read(ref entry.Value.Count);
-                long elapsedTicks =
-                    Interlocked.Read(ref entry.Value.ElapsedTicks);
-                report.Append(Escape(entry.Key));
-                report.Append('\t');
-                report.Append(
-                    count.ToString(CultureInfo.InvariantCulture));
-                report.Append('\t');
-                report.Append(
-                    elapsedTicks.ToString(CultureInfo.InvariantCulture));
-                report.Append('\t');
-                report.AppendLine(
-                    (elapsedTicks * 1000.0 / Stopwatch.Frequency)
-                        .ToString("F3", CultureInfo.InvariantCulture));
+                string modulePath = GetModulePath(module);
+                AddEvent(
+                    s_detailEvents,
+                    "compiled_property_specialization_application",
+                    1,
+                    "module",
+                    modulePath);
+                AddEvent(
+                    s_detailEvents,
+                    "compiled_property_applied_effect",
+                    effectCount,
+                    "module",
+                    modulePath);
             }
-
-            report.AppendLine("condition_shape\tcondition\tcount");
-            foreach (KeyValuePair<
-                         (string Shape, string Condition),
-                         long> entry
-                     in s_conditionShapes
-                         .ToArray()
-                         .OrderByDescending(pair => pair.Value)
-                         .ThenBy(pair => pair.Key.Shape)
-                         .ThenBy(pair => pair.Key.Condition)
-                         .Take(300))
-            {
-                report.Append(Escape(entry.Key.Shape));
-                report.Append('\t');
-                report.Append(Escape(entry.Key.Condition));
-                report.Append('\t');
-                report.AppendLine(
-                    entry.Value.ToString(CultureInfo.InvariantCulture));
-            }
-
-            report.AppendLine("condition_context\tcount");
-            foreach (KeyValuePair<string, long> entry
-                     in s_conditionContexts
-                         .ToArray()
-                         .OrderByDescending(pair => pair.Value)
-                         .ThenBy(pair => pair.Key))
-            {
-                report.Append(Escape(entry.Key));
-                report.Append('\t');
-                report.AppendLine(
-                    entry.Value.ToString(CultureInfo.InvariantCulture));
-            }
-
-            report.AppendLine("condition_context_shape\tcondition\tcount");
-            foreach (KeyValuePair<(string Context, string Condition), long> entry
-                     in s_conditionContextShapes
-                         .ToArray()
-                         .OrderByDescending(pair => pair.Value)
-                         .ThenBy(pair => pair.Key.Context)
-                         .ThenBy(pair => pair.Key.Condition)
-                         .Take(300))
-            {
-                report.Append(Escape(entry.Key.Context));
-                report.Append('\t');
-                report.Append(Escape(entry.Key.Condition));
-                report.Append('\t');
-                report.AppendLine(
-                    entry.Value.ToString(CultureInfo.InvariantCulture));
-            }
-
-            report.AppendLine(
-                "lazy_item_operation\titem_type\texpression\tcount\t" +
-                "elapsed_ticks\telapsed_ms");
-            foreach (KeyValuePair<
-                         (EvaluationPerformanceMetric Kind, string ItemType, string Expression),
-                         LazyItemOperationShapeAccumulator> entry
-                     in s_lazyItemOperationShapes
-                         .ToArray()
-                         .OrderByDescending(
-                             pair => Interlocked.Read(
-                                 ref pair.Value.ElapsedTicks))
-                         .ThenBy(pair => pair.Key.Kind)
-                         .ThenBy(pair => pair.Key.ItemType)
-                         .ThenBy(pair => pair.Key.Expression)
-                         .Take(500))
-            {
-                long count =
-                    Interlocked.Read(ref entry.Value.Count);
-                long elapsedTicks =
-                    Interlocked.Read(ref entry.Value.ElapsedTicks);
-                report.Append(entry.Key.Kind);
-                report.Append('\t');
-                report.Append(Escape(entry.Key.ItemType));
-                report.Append('\t');
-                report.Append(Escape(entry.Key.Expression));
-                report.Append('\t');
-                report.Append(
-                    count.ToString(CultureInfo.InvariantCulture));
-                report.Append('\t');
-                report.Append(
-                    elapsedTicks.ToString(CultureInfo.InvariantCulture));
-                report.Append('\t');
-                report.AppendLine(
-                    ToMilliseconds(elapsedTicks)
-                        .ToString("F3", CultureInfo.InvariantCulture));
-            }
-
-            report.AppendLine(
-                "compiled_property_module\tconstant_applications\t" +
-                "specialization_hits\tspecialization_misses\t" +
-                "specialization_applications\tglobal_fallbacks\t" +
-                "undefined_fallbacks\tdestination_fallbacks\t" +
-                "applied_effects\thit_ms\tmiss_ms");
-            foreach (KeyValuePair<
-                         string,
-                         CompiledPropertyModuleAccumulator> entry
-                     in s_compiledPropertyModules
-                         .ToArray()
-                         .OrderByDescending(
-                             pair =>
-                                 Interlocked.Read(
-                                     ref pair.Value.AppliedEffects))
-                         .ThenBy(pair => pair.Key))
-            {
-                CompiledPropertyModuleAccumulator accumulator =
-                    entry.Value;
-                report.Append(Escape(entry.Key));
-                report.Append('\t');
-                report.Append(
-                    Read(ref accumulator.ConstantApplications));
-                report.Append('\t');
-                report.Append(
-                    Read(ref accumulator.SpecializationHits));
-                report.Append('\t');
-                report.Append(
-                    Read(ref accumulator.SpecializationMisses));
-                report.Append('\t');
-                report.Append(
-                    Read(ref accumulator.SpecializationApplications));
-                report.Append('\t');
-                report.Append(
-                    Read(ref accumulator.GlobalPropertyFallbacks));
-                report.Append('\t');
-                report.Append(
-                    Read(ref accumulator.UndefinedInputFallbacks));
-                report.Append('\t');
-                report.Append(
-                    Read(ref accumulator.DestinationFallbacks));
-                report.Append('\t');
-                report.Append(
-                    Read(ref accumulator.AppliedEffects));
-                report.Append('\t');
-                report.Append(
-                    ToMilliseconds(
-                            Interlocked.Read(
-                                ref accumulator.SpecializationHitTicks))
-                        .ToString("F3", CultureInfo.InvariantCulture));
-                report.Append('\t');
-                report.AppendLine(
-                    ToMilliseconds(
-                            Interlocked.Read(
-                                ref accumulator.SpecializationMissTicks))
-                        .ToString("F3", CultureInfo.InvariantCulture));
-            }
-
-            report.AppendLine("compiled_property_expansion\tcount");
-            foreach (KeyValuePair<
-                         string,
-                         CompiledPropertyExpansionAccumulator> entry
-                     in s_compiledPropertyExpansions
-                         .ToArray()
-                         .OrderByDescending(
-                             pair =>
-                                 Interlocked.Read(ref pair.Value.Count))
-                         .ThenBy(pair => pair.Key))
-            {
-                report.Append(Escape(entry.Key));
-                report.Append('\t');
-                report.AppendLine(Read(ref entry.Value.Count));
-            }
-
-            string outputPath = Path.Combine(
-                s_outputDirectory,
-                $"evaluation-profile-{processId}.tsv");
-            File.WriteAllText(outputPath, report.ToString());
+#endif
         }
 
-        private static string Read(ref long value) =>
-            Interlocked.Read(ref value)
-                .ToString(CultureInfo.InvariantCulture);
+#if !NETFRAMEWORK
+        private static string GetMetricName(
+            EvaluationPerformanceMetric metric) =>
+            s_metricNames[(int)metric];
 
-        private static double ToMilliseconds(long elapsedTicks) =>
-            elapsedTicks * 1000.0 / Stopwatch.Frequency;
-
-        private static string Escape(string value) =>
-            value?.Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ') ??
-            string.Empty;
-
-        private sealed class MetricAccumulator
+        private static string GetModulePath(EvaluationModule module)
         {
-            internal MetricAccumulator(int metricCount)
+            string path = module.Source.FullPath;
+            return string.IsNullOrEmpty(path)
+                ? module.Source.Location?.File ?? "<in-memory>"
+                : path;
+        }
+
+        private static void AddEvent(
+            Counter<long> counter,
+            string metric,
+            long count)
+        {
+            if (count == 0 || !counter.Enabled)
             {
-                Counts = new long[metricCount];
-                ElapsedTicks = new long[metricCount];
+                return;
             }
 
-            internal long[] Counts { get; }
-
-            internal long[] ElapsedTicks { get; }
+            TagList tags = default;
+            tags.Add("metric", metric);
+            counter.Add(count, tags);
         }
 
-        private sealed class ConditionContentionAccumulator
+        private static void AddEvent(
+            Counter<long> counter,
+            string metric,
+            long count,
+            string tagName,
+            string tagValue)
         {
-            internal long Count;
-            internal long ElapsedTicks;
+            if (count == 0 || !counter.Enabled)
+            {
+                return;
+            }
+
+            TagList tags = default;
+            tags.Add("metric", metric);
+            tags.Add(tagName, tagValue);
+            counter.Add(count, tags);
+        }
+#endif
+
+        private static void RecordDuration(
+            EvaluationPerformanceMetric metric,
+            long elapsedTicks)
+        {
+#if !NETFRAMEWORK
+            if (s_duration.Enabled)
+            {
+                TagList tags = default;
+                tags.Add("metric", GetMetricName(metric));
+                s_duration.Add(ToMilliseconds(elapsedTicks), tags);
+            }
+#endif
         }
 
-        private sealed class CompiledPropertyModuleAccumulator
+        private static void RecordDetailDuration(
+            EvaluationPerformanceMetric metric,
+            long elapsedTicks,
+            string tagName,
+            string tagValue)
         {
-            internal long ConstantApplications;
-            internal long SpecializationHits;
-            internal long SpecializationMisses;
-            internal long SpecializationApplications;
-            internal long GlobalPropertyFallbacks;
-            internal long UndefinedInputFallbacks;
-            internal long DestinationFallbacks;
-            internal long AppliedEffects;
-            internal long SpecializationHitTicks;
-            internal long SpecializationMissTicks;
-        }
-
-        private sealed class CompiledPropertyExpansionAccumulator
-        {
-            internal long Count;
-        }
-
-        private sealed class LazyItemOperationShapeAccumulator
-        {
-            internal long Count;
-            internal long ElapsedTicks;
+#if !NETFRAMEWORK
+            if (s_detailDuration.Enabled)
+            {
+                TagList tags = default;
+                tags.Add("metric", GetMetricName(metric));
+                tags.Add(tagName, tagValue);
+                s_detailDuration.Add(
+                    ToMilliseconds(elapsedTicks),
+                    tags);
+            }
+#endif
         }
 
         internal readonly struct LazyItemOperationShapeScope :
             IDisposable
         {
-            private readonly (
-                EvaluationPerformanceMetric Kind,
-                string ItemType,
-                string Expression) _key;
+#if !NETFRAMEWORK
+            private readonly EvaluationPerformanceMetric _kind;
+            private readonly string _itemType;
+            private readonly string _expression;
             private readonly long _startTimestamp;
+            private readonly bool _recordCount;
+#endif
 
             internal LazyItemOperationShapeScope(
                 EvaluationPerformanceMetric kind,
                 string itemType,
                 string expression)
             {
-                _key = (kind, itemType, expression);
-                _startTimestamp =
-                    Enabled ? Stopwatch.GetTimestamp() : 0;
+#if !NETFRAMEWORK
+                _kind = kind;
+                _itemType = itemType;
+                _expression = expression;
+                _startTimestamp = s_lazyItemDuration.Enabled
+                    ? Stopwatch.GetTimestamp()
+                    : 0;
+                _recordCount = s_lazyItemEvents.Enabled;
+#endif
             }
 
             public void Dispose()
             {
-                if (_startTimestamp == 0)
+#if !NETFRAMEWORK
+                if (_startTimestamp == 0 && !_recordCount)
                 {
                     return;
                 }
 
-                long elapsedTicks =
-                    Stopwatch.GetTimestamp() - _startTimestamp;
-                LazyItemOperationShapeAccumulator accumulator =
-                    s_lazyItemOperationShapes.GetOrAdd(
-                        _key,
-                        static _ =>
-                            new LazyItemOperationShapeAccumulator());
-                Interlocked.Increment(ref accumulator.Count);
-                Interlocked.Add(
-                    ref accumulator.ElapsedTicks,
-                    elapsedTicks);
+                TagList tags = default;
+                tags.Add("operation", GetMetricName(_kind));
+                tags.Add("item.type", _itemType);
+                tags.Add("expression", _expression);
+                if (_startTimestamp != 0)
+                {
+                    s_lazyItemDuration.Add(
+                        ToMilliseconds(
+                            Stopwatch.GetTimestamp() -
+                            _startTimestamp),
+                        tags);
+                }
+
+                if (_recordCount)
+                {
+                    s_lazyItemEvents.Add(1, tags);
+                }
+#endif
             }
         }
+
+#if !NETFRAMEWORK
+        private static double ToMilliseconds(long elapsedTicks) =>
+            elapsedTicks * 1000.0 / Stopwatch.Frequency;
+#endif
 
         internal readonly struct Scope : IDisposable
         {
             private readonly EvaluationPerformanceMetric _metric;
             private readonly long _startTimestamp;
+            private readonly bool _recordCount;
 
             internal Scope(EvaluationPerformanceMetric metric)
             {
                 _metric = metric;
                 _startTimestamp =
-                    Enabled ? Stopwatch.GetTimestamp() : 0;
+#if NETFRAMEWORK
+                    0;
+#else
+                    s_duration.Enabled
+                        ? Stopwatch.GetTimestamp()
+                        : 0;
+#endif
+                _recordCount =
+#if NETFRAMEWORK
+                    false;
+#else
+                    s_events.Enabled;
+#endif
             }
 
             public void Dispose()
             {
                 if (_startTimestamp != 0)
                 {
-                    Record(
+                    RecordDuration(
                         _metric,
-                        Stopwatch.GetTimestamp() - _startTimestamp);
+                        Stopwatch.GetTimestamp() -
+                        _startTimestamp);
+                }
+
+                if (_recordCount)
+                {
+                    RecordEvent(_metric);
                 }
             }
         }

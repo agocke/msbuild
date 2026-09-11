@@ -253,17 +253,21 @@ namespace Microsoft.Build.Evaluation
 
             GenericExpressionNode? parsedExpression = null;
             long poolWaitStart = EvaluationPerformanceInstrumentation.StartTimestamp();
-            if (EvaluationPerformanceInstrumentation.Enabled &&
+            bool measureDuration =
+                EvaluationPerformanceInstrumentation
+                    .ConditionContentionEnabled;
+            if (measureDuration &&
                 !Monitor.TryEnter(expressionPool))
             {
                 long contentionStart =
-                    EvaluationPerformanceInstrumentation.StartTimestamp();
+                    EvaluationPerformanceInstrumentation
+                        .StartContentionTimestamp();
                 Monitor.Enter(expressionPool);
                 EvaluationPerformanceInstrumentation.RecordConditionContention(
                     condition,
                     contentionStart);
             }
-            else if (!EvaluationPerformanceInstrumentation.Enabled)
+            else if (!measureDuration)
             {
                 Monitor.Enter(expressionPool);
             }
@@ -304,12 +308,9 @@ namespace Microsoft.Build.Evaluation
                 }
             }
 
-            if (EvaluationPerformanceInstrumentation.Enabled)
-            {
-                EvaluationPerformanceInstrumentation.RecordConditionShape(
-                    parsedExpression.GetType().Name,
-                    condition);
-            }
+            EvaluationPerformanceInstrumentation.RecordConditionShape(
+                parsedExpression.GetType().Name,
+                condition);
 
             bool result;
 

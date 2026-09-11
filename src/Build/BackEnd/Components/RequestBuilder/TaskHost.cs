@@ -104,6 +104,8 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private int _yieldThreadId = -1;
 
+        private BuildExecutionInstrumentation.Scope _yieldMeasurement;
+
         private bool _disableInprocNode;
 
         /// <summary>
@@ -360,6 +362,10 @@ namespace Microsoft.Build.BackEnd
                 Assumed.Equal(_yieldThreadId, -1, "Cannot call Yield() while yielding.");
                 _yieldThreadId = Environment.CurrentManagedThreadId;
                 MSBuildEventSource.Log.ExecuteTaskYieldStart(_taskLoggingContext.TaskName, _taskLoggingContext.BuildEventContext.TaskId);
+                _yieldMeasurement =
+                    BuildExecutionInstrumentation.Measure(
+                        BuildExecutionMetric.TaskYield,
+                        _taskLoggingContext.TaskName);
                 builderCallback.Yield();
             }
         }
@@ -388,9 +394,17 @@ namespace Microsoft.Build.BackEnd
                 IRequestBuilderCallback builderCallback = _requestEntry.Builder as IRequestBuilderCallback;
                 Assumed.NotEqual(_yieldThreadId, -1, "Cannot call Reacquire() before Yield().");
                 Assumed.Equal(_yieldThreadId, Environment.CurrentManagedThreadId, $"Cannot call Reacquire() on thread {Environment.CurrentManagedThreadId} when Yield() was called on thread {_yieldThreadId}");
+                _yieldMeasurement.Dispose();
+                _yieldMeasurement = default;
                 MSBuildEventSource.Log.ExecuteTaskYieldStop(_taskLoggingContext.TaskName, _taskLoggingContext.BuildEventContext.TaskId);
                 MSBuildEventSource.Log.ExecuteTaskReacquireStart(_taskLoggingContext.TaskName, _taskLoggingContext.BuildEventContext.TaskId);
-                builderCallback.Reacquire();
+                using (BuildExecutionInstrumentation.Measure(
+                           BuildExecutionMetric.TaskReacquire,
+                           _taskLoggingContext.TaskName))
+                {
+                    builderCallback.Reacquire();
+                }
+
                 MSBuildEventSource.Log.ExecuteTaskReacquireStop(_taskLoggingContext.TaskName, _taskLoggingContext.BuildEventContext.TaskId);
                 _yieldThreadId = -1;
             }

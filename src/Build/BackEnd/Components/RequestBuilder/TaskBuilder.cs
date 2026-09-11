@@ -159,6 +159,14 @@ namespace Microsoft.Build.BackEnd
             // In the case of Intrinsic tasks, taskNode will end up null.  Currently this is how we distinguish
             // intrinsic from extrinsic tasks.
             _taskNode = taskInstance as ProjectTaskInstance;
+            using var taskBuilderMeasurement =
+                BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.TaskBuilder,
+                    BuildExecutionInstrumentation.DetailsEnabled
+                        ? _taskNode?.Name ??
+                          taskInstance.GetType().Name
+                        : null,
+                    loggingContext.Target.Name);
 
             if (_taskNode != null && requestEntry.Request.HostServices != null)
             {
@@ -414,6 +422,13 @@ namespace Microsoft.Build.BackEnd
             // If this is an Intrinsic task, it gets handled in a special fashion.
             if (_taskNode == null)
             {
+                using var intrinsicTaskMeasurement =
+                    BuildExecutionInstrumentation.Measure(
+                        BuildExecutionMetric.IntrinsicTask,
+                        BuildExecutionInstrumentation.DetailsEnabled
+                            ? _targetChildInstance.GetType().Name
+                            : null,
+                        _targetLoggingContext.Target.Name);
                 try
                 {
                     ExecuteIntrinsicTask(bucket);
@@ -443,13 +458,27 @@ namespace Microsoft.Build.BackEnd
                 {
                     // We need to find the task before logging the task started event so that the using task statement comes before the task started event
                     TaskHostParameters taskIdentityParameters = GatherTaskIdentityParameters(bucket.Expander);
-                    (TaskRequirements? requirements, TaskFactoryWrapper taskFactoryWrapper) = _taskExecutionHost.FindTask(taskIdentityParameters);
+                    (TaskRequirements? requirements, TaskFactoryWrapper taskFactoryWrapper) task;
+                    using (BuildExecutionInstrumentation.Measure(
+                               BuildExecutionMetric.TaskResolve,
+                               BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
+                               _targetLoggingContext.Target.Name))
+                    {
+                        task = _taskExecutionHost.FindTask(taskIdentityParameters);
+                    }
+
+                    (TaskRequirements? requirements, TaskFactoryWrapper taskFactoryWrapper) = task;
                     string taskAssemblyLocation = taskFactoryWrapper?.TaskFactoryLoadedType?.Path;
 
                     if (requirements != null)
                     {
                         TaskLoggingContext taskLoggingContext = _targetLoggingContext.LogTaskBatchStarted(_projectFullPath, _targetChildInstance, taskAssemblyLocation);
                         MSBuildEventSource.Log.ExecuteTaskStart(_taskNode?.Name, taskLoggingContext.BuildEventContext.TaskId);
+                        using var taskMeasurement =
+                            BuildExecutionInstrumentation.Measure(
+                                BuildExecutionMetric.Task,
+                                _taskNode?.Name,
+                                _targetLoggingContext.Target.Name);
                         if (_componentHost.BuildParameters.IsTelemetryEnabled)
                         {
                             taskFactoryWrapper?.Statistics?.ExecutionStarted();
@@ -672,7 +701,16 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private async Task<WorkUnitResult> InitializeAndExecuteTask(TaskLoggingContext taskLoggingContext, ItemBucket bucket, TaskHostParameters taskIdentityParameters, TaskHost taskHost, TaskExecutionMode howToExecuteTask)
         {
-            if (!_taskExecutionHost.InitializeForBatch(taskLoggingContext, bucket, taskIdentityParameters, _buildRequestEntry.Request.ScheduledNodeId))
+            bool initialized;
+            using (BuildExecutionInstrumentation.Measure(
+                       BuildExecutionMetric.TaskInitialize,
+                       BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
+                       _targetLoggingContext.Target.Name))
+            {
+                initialized = _taskExecutionHost.InitializeForBatch(taskLoggingContext, bucket, taskIdentityParameters, _buildRequestEntry.Request.ScheduledNodeId);
+            }
+
+            if (!initialized)
             {
                 ProjectErrorUtilities.ThrowInvalidProject(_targetChildInstance.Location, "TaskDeclarationOrUsageError", _taskNode.Name);
             }
@@ -764,7 +802,16 @@ namespace Microsoft.Build.BackEnd
             WorkUnitResultCode resultCode = WorkUnitResultCode.Success;
             WorkUnitActionCode actionCode = WorkUnitActionCode.Continue;
 
-            if (!taskExecutionHost.SetTaskParameters(_taskNode.ParametersForBuild))
+            bool parametersSet;
+            using (BuildExecutionInstrumentation.Measure(
+                       BuildExecutionMetric.TaskParameters,
+                       BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
+                       _targetLoggingContext.Target.Name))
+            {
+                parametersSet = taskExecutionHost.SetTaskParameters(_taskNode.ParametersForBuild);
+            }
+
+            if (!parametersSet)
             {
                 // The task cannot be initialized.
                 ProjectErrorUtilities.ThrowInvalidProject(_targetChildInstance.Location, "TaskParametersError", _taskNode.Name, String.Empty);
@@ -775,6 +822,7 @@ namespace Microsoft.Build.BackEnd
                 Exception taskException = null;
 
                 // If this is the MSBuild task, we need to execute it's special internal method.
+                long taskBodyStart = BuildExecutionInstrumentation.StartTimestamp();
                 try
                 {
                     if (taskExecutionHost.TaskInstance is MSBuild msbuildTask)
@@ -854,6 +902,14 @@ namespace Microsoft.Build.BackEnd
                     }
 
                     taskException = ex;
+                }
+                finally
+                {
+                    BuildExecutionInstrumentation.RecordSince(
+                        BuildExecutionMetric.TaskBody,
+                        taskBodyStart,
+                        BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
+                        _targetLoggingContext.Target.Name);
                 }
 
                 if (taskException == null)
@@ -1012,7 +1068,16 @@ namespace Microsoft.Build.BackEnd
                 // to false
                 if (taskReturned)
                 {
-                    taskResult = GatherTaskOutputs(taskExecutionHost, howToExecuteTask, bucket) && taskResult;
+                    bool outputsGathered;
+                    using (BuildExecutionInstrumentation.Measure(
+                               BuildExecutionMetric.TaskOutputs,
+                               BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
+                               _targetLoggingContext.Target.Name))
+                    {
+                        outputsGathered = GatherTaskOutputs(taskExecutionHost, howToExecuteTask, bucket);
+                    }
+
+                    taskResult = outputsGathered && taskResult;
                 }
 
                 // If the taskResults are false look at ContinueOnError.  If ContinueOnError=false (default)
