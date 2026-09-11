@@ -46,11 +46,12 @@ namespace Microsoft.Build.BackEnd
         /// <param name="requestEntry">The build request entry</param>
         /// <param name="targetBuilderCallback">The callback to use for handling new build requests.</param>
         /// <param name="task">The node for the task</param>
+        /// <param name="action">The optional compiled action for the task site.</param>
         /// <param name="mode">The mode to use when executing the task.</param>
         /// <param name="lookupForInference">The lookup used when we are inferring outputs from inputs.</param>
         /// <param name="lookupForExecution">The lookup used when executing the task to get its outputs.</param>
         /// <param name="cancellationToken">The cancellation token used to cancel processing of the task.</param>
         /// <returns>A Task representing the work to be done.</returns>
-        Task<WorkUnitResult> ExecuteTask(TargetLoggingContext targetLoggingContext, BuildRequestEntry requestEntry, ITargetBuilderCallback targetBuilderCallback, ProjectTargetInstanceChild task, TaskExecutionMode mode, Lookup lookupForInference, Lookup lookupForExecution, CancellationToken cancellationToken);
+        Task<WorkUnitResult> ExecuteTask(TargetLoggingContext targetLoggingContext, BuildRequestEntry requestEntry, ITargetBuilderCallback targetBuilderCallback, ProjectTargetInstanceChild task, CompiledTaskAction action, TaskExecutionMode mode, Lookup lookupForInference, Lookup lookupForExecution, CancellationToken cancellationToken);
     }
 }

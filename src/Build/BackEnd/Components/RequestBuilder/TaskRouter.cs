@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using Microsoft.Build.Framework;
 
 namespace Microsoft.Build.BackEnd
 {
@@ -59,6 +60,26 @@ namespace Microsoft.Build.BackEnd
         return !HasMultiThreadableTaskAttribute(taskType);
     }
 
+        internal static bool IsMultiThreadableTask(Type taskType)
+        {
+            ArgumentNullException.ThrowIfNull(taskType);
+
+            return typeof(IMultiThreadableTask).IsAssignableFrom(taskType) ||
+                HasMultiThreadableTaskAttribute(taskType);
+        }
+
+        internal static bool NeedsProjectDirectoryReset(TaskEnvironment taskEnvironment, bool isMultiThreadableTask)
+        {
+            ArgumentNullException.ThrowIfNull(taskEnvironment);
+
+            return !taskEnvironment.IsMultiThreaded || !isMultiThreadableTask;
+        }
+
+        internal static bool NeedsProjectDirectoryReset(TaskEnvironment taskEnvironment, Type taskType)
+        {
+            return NeedsProjectDirectoryReset(taskEnvironment, IsMultiThreadableTask(taskType));
+        }
+
         /// <summary>
         /// Checks if a task type is marked with MSBuildMultiThreadableTaskAttribute.
         /// Detection is based on namespace and name only, ignoring the defining assembly,
@@ -67,7 +88,7 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         /// <param name="taskType">The task type to check.</param>
         /// <returns>True if the task has the attribute; false otherwise.</returns>
-        private static bool HasMultiThreadableTaskAttribute(Type taskType)
+        internal static bool HasMultiThreadableTaskAttribute(Type taskType)
         {
             return s_multiThreadableTaskCache.GetOrAdd(
                 taskType,

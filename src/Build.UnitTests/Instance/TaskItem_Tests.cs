@@ -234,6 +234,40 @@ namespace Microsoft.Build.UnitTests.OM.Instance
             }
         }
 
+        [Fact]
+        public void ProjectItemCloneCopiesSharedItemDefinitionsBeforeMutation()
+        {
+            using ProjectRootElementFromString projectRootElementFromString = new("""
+                <Project>
+                  <ItemDefinitionGroup>
+                    <First>
+                      <FirstMetadata>first</FirstMetadata>
+                    </First>
+                    <Second>
+                      <SecondMetadata>second</SecondMetadata>
+                    </Second>
+                  </ItemDefinitionGroup>
+                  <ItemGroup>
+                    <First Include="first" />
+                    <Second Include="second" />
+                  </ItemGroup>
+                </Project>
+                """);
+            Project project = new(projectRootElementFromString.Project);
+            ProjectInstance instance = project.CreateProjectInstance();
+            ProjectItemInstance firstProjectItem =
+                instance.Items.Single(item => item.ItemType == "First");
+            ProjectItemInstance secondProjectItem =
+                instance.Items.Single(item => item.ItemType == "Second");
+            var firstTaskItem = new TaskItem(firstProjectItem);
+            var secondTaskItem = new TaskItem(secondProjectItem);
+
+            secondTaskItem.CopyMetadataTo(firstTaskItem);
+
+            firstTaskItem.GetMetadata("SecondMetadata").ShouldBe("second");
+            firstProjectItem.GetMetadataValue("SecondMetadata").ShouldBeEmpty();
+        }
+
         /// <summary>
         /// Flushing an item through a task should not mess up special characters on the metadata.
         /// </summary>

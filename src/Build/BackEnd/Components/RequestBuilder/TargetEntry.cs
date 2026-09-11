@@ -94,6 +94,11 @@ namespace Microsoft.Build.BackEnd
         private ProjectTargetInstance _target;
 
         /// <summary>
+        /// The optional compiled task-site plan for <see cref="_target"/>.
+        /// </summary>
+        private CompiledTargetPlan _compiledTargetPlan;
+
+        /// <summary>
         /// The current state of this entry
         /// </summary>
         private TargetEntryState _state;
@@ -815,31 +820,113 @@ namespace Microsoft.Build.BackEnd
             WorkUnitResultCode aggregatedTaskResult = WorkUnitResultCode.Success;
             WorkUnitActionCode finalActionCode = WorkUnitActionCode.Continue;
             WorkUnitResult lastResult = new WorkUnitResult(WorkUnitResultCode.Success, WorkUnitActionCode.Continue, null);
+            FastTaskExecutionFrame fastTaskFrame = null;
 
             int currentTask = 0;
 
-            // Walk through all of the tasks and execute them in order.
-            for (; (currentTask < _target.Children.Count) && !_cancellationToken.IsCancellationRequested; ++currentTask)
+            try
             {
-                ProjectTargetInstanceChild targetChildInstance = _target.Children[currentTask];
-
-                // Execute the task.
-                lastResult = await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, mode, lookupForInference, lookupForExecution, _cancellationToken);
-
-                if (lastResult.ResultCode == WorkUnitResultCode.Failed)
+                // Walk through all of the tasks and execute them in order.
+                for (; (currentTask < _target.Children.Count) && !_cancellationToken.IsCancellationRequested; ++currentTask)
                 {
-                    aggregatedTaskResult = WorkUnitResultCode.Failed;
-                }
-                else if (lastResult.ResultCode == WorkUnitResultCode.Success && aggregatedTaskResult != WorkUnitResultCode.Failed)
-                {
-                    aggregatedTaskResult = WorkUnitResultCode.Success;
-                }
+                    ProjectTargetInstanceChild targetChildInstance = _target.Children[currentTask];
+                    CompiledTaskAction action = _compiledTargetPlan?.GetAction(currentTask);
+                    string fastTaskName =
+                        (targetChildInstance as ProjectTaskInstance)?.Name;
+                    long fastTaskSiteStart =
+                        action == null
+                            ? 0
+                            : BuildExecutionInstrumentation.StartTimestamp();
+                    FastTaskInvocation fastInvocation;
+                    using (action != null
+                               ? BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                                   BuildExecutionMetric.FastTaskLookup,
+                                   fastTaskName,
+                                   targetLoggingContext.Target.Name)
+                               : default)
+                    {
+                        fastInvocation = action == null
+                            ? default
+                            : action.GetFastInvocation();
+                    }
 
-                if (lastResult.ActionCode == WorkUnitActionCode.Stop)
-                {
-                    finalActionCode = WorkUnitActionCode.Stop;
-                    break;
+                    if (fastInvocation.IsValid &&
+                        mode == TaskExecutionMode.ExecuteTaskAndGatherOutputs &&
+                        targetChildInstance is ProjectTaskInstance taskInstance)
+                    {
+                        if (fastTaskFrame == null)
+                        {
+                            using var frameMeasurement =
+                                BuildExecutionInstrumentation.MeasureFastTaskDetail(
+                                    BuildExecutionMetric.FastTaskFrame,
+                                    taskInstance.Name,
+                                    targetLoggingContext.Target.Name);
+                            fastTaskFrame = new FastTaskExecutionFrame(
+                                _host,
+                                _requestEntry,
+                                _targetBuilderCallback,
+                                targetLoggingContext,
+                                taskInstance,
+                                lookupForExecution,
+                                _cancellationToken);
+                        }
+
+                        fastTaskFrame.SetTaskInstance(taskInstance);
+
+                        if (fastInvocation.CanExecute(fastTaskFrame))
+                        {
+                            try
+                            {
+                                lastResult =
+                                    fastInvocation.Execute(fastTaskFrame);
+                            }
+                            finally
+                            {
+                                BuildExecutionInstrumentation.RecordSince(
+                                    BuildExecutionMetric.FastTaskSite,
+                                    fastTaskSiteStart,
+                                    taskInstance.Name,
+                                    targetLoggingContext.Target.Name);
+                            }
+                        }
+                        else
+                        {
+                            lastResult = await taskBuilder.ExecuteTask(
+                                targetLoggingContext,
+                                _requestEntry,
+                                _targetBuilderCallback,
+                                targetChildInstance,
+                                action,
+                                mode,
+                                lookupForInference,
+                                lookupForExecution,
+                                _cancellationToken);
+                        }
+                    }
+                    else
+                    {
+                        lastResult = await taskBuilder.ExecuteTask(targetLoggingContext, _requestEntry, _targetBuilderCallback, targetChildInstance, action, mode, lookupForInference, lookupForExecution, _cancellationToken);
+                    }
+
+                    if (lastResult.ResultCode == WorkUnitResultCode.Failed)
+                    {
+                        aggregatedTaskResult = WorkUnitResultCode.Failed;
+                    }
+                    else if (lastResult.ResultCode == WorkUnitResultCode.Success && aggregatedTaskResult != WorkUnitResultCode.Failed)
+                    {
+                        aggregatedTaskResult = WorkUnitResultCode.Success;
+                    }
+
+                    if (lastResult.ActionCode == WorkUnitActionCode.Stop)
+                    {
+                        finalActionCode = WorkUnitActionCode.Stop;
+                        break;
+                    }
                 }
+            }
+            finally
+            {
+                fastTaskFrame?.Dispose();
             }
 
             if (_cancellationToken.IsCancellationRequested)
@@ -930,6 +1017,11 @@ namespace Microsoft.Build.BackEnd
                 _targetSpecification.ReferenceLocation ?? _requestEntry.RequestConfiguration.Project.ProjectFileLocation,
                 "TargetDoesNotExist",
                 _targetSpecification.TargetName);
+
+            if (CompiledTargetPlan.IsPartialEvaluationEnabled)
+            {
+                _compiledTargetPlan = CompiledTargetPlan.PartiallyEvaluate(_requestEntry.RequestConfiguration.Project, _target);
+            }
         }
     }
 }

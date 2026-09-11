@@ -209,6 +209,7 @@
     <Compile Include="Evaluation\PropertiesUseTracker.cs" />
     <Compile Include="Evaluation\Compact\CompactPropertyEnvironment.cs" />
     <Compile Include="Evaluation\EvaluationModule.cs" />
+    <Compile Include="Evaluation\CompiledExpressionProgram.cs" />
     <Compile Include="Evaluation\EvaluationPerformanceInstrumentation.cs" />
     <Compile Include="Evaluation\ModuleEvaluationSharingMetrics.cs" />
     <Compile Include="Evaluation\PropertyFunctionReceiver.cs" />
@@ -387,6 +388,9 @@
     <Compile Include="BackEnd\Components\RequestBuilder\IRequestBuilderCallback.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\ITargetBuilder.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\ITaskBuilder.cs" />
+    <Compile Include="BackEnd\Components\RequestBuilder\CompiledActionGraph.cs" />
+    <Compile Include="BackEnd\Components\RequestBuilder\FastTaskAction.cs" />
+    <Compile Include="BackEnd\Components\RequestBuilder\ResidualTaskExecutionContext.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\ItemBucket.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\Lookup.cs" />
     <Compile Include="BackEnd\Components\RequestBuilder\RequestBuilder.cs" />

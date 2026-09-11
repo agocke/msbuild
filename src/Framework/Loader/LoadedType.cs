@@ -224,6 +224,9 @@ namespace Microsoft.Build.Shared
 #endif
         }
 
+        internal bool RequiresTaskEnvironmentForConstruction =>
+            GetResolvedConstructor().NeedsEnvironment;
+
         /// <summary>
         /// The public instance constructor <see cref="CreateInstance"/> uses, resolved once by
         /// <see cref="GetResolvedConstructor"/>: the TaskEnvironment constructor when the type declares one,
