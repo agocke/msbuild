@@ -93,6 +93,72 @@ namespace Microsoft.Build.UnitTests.Definition
             }
         }
 
+        [Theory]
+        [InlineData(EvaluationContext.SharingPolicy.Shared, true)]
+        [InlineData(EvaluationContext.SharingPolicy.SharedSDKCache, false)]
+        [InlineData(EvaluationContext.SharingPolicy.Isolated, false)]
+        public void CompiledModuleEvaluationOptInOnlyAffectsSharedContexts(
+            EvaluationContext.SharingPolicy policy,
+            bool expectModuleCache)
+        {
+            _env.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEvaluationEnvVarName,
+                "1");
+
+            EvaluationContext context = EvaluationContext.Create(policy);
+
+            (context.EvaluationModuleCache is not null)
+                .ShouldBe(expectModuleCache);
+            context.PropertyAssignmentReplayCache.ShouldBeNull();
+            context.ConditionReplayCache.ShouldBeNull();
+        }
+
+        [Theory]
+        [InlineData(EvaluationContext.SharingPolicy.Shared, true)]
+        [InlineData(EvaluationContext.SharingPolicy.SharedSDKCache, false)]
+        [InlineData(EvaluationContext.SharingPolicy.Isolated, false)]
+        public void CompiledModuleReplayOptInOnlyAffectsSharedModuleContexts(
+            EvaluationContext.SharingPolicy policy,
+            bool expectReplayCaches)
+        {
+            _env.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEvaluationEnvVarName,
+                "1");
+            _env.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleReplayEnvVarName,
+                "1");
+
+            EvaluationContext context = EvaluationContext.Create(policy);
+
+            (context.EvaluationModuleCache is not null)
+                .ShouldBe(expectReplayCaches);
+            (context.PropertyAssignmentReplayCache is not null)
+                .ShouldBe(expectReplayCaches);
+            (context.ConditionReplayCache is not null)
+                .ShouldBe(expectReplayCaches);
+        }
+
+        [Theory]
+        [InlineData(EvaluationContext.SharingPolicy.Shared, true)]
+        [InlineData(EvaluationContext.SharingPolicy.SharedSDKCache, false)]
+        [InlineData(EvaluationContext.SharingPolicy.Isolated, false)]
+        public void CompiledModuleEffectBatchOptInOnlyAffectsSharedModuleContexts(
+            EvaluationContext.SharingPolicy policy,
+            bool expectEffectBatches)
+        {
+            _env.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEvaluationEnvVarName,
+                "1");
+            _env.SetEnvironmentVariable(
+                Traits.EnableCompiledModuleEffectBatchingEnvVarName,
+                "1");
+
+            EvaluationContext context = EvaluationContext.Create(policy);
+
+            context.UseCompiledModuleEffectBatches
+                .ShouldBe(expectEffectBatches);
+        }
+
         [Fact]
         public void PassedInFileSystemShouldBeReusedInSharedContext()
         {

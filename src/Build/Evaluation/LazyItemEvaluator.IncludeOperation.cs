@@ -22,7 +22,7 @@ namespace Microsoft.Build.Evaluation
             private readonly int _elementOrder;
             private readonly string? _rootDirectory;
             private readonly ImmutableSegmentedList<string> _excludes;
-            private readonly ImmutableArray<ProjectMetadataElement> _metadata;
+            private readonly DeferredMetadata _metadata;
 
             public IncludeOperation(IncludeOperationBuilder builder, LazyItemEvaluator<P, I, M, D> lazyEvaluator)
                 : base(builder, lazyEvaluator)
@@ -31,7 +31,7 @@ namespace Microsoft.Build.Evaluation
                 _rootDirectory = builder.RootDirectory;
 
                 _excludes = builder.Excludes.ToImmutable();
-                _metadata = builder.Metadata.ToImmutable();
+                _metadata = builder.ToMetadata();
             }
 
             [SuppressMessage("Microsoft.Dispose", "CA2000:Dispose objects before losing scope", Justification = "_lazyEvaluator._evaluationProfiler has own dipose logic.")]
@@ -212,7 +212,11 @@ namespace Microsoft.Build.Evaluation
 
             public ImmutableSegmentedList<string>.Builder Excludes { get; } = ImmutableSegmentedList.CreateBuilder<string>();
 
-            public IncludeOperationBuilder(ProjectItemElement itemElement, bool conditionResult) : base(itemElement, conditionResult)
+            public IncludeOperationBuilder(
+                ProjectItemElement itemElement,
+                string itemType,
+                bool conditionResult)
+                : base(itemElement, itemType, conditionResult)
             {
             }
         }

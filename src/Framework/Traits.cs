@@ -74,6 +74,35 @@ namespace Microsoft.Build.Framework
         public readonly bool EnableAllPropertyFunctions = Environment.GetEnvironmentVariable("MSBUILDENABLEALLPROPERTYFUNCTIONS") == "1";
 
         /// <summary>
+        /// Enables the experimental compiled evaluation-module path for shared evaluation contexts.
+        /// </summary>
+        public readonly bool EnableCompiledModuleEvaluation =
+            Environment.GetEnvironmentVariable(EnableCompiledModuleEvaluationEnvVarName) == "1";
+
+        public const string EnableCompiledModuleEvaluationEnvVarName =
+            "MSBUILDENABLECOMPILEDMODULEEVALUATION";
+
+        /// <summary>
+        /// Enables property and property-group-condition replay for compiled evaluation modules.
+        /// </summary>
+        public readonly bool EnableCompiledModuleReplay =
+            Environment.GetEnvironmentVariable(EnableCompiledModuleReplayEnvVarName) == "1";
+
+        public const string EnableCompiledModuleReplayEnvVarName =
+            "MSBUILDENABLECOMPILEDMODULEREPLAY";
+
+        /// <summary>
+        /// Enables statically compiled property effects. This experimental
+        /// mode preserves final property state but not design-time property
+        /// history or per-assignment tracking.
+        /// </summary>
+        public readonly bool EnableCompiledModuleEffectBatching =
+            Environment.GetEnvironmentVariable(EnableCompiledModuleEffectBatchingEnvVarName) == "1";
+
+        public const string EnableCompiledModuleEffectBatchingEnvVarName =
+            "MSBUILDENABLECOMPILEDMODULEEFFECTBATCHING";
+
+        /// <summary>
         /// Enable restore first functionality in MSBuild.exe
         /// </summary>
         public readonly bool EnableRestoreFirst = Environment.GetEnvironmentVariable("MSBUILDENABLERESTOREFIRST") == "1";

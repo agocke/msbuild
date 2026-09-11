@@ -17,6 +17,7 @@ using System.Collections.Immutable;
 using System.Diagnostics;
 #endif
 using System.Linq;
+using System.Text;
 using System.Threading;
 
 #nullable disable
@@ -36,6 +37,7 @@ namespace Microsoft.Build.Evaluation
         private readonly IItemFactory<I, I> _itemFactory;
         private readonly LoggingContext _loggingContext;
         private readonly EvaluationProfiler _evaluationProfiler;
+        private readonly ModuleEvaluationReadTracker _moduleEvaluationReadTracker;
 
         private int _nextElementOrder = 0;
 
@@ -49,11 +51,21 @@ namespace Microsoft.Build.Evaluation
 
         protected FileMatcher FileMatcher => EvaluationContext.FileMatcher;
 
-        public LazyItemEvaluator(IEvaluatorData<P, I, M, D> data, IItemFactory<I, I> itemFactory, LoggingContext loggingContext, EvaluationProfiler evaluationProfiler, EvaluationContext evaluationContext)
+        public LazyItemEvaluator(
+            IEvaluatorData<P, I, M, D> data,
+            IItemFactory<I, I> itemFactory,
+            LoggingContext loggingContext,
+            EvaluationProfiler evaluationProfiler,
+            EvaluationContext evaluationContext,
+            ModuleEvaluationReadTracker moduleEvaluationReadTracker)
         {
             _outerEvaluatorData = data;
             _outerExpander = new Expander<P, I>(_outerEvaluatorData, _outerEvaluatorData, evaluationContext, loggingContext);
-            _evaluatorData = new EvaluatorData(_outerEvaluatorData, _itemLists);
+            _moduleEvaluationReadTracker = moduleEvaluationReadTracker;
+            _evaluatorData = new EvaluatorData(
+                _outerEvaluatorData,
+                _itemLists,
+                _moduleEvaluationReadTracker);
             _expander = new Expander<P, I>(_evaluatorData, _evaluatorData, evaluationContext, loggingContext);
             _itemFactory = itemFactory;
             _loggingContext = loggingContext;
@@ -65,6 +77,21 @@ namespace Microsoft.Build.Evaluation
         public bool EvaluateConditionWithCurrentState(ProjectElement element, ExpanderOptions expanderOptions, ParserOptions parserOptions)
         {
             return EvaluateCondition(element.Condition, element, expanderOptions, parserOptions, _expander, this);
+        }
+
+        internal bool EvaluateConditionWithCurrentState(
+            string condition,
+            ProjectElement element,
+            ExpanderOptions expanderOptions,
+            ParserOptions parserOptions)
+        {
+            return EvaluateCondition(
+                condition,
+                element,
+                expanderOptions,
+                parserOptions,
+                _expander,
+                this);
         }
 
         private static bool EvaluateCondition(
@@ -80,7 +107,16 @@ namespace Microsoft.Build.Evaluation
                 return true;
             }
             MSBuildEventSource.Log.EvaluateConditionStart(condition);
+            if (EvaluationPerformanceInstrumentation.Enabled)
+            {
+                EvaluationPerformanceInstrumentation
+                    .RecordConditionContext(
+                        element.GetType().Name,
+                        condition);
+            }
 
+            using (EvaluationPerformanceInstrumentation.Measure(
+                       EvaluationPerformanceMetric.ConditionEvaluation))
             using (lazyEvaluator._evaluationProfiler.TrackCondition(element.ConditionLocation, condition))
             {
                 bool result = ConditionEvaluator.EvaluateCondition(
@@ -471,10 +507,13 @@ namespace Microsoft.Build.Evaluation
 
             public bool ConditionResult { get; set; }
 
-            public OperationBuilder(ProjectItemElement itemElement, bool conditionResult)
+            public OperationBuilder(
+                ProjectItemElement itemElement,
+                string itemType,
+                bool conditionResult)
             {
                 ItemElement = itemElement;
-                ItemType = itemElement.ItemType;
+                ItemType = itemType;
                 ConditionResult = conditionResult;
             }
         }
@@ -482,10 +521,185 @@ namespace Microsoft.Build.Evaluation
         private class OperationBuilderWithMetadata : OperationBuilder
         {
             public readonly ImmutableArray<ProjectMetadataElement>.Builder Metadata = ImmutableArray.CreateBuilder<ProjectMetadataElement>();
+            private EvaluationModule _metadataModule;
+            private TableRange _metadataRange;
 
-            public OperationBuilderWithMetadata(ProjectItemElement itemElement, bool conditionResult) : base(itemElement, conditionResult)
+            public OperationBuilderWithMetadata(
+                ProjectItemElement itemElement,
+                string itemType,
+                bool conditionResult)
+                : base(itemElement, itemType, conditionResult)
             {
             }
+
+            public void SetLoweredMetadata(
+                EvaluationModule module,
+                TableRange metadata)
+            {
+                _metadataModule = module;
+                _metadataRange = metadata;
+            }
+
+            public DeferredMetadata ToMetadata() =>
+                _metadataModule is null
+                    ? new DeferredMetadata(Metadata.ToImmutable())
+                    : new DeferredMetadata(_metadataModule, _metadataRange);
+        }
+
+        private readonly struct ItemOperationData
+        {
+            internal ItemOperationData(ProjectItemElement element)
+            {
+                Element = element;
+                ItemType = element.ItemType;
+                OperationKind =
+                    element.IncludeLocation is not null
+                        ? ItemOperationKind.Include
+                        : element.RemoveLocation is not null
+                            ? ItemOperationKind.Remove
+                            : ItemOperationKind.Update;
+                Include = element.Include;
+                Exclude = element.Exclude;
+                Remove = element.Remove;
+                Update = element.Update;
+                MatchOnMetadata = element.MatchOnMetadata;
+                MatchOnMetadataOptions = element.MatchOnMetadataOptions;
+                Module = null;
+                Metadata = default;
+                CompiledItemSpecFragments = new TableRange(-1, 0);
+                CompiledItemSpecExpansion = new TableRange(-1, 0);
+                ItemSpecCacheKey = -1;
+            }
+
+            internal ItemOperationData(
+                EvaluationModule module,
+                ItemTemplate template,
+                ProjectItemElement element)
+            {
+                Element = element;
+                ItemType =
+                    module.GetStringValue(template.ItemTypeStringId);
+                OperationKind = template.OperationKind;
+                Include =
+                    module.GetExpressionValue(template.IncludeExpressionId);
+                Exclude =
+                    module.GetExpressionValue(template.ExcludeExpressionId);
+                Remove =
+                    module.GetExpressionValue(template.RemoveExpressionId);
+                Update =
+                    module.GetExpressionValue(template.UpdateExpressionId);
+                MatchOnMetadata =
+                    module.GetExpressionValue(
+                        template.MatchOnMetadataExpressionId);
+                MatchOnMetadataOptions =
+                    module.GetStringValue(
+                        template.MatchOnMetadataOptionsStringId);
+                Module = module;
+                Metadata = template.Metadata;
+                CompiledItemSpecFragments =
+                    template.CompiledItemSpecFragments;
+                CompiledItemSpecExpansion =
+                    template.CompiledItemSpecExpansion;
+                ItemSpecCacheKey = template.SourceId;
+            }
+
+            internal ProjectItemElement Element { get; }
+
+            internal string ItemType { get; }
+
+            internal ItemOperationKind OperationKind { get; }
+
+            internal string Include { get; }
+
+            internal string Exclude { get; }
+
+            internal string Remove { get; }
+
+            internal string Update { get; }
+
+            internal string MatchOnMetadata { get; }
+
+            internal string MatchOnMetadataOptions { get; }
+
+            internal EvaluationModule Module { get; }
+
+            internal TableRange Metadata { get; }
+
+            internal TableRange CompiledItemSpecFragments { get; }
+
+            internal TableRange CompiledItemSpecExpansion { get; }
+
+            internal int ItemSpecCacheKey { get; }
+        }
+
+        private readonly struct DeferredMetadata
+        {
+            private readonly ImmutableArray<ProjectMetadataElement> _elements;
+            private readonly EvaluationModule _module;
+            private readonly TableRange _range;
+
+            internal DeferredMetadata(
+                ImmutableArray<ProjectMetadataElement> elements)
+            {
+                _elements = elements;
+                _module = null;
+                _range = default;
+            }
+
+            internal DeferredMetadata(
+                EvaluationModule module,
+                TableRange range)
+            {
+                _elements = default;
+                _module = module;
+                _range = range;
+            }
+
+            internal int Count =>
+                _module is null ? _elements.Length : _range.Count;
+
+            internal ProjectMetadataElement GetElement(int index)
+            {
+                if (_module is null)
+                {
+                    return _elements[index];
+                }
+
+                return (ProjectMetadataElement)_module.GetSource(
+                    GetTemplate(index).SourceId);
+            }
+
+            internal string GetCondition(int index) =>
+                _module is null
+                    ? _elements[index].Condition
+                    : _module.GetConditionValue(
+                        GetTemplate(index).ConditionId);
+
+            internal int GetCompiledConditionId(int index) =>
+                _module is null
+                    ? -1
+                    : GetTemplate(index).CompiledConditionId;
+
+            internal TableRange GetCompiledValueParts(int index) =>
+                _module is null
+                    ? new TableRange(-1, 0)
+                    : GetTemplate(index).CompiledValueParts;
+
+            internal EvaluationModule Module => _module;
+
+            internal string GetValue(int index) =>
+                _module is null
+                    ? _elements[index].Value
+                    : _module.GetExpressionValue(
+                        GetTemplate(index).ValueExpressionId);
+
+            internal string GetDirectory(int index) =>
+                _module is null
+                    ? _elements[index].ContainingProject.DirectoryPath
+                    : _module.Header.DirectoryPath;
+
+            private MetadataTemplate GetTemplate(int index) =>
+                _module.Metadata[_range.Start + index];
         }
 
         private void AddReferencedItemList(string itemType, IDictionary<string, LazyItemList> referencedItemLists)
@@ -505,60 +719,122 @@ namespace Microsoft.Build.Evaluation
 
         public void ProcessItemElement(string rootDirectory, ProjectItemElement itemElement, bool conditionResult)
         {
-            LazyItemOperation operation = null;
-
-            if (itemElement.IncludeLocation != null)
-            {
-                operation = BuildIncludeOperation(rootDirectory, itemElement, conditionResult);
-            }
-            else if (itemElement.RemoveLocation != null)
-            {
-                operation = BuildRemoveOperation(rootDirectory, itemElement, conditionResult);
-            }
-            else if (itemElement.UpdateLocation != null)
-            {
-                operation = BuildUpdateOperation(rootDirectory, itemElement, conditionResult);
-            }
-            else
-            {
-                Assumed.Unreachable();
-            }
-
-            _itemLists.TryGetValue(itemElement.ItemType, out LazyItemList previousItemList);
-            LazyItemList newList = new LazyItemList(previousItemList, operation);
-            _itemLists[itemElement.ItemType] = newList;
+            ProcessItemElement(
+                rootDirectory,
+                new ItemOperationData(itemElement),
+                conditionResult);
         }
 
-        private UpdateOperation BuildUpdateOperation(string rootDirectory, ProjectItemElement itemElement, bool conditionResult)
+        public void ProcessItemElement(
+            string rootDirectory,
+            EvaluationModule module,
+            ItemTemplate template,
+            ProjectItemElement itemElement,
+            bool conditionResult)
         {
-            OperationBuilderWithMetadata operationBuilder = new OperationBuilderWithMetadata(itemElement, conditionResult);
+            ProcessItemElement(
+                rootDirectory,
+                new ItemOperationData(module, template, itemElement),
+                conditionResult);
+        }
+
+        private void ProcessItemElement(
+            string rootDirectory,
+            ItemOperationData item,
+            bool conditionResult)
+        {
+            LazyItemOperation operation = item.OperationKind switch
+            {
+                ItemOperationKind.Include =>
+                    BuildIncludeOperation(
+                        rootDirectory,
+                        item,
+                        conditionResult),
+                ItemOperationKind.Remove =>
+                    BuildRemoveOperation(
+                        rootDirectory,
+                        item,
+                        conditionResult),
+                ItemOperationKind.Update =>
+                    BuildUpdateOperation(
+                        rootDirectory,
+                        item,
+                        conditionResult),
+                _ => throw new InvalidOperationException(
+                    $"Unexpected item operation {item.OperationKind}."),
+            };
+
+            _itemLists.TryGetValue(
+                item.ItemType,
+                out LazyItemList previousItemList);
+            LazyItemList newList = new LazyItemList(previousItemList, operation);
+            _itemLists[item.ItemType] = newList;
+        }
+
+        private UpdateOperation BuildUpdateOperation(
+            string rootDirectory,
+            ItemOperationData item,
+            bool conditionResult)
+        {
+            OperationBuilderWithMetadata operationBuilder =
+                new OperationBuilderWithMetadata(
+                    item.Element,
+                    item.ItemType,
+                    conditionResult);
 
             // Proces Update attribute
-            ProcessItemSpec(rootDirectory, itemElement.Update, itemElement.UpdateLocation, operationBuilder);
+            ProcessItemSpec(
+                rootDirectory,
+                item.Update,
+                item.Element.UpdateLocation,
+                item.Module,
+                item.CompiledItemSpecFragments,
+                item.CompiledItemSpecExpansion,
+                item.ItemSpecCacheKey,
+                operationBuilder);
 
-            ProcessMetadataElements(itemElement, operationBuilder);
+            ProcessMetadataElements(item, operationBuilder);
 
             return new UpdateOperation(operationBuilder, this);
         }
 
-        private IncludeOperation BuildIncludeOperation(string rootDirectory, ProjectItemElement itemElement, bool conditionResult)
+        private IncludeOperation BuildIncludeOperation(
+            string rootDirectory,
+            ItemOperationData item,
+            bool conditionResult)
         {
-            IncludeOperationBuilder operationBuilder = new IncludeOperationBuilder(itemElement, conditionResult);
+            IncludeOperationBuilder operationBuilder =
+                new IncludeOperationBuilder(
+                    item.Element,
+                    item.ItemType,
+                    conditionResult);
             operationBuilder.ElementOrder = _nextElementOrder++;
             operationBuilder.RootDirectory = rootDirectory;
             operationBuilder.ConditionResult = conditionResult;
 
             // Process include
-            ProcessItemSpec(rootDirectory, itemElement.Include, itemElement.IncludeLocation, operationBuilder);
+            ProcessItemSpec(
+                rootDirectory,
+                item.Include,
+                item.Element.IncludeLocation,
+                item.Module,
+                item.CompiledItemSpecFragments,
+                item.CompiledItemSpecExpansion,
+                item.ItemSpecCacheKey,
+                operationBuilder);
 
             // Code corresponds to Evaluator.EvaluateItemElement
 
             // Process exclude (STEP 4: Evaluate, split, expand and subtract any Exclude)
-            if (itemElement.Exclude.Length > 0)
+            if (item.Exclude.Length > 0)
             {
                 // Expand properties here, because a property may have a value which is an item reference (ie "@(Bar)"), and
                 //  if so we need to add the right item reference
-                string evaluatedExclude = _expander.ExpandIntoStringLeaveEscaped(itemElement.Exclude, ExpanderOptions.ExpandProperties, itemElement.ExcludeLocation);
+                string evaluatedExclude =
+                    _expander.ExpandIntoStringLeaveEscaped(
+                        item.Exclude,
+                        ExpanderOptions.ExpandProperties,
+                        item.Element.ExcludeLocation);
 
                 if (evaluatedExclude.Length > 0)
                 {
@@ -567,27 +843,49 @@ namespace Microsoft.Build.Evaluation
                     foreach (var excludeSplit in excludeSplits)
                     {
                         operationBuilder.Excludes.Add(excludeSplit);
-                        AddItemReferences(excludeSplit, operationBuilder, itemElement.ExcludeLocation);
+                        AddItemReferences(
+                            excludeSplit,
+                            operationBuilder,
+                            item.Element.ExcludeLocation);
                     }
                 }
             }
 
             // Process Metadata (STEP 5: Evaluate each metadata XML and apply them to each item we have so far)
-            ProcessMetadataElements(itemElement, operationBuilder);
+            ProcessMetadataElements(item, operationBuilder);
 
             return new IncludeOperation(operationBuilder, this);
         }
 
-        private RemoveOperation BuildRemoveOperation(string rootDirectory, ProjectItemElement itemElement, bool conditionResult)
+        private RemoveOperation BuildRemoveOperation(
+            string rootDirectory,
+            ItemOperationData item,
+            bool conditionResult)
         {
-            RemoveOperationBuilder operationBuilder = new RemoveOperationBuilder(itemElement, conditionResult);
+            RemoveOperationBuilder operationBuilder =
+                new RemoveOperationBuilder(
+                    item.Element,
+                    item.ItemType,
+                    conditionResult);
 
-            ProcessItemSpec(rootDirectory, itemElement.Remove, itemElement.RemoveLocation, operationBuilder);
+            ProcessItemSpec(
+                rootDirectory,
+                item.Remove,
+                item.Element.RemoveLocation,
+                item.Module,
+                item.CompiledItemSpecFragments,
+                item.CompiledItemSpecExpansion,
+                item.ItemSpecCacheKey,
+                operationBuilder);
 
             // Process MatchOnMetadata
-            if (itemElement.MatchOnMetadata.Length > 0)
+            if (item.MatchOnMetadata.Length > 0)
             {
-                string evaluatedmatchOnMetadata = _expander.ExpandIntoStringLeaveEscaped(itemElement.MatchOnMetadata, ExpanderOptions.ExpandProperties, itemElement.MatchOnMetadataLocation);
+                string evaluatedmatchOnMetadata =
+                    _expander.ExpandIntoStringLeaveEscaped(
+                        item.MatchOnMetadata,
+                        ExpanderOptions.ExpandProperties,
+                        item.Element.MatchOnMetadataLocation);
 
                 if (evaluatedmatchOnMetadata.Length > 0)
                 {
@@ -595,8 +893,15 @@ namespace Microsoft.Build.Evaluation
 
                     foreach (var matchOnMetadataSplit in matchOnMetadataSplits)
                     {
-                        AddItemReferences(matchOnMetadataSplit, operationBuilder, itemElement.MatchOnMetadataLocation);
-                        string metadataExpanded = _expander.ExpandIntoStringLeaveEscaped(matchOnMetadataSplit, ExpanderOptions.ExpandPropertiesAndItems, itemElement.MatchOnMetadataLocation);
+                        AddItemReferences(
+                            matchOnMetadataSplit,
+                            operationBuilder,
+                            item.Element.MatchOnMetadataLocation);
+                        string metadataExpanded =
+                            _expander.ExpandIntoStringLeaveEscaped(
+                                matchOnMetadataSplit,
+                                ExpanderOptions.ExpandPropertiesAndItems,
+                                item.Element.MatchOnMetadataLocation);
                         var metadataSplits = ExpressionShredder.SplitSemiColonSeparatedList(metadataExpanded);
                         operationBuilder.MatchOnMetadata.AddRange(metadataSplits);
                     }
@@ -604,7 +909,9 @@ namespace Microsoft.Build.Evaluation
             }
 
             operationBuilder.MatchOnMetadataOptions = MatchOnMetadataOptions.CaseSensitive;
-            if (Enum.TryParse(itemElement.MatchOnMetadataOptions, out MatchOnMetadataOptions options))
+            if (Enum.TryParse(
+                    item.MatchOnMetadataOptions,
+                    out MatchOnMetadataOptions options))
             {
                 operationBuilder.MatchOnMetadataOptions = options;
             }
@@ -612,9 +919,100 @@ namespace Microsoft.Build.Evaluation
             return new RemoveOperation(operationBuilder, this);
         }
 
-        private void ProcessItemSpec(string rootDirectory, string itemSpec, IElementLocation itemSpecLocation, OperationBuilder builder)
+        private void ProcessItemSpec(
+            string rootDirectory,
+            string itemSpec,
+            IElementLocation itemSpecLocation,
+            EvaluationModule module,
+            TableRange compiledFragments,
+            TableRange compiledExpansion,
+            int cacheKey,
+            OperationBuilder builder)
         {
-            builder.ItemSpec = new ItemSpec<P, I>(itemSpec, _outerExpander, itemSpecLocation, rootDirectory);
+            using (EvaluationPerformanceInstrumentation.Measure(
+                       EvaluationPerformanceMetric.ItemSpecConstruction))
+            {
+                if (EvaluationContext.UseCompiledModuleEffectBatches &&
+                    module is not null)
+                {
+                    if (compiledFragments.Start >= 0)
+                    {
+                        using (EvaluationPerformanceInstrumentation.Measure(
+                                   EvaluationPerformanceMetric
+                                       .CompiledItemSpecConstruction))
+                        {
+                            builder.ItemSpec = new ItemSpec<P, I>(
+                                itemSpec,
+                                _outerExpander,
+                                itemSpecLocation,
+                                rootDirectory,
+                                module,
+                                compiledFragments);
+                        }
+                    }
+                    else
+                    {
+                        using (EvaluationPerformanceInstrumentation.Measure(
+                                   EvaluationPerformanceMetric
+                                       .CachedItemSpecConstruction))
+                        {
+                            string evaluatedItemSpec;
+                            if (compiledExpansion.Start >= 0)
+                            {
+                                using (EvaluationPerformanceInstrumentation
+                                           .Measure(
+                                               EvaluationPerformanceMetric
+                                                   .CompiledItemSpecExpansion))
+                                {
+                                    evaluatedItemSpec =
+                                        EvaluateCompiledItemSpecExpansion(
+                                            module,
+                                            compiledExpansion,
+                                            itemSpecLocation);
+                                }
+                            }
+                            else
+                            {
+                                using (EvaluationPerformanceInstrumentation
+                                           .Measure(
+                                               EvaluationPerformanceMetric
+                                                   .ScalarItemSpecExpansion))
+                                {
+                                    evaluatedItemSpec =
+                                        _outerExpander
+                                            .ExpandIntoStringLeaveEscaped(
+                                                itemSpec,
+                                                ExpanderOptions
+                                                    .ExpandProperties,
+                                                itemSpecLocation);
+                                }
+                            }
+
+                            builder.ItemSpec = new ItemSpec<P, I>(
+                                itemSpec,
+                                _outerExpander,
+                                itemSpecLocation,
+                                rootDirectory,
+                                module,
+                                cacheKey,
+                                evaluatedItemSpec);
+                        }
+                    }
+                }
+                else
+                {
+                    using (EvaluationPerformanceInstrumentation.Measure(
+                               EvaluationPerformanceMetric
+                                   .ScalarItemSpecConstruction))
+                    {
+                        builder.ItemSpec = new ItemSpec<P, I>(
+                            itemSpec,
+                            _outerExpander,
+                            itemSpecLocation,
+                            rootDirectory);
+                    }
+                }
+            }
 
             foreach (ItemSpecFragment fragment in builder.ItemSpec.Fragments)
             {
@@ -625,9 +1023,105 @@ namespace Microsoft.Build.Evaluation
             }
         }
 
-        private void ProcessMetadataElements(ProjectItemElement itemElement, OperationBuilderWithMetadata operationBuilder)
+        private string EvaluateCompiledItemSpecExpansion(
+            EvaluationModule module,
+            TableRange parts,
+            IElementLocation location)
         {
-            if (itemElement.HasMetadata)
+            string expanded;
+            if (parts.Count == 1)
+            {
+                expanded = EvaluateCompiledItemSpecValuePart(
+                    module,
+                    parts.Start,
+                    location);
+            }
+            else if (parts.Count == 2)
+            {
+                expanded = string.Concat(
+                    EvaluateCompiledItemSpecValuePart(
+                        module,
+                        parts.Start,
+                        location),
+                    EvaluateCompiledItemSpecValuePart(
+                        module,
+                        parts.Start + 1,
+                        location));
+            }
+            else if (parts.Count == 3)
+            {
+                expanded = string.Concat(
+                    EvaluateCompiledItemSpecValuePart(
+                        module,
+                        parts.Start,
+                        location),
+                    EvaluateCompiledItemSpecValuePart(
+                        module,
+                        parts.Start + 1,
+                        location),
+                    EvaluateCompiledItemSpecValuePart(
+                        module,
+                        parts.Start + 2,
+                        location));
+            }
+            else
+            {
+                var builder = new StringBuilder();
+                int end = parts.Start + parts.Count;
+                for (int i = parts.Start; i < end; i++)
+                {
+                    builder.Append(EvaluateCompiledItemSpecValuePart(
+                        module,
+                        i,
+                        location));
+                }
+
+                expanded = builder.ToString();
+            }
+
+            return FileUtilities.MaybeAdjustFilePath(expanded);
+        }
+
+        private string EvaluateCompiledItemSpecValuePart(
+            EvaluationModule module,
+            int partIndex,
+            IElementLocation location)
+        {
+            CompiledConditionValuePart part =
+                module.CompiledConditionValueParts[partIndex];
+            if (part.Kind == CompiledConditionValuePartKind.Literal)
+            {
+                return module.GetStringValue(part.Value);
+            }
+
+            CompiledPropertyExternalRead read =
+                module.CompiledConditionPropertyReads[part.Value];
+            return _outerEvaluatorData.TryGetEscapedPropertyValue(
+                read.PropertyId,
+                module.GetStringValue(read.NameStringId),
+                location,
+                out string value)
+                    ? value
+                    : string.Empty;
+        }
+
+        private void ProcessMetadataElements(
+            ItemOperationData item,
+            OperationBuilderWithMetadata operationBuilder)
+        {
+            using var measurement =
+                EvaluationPerformanceInstrumentation.Measure(
+                    EvaluationPerformanceMetric.MetadataAnalysis);
+            if (item.Module is not null)
+            {
+                operationBuilder.SetLoweredMetadata(
+                    item.Module,
+                    item.Metadata);
+            }
+
+            if (item.Module is null
+                    ? item.Element.HasMetadata
+                    : item.Metadata.Count > 0)
             {
                 ItemsAndMetadataPair itemsAndMetadataFound = new ItemsAndMetadataPair(null, null);
 
@@ -635,23 +1129,67 @@ namespace Microsoft.Build.Evaluation
                 // unexpected errors may occur when evaluating property functions on unexpanded metadata. Just ignore them if that happens.
                 // See: https://github.com/dotnet/msbuild/issues/3460
                 const ExpanderOptions expanderOptions = ExpanderOptions.ExpandProperties | ExpanderOptions.LeavePropertiesUnexpandedOnError;
-                foreach (var metadatumElement in itemElement.MetadataEnumerable)
+                if (item.Module is null)
                 {
-                    operationBuilder.Metadata.Add(metadatumElement);
+                    foreach (ProjectMetadataElement metadatumElement
+                             in item.Element.MetadataEnumerable)
+                    {
+                        operationBuilder.Metadata.Add(metadatumElement);
+                        ProcessMetadataExpression(
+                            metadatumElement.Value,
+                            metadatumElement.Condition,
+                            metadatumElement,
+                            ref itemsAndMetadataFound);
+                    }
+                }
+                else
+                {
+                    int end = item.Metadata.Start + item.Metadata.Count;
+                    for (int i = item.Metadata.Start; i < end; i++)
+                    {
+                        MetadataTemplate template = item.Module.Metadata[i];
+                        ProjectMetadataElement metadatumElement =
+                            (ProjectMetadataElement)item.Module.GetSource(
+                                template.SourceId);
+                        ProcessMetadataExpression(
+                            item.Module.GetExpressionValue(
+                                template.ValueExpressionId),
+                            item.Module.GetConditionValue(
+                                template.ConditionId),
+                            metadatumElement,
+                            ref itemsAndMetadataFound);
+                    }
+                }
 
+                void ProcessMetadataExpression(
+                    string value,
+                    string condition,
+                    ProjectMetadataElement metadatumElement,
+                    ref ItemsAndMetadataPair found)
+                {
                     string expression = _expander.ExpandIntoStringLeaveEscaped(
-                        metadatumElement.Value,
+                        value,
                         expanderOptions,
                         metadatumElement.Location);
 
-                    ExpressionShredder.GetReferencedItemNamesAndMetadata(expression, 0, expression.Length, ref itemsAndMetadataFound, ShredderOptions.All);
+                    ExpressionShredder.GetReferencedItemNamesAndMetadata(
+                        expression,
+                        0,
+                        expression.Length,
+                        ref found,
+                        ShredderOptions.All);
 
                     expression = _expander.ExpandIntoStringLeaveEscaped(
-                        metadatumElement.Condition,
+                        condition,
                         expanderOptions,
                         metadatumElement.ConditionLocation);
 
-                    ExpressionShredder.GetReferencedItemNamesAndMetadata(expression, 0, expression.Length, ref itemsAndMetadataFound, ShredderOptions.All);
+                    ExpressionShredder.GetReferencedItemNamesAndMetadata(
+                        expression,
+                        0,
+                        expression.Length,
+                        ref found,
+                        ShredderOptions.All);
                 }
 
                 if (itemsAndMetadataFound.Items != null)

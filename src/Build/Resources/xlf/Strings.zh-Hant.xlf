@@ -556,6 +556,11 @@
         <target state="translated">MSB4258: 在路徑 "{0}" 中寫入輸出結果快取檔案發生錯誤: {1}</target>
         <note />
       </trans-unit>
+      <trans-unit id="EvaluationContextDoesNotSupportCustomProjectInstanceFactory">
+        <source>A ProjectGraph EvaluationContext cannot be combined with a custom project instance factory.</source>
+        <target state="new">A ProjectGraph EvaluationContext cannot be combined with a custom project instance factory.</target>
+        <note />
+      </trans-unit>
       <trans-unit id="FailedToResolveSDK">
         <source>Could not resolve SDK "{0}". Exactly one of the probing messages below indicates why we could not resolve the SDK. Investigate and resolve that message to correctly specify the SDK.
   {1}</source>

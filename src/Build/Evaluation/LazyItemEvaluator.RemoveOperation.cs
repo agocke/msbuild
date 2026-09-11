@@ -115,7 +115,11 @@ namespace Microsoft.Build.Evaluation
 
             public MatchOnMetadataOptions MatchOnMetadataOptions { get; set; }
 
-            public RemoveOperationBuilder(ProjectItemElement itemElement, bool conditionResult) : base(itemElement, conditionResult)
+            public RemoveOperationBuilder(
+                ProjectItemElement itemElement,
+                string itemType,
+                bool conditionResult)
+                : base(itemElement, itemType, conditionResult)
             {
             }
         }

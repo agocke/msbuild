@@ -3,6 +3,7 @@
 
 using System.Collections.Generic;
 using Microsoft.Build.Evaluation;
+using Microsoft.Build.Evaluation.Context;
 
 namespace Microsoft.Build.Graph
 {
@@ -41,6 +42,11 @@ namespace Microsoft.Build.Graph
         /// The <see cref="ProjectGraphMode" /> to use when constructing the graph. Defaults to <see cref="ProjectGraphMode.Default" />.
         /// </summary>
         public ProjectGraphMode Mode { get; init; } = ProjectGraphMode.Default;
+
+        /// <summary>
+        /// An optional evaluation context used for every project in the graph.
+        /// </summary>
+        public EvaluationContext? EvaluationContext { get; init; }
 
         /// <summary>
         /// The <see cref="ProjectCollection" /> to load projects into when constructing the graph. Defaults to <see cref="ProjectCollection.GlobalProjectCollection" />.

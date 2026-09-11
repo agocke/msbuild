@@ -421,12 +421,12 @@ namespace Microsoft.Build.Graph
             int degreeOfParallelism,
             CancellationToken cancellationToken)
             : this(new ProjectGraphOptions
-                    {
-                        EntryPoints = entryPoints,
-                        ProjectCollection = projectCollection,
-                        ProjectInstanceFactoryFunc = projectInstanceFactory,
-                        DegreeOfParallelism = degreeOfParallelism
-                    },
+            {
+                EntryPoints = entryPoints,
+                ProjectCollection = projectCollection,
+                ProjectInstanceFactoryFunc = projectInstanceFactory,
+                DegreeOfParallelism = degreeOfParallelism
+            },
                   cancellationToken)
         {
         }
@@ -448,14 +448,21 @@ namespace Microsoft.Build.Graph
             {
                 throw new ArgumentOutOfRangeException(nameof(options.DegreeOfParallelism), "DegreeOfParallelism must be greater than zero.");
             }
-
+            if (options.EvaluationContext is not null &&
+                options.ProjectInstanceFactoryFunc is not null)
+            {
+                throw new ArgumentException(
+                    AssemblyResources.GetString("EvaluationContextDoesNotSupportCustomProjectInstanceFactory"),
+                    nameof(options));
+            }
             var measurementInfo = BeginMeasurement();
 
             ProjectInstanceFactoryFunc projectInstanceFactory = options.ProjectInstanceFactoryFunc;
 
             if (projectInstanceFactory is null)
             {
-                _evaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared);
+                _evaluationContext = options.EvaluationContext ??
+                    EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared);
                 projectInstanceFactory = DefaultProjectInstanceFactory;
             }
 
@@ -478,6 +485,7 @@ namespace Microsoft.Build.Graph
             _projectNodesTopologicallySorted = new Lazy<IReadOnlyCollection<ProjectGraphNode>>(() => TopologicalSort(GraphRoots, ProjectNodes));
 
             ConstructionMetrics = EndMeasurement();
+            EvaluationPerformanceInstrumentation.WriteReportSnapshot();
 
             (Stopwatch Timer, string ETWArgs) BeginMeasurement()
             {

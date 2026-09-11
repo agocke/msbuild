@@ -5,7 +5,6 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
-using Microsoft.Build.Construction;
 using Microsoft.Build.Framework;
 
 #nullable disable
@@ -16,15 +15,15 @@ namespace Microsoft.Build.Evaluation
     {
         private class UpdateOperation : LazyItemOperation
         {
-            private readonly ImmutableArray<ProjectMetadataElement> _metadata;
-            private ImmutableList<ItemBatchingContext>.Builder _itemsToUpdate = null;
+            private readonly DeferredMetadata _metadata;
+            private List<ItemBatchingContext> _itemsToUpdate = null;
             private ItemSpecMatchesItem _matchItemSpec = null;
             private bool? _needToExpandMetadataForEachItem = null;
 
             public UpdateOperation(OperationBuilderWithMetadata builder, LazyItemEvaluator<P, I, M, D> lazyEvaluator)
                 : base(builder, lazyEvaluator)
             {
-                _metadata = builder.Metadata.ToImmutable();
+                _metadata = builder.ToMetadata();
             }
 
             private readonly struct MatchResult
@@ -49,22 +48,39 @@ namespace Microsoft.Build.Evaluation
                 }
 
                 SetMatchItemSpec();
-                _itemsToUpdate ??= ImmutableList.CreateBuilder<ItemBatchingContext>();
+                _itemsToUpdate ??= new List<ItemBatchingContext>();
                 _itemsToUpdate.Clear();
 
-                for (int i = 0; i < listBuilder.Count; i++)
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric
+                               .LazyItemUpdateSelection))
                 {
-                    var itemData = listBuilder[i];
-
-                    var matchResult = _matchItemSpec(_itemSpec, itemData.Item);
-
-                    if (matchResult.IsMatch)
+                    for (int i = 0; i < listBuilder.Count; i++)
                     {
-                        listBuilder[i] = UpdateItem(listBuilder[i], matchResult.CapturedItemsFromReferencedItemTypes);
+                        var itemData = listBuilder[i];
+
+                        var matchResult =
+                            _matchItemSpec(_itemSpec, itemData.Item);
+
+                        if (matchResult.IsMatch)
+                        {
+                            listBuilder[i] = UpdateItem(
+                                listBuilder[i],
+                                matchResult
+                                    .CapturedItemsFromReferencedItemTypes);
+                        }
                     }
                 }
 
-                DecorateItemsWithMetadata(_itemsToUpdate.ToImmutableList(), _metadata, _needToExpandMetadataForEachItem);
+                using (EvaluationPerformanceInstrumentation.Measure(
+                           EvaluationPerformanceMetric
+                               .LazyItemMetadataDecoration))
+                {
+                    DecorateItemsWithMetadata(
+                        _itemsToUpdate,
+                        _metadata,
+                        _needToExpandMetadataForEachItem);
+                }
             }
 
             /// <summary>
@@ -77,13 +93,16 @@ namespace Microsoft.Build.Evaluation
                 if (_conditionResult)
                 {
                     SetMatchItemSpec();
-                    _itemsToUpdate ??= ImmutableList.CreateBuilder<ItemBatchingContext>();
+                    _itemsToUpdate ??= new List<ItemBatchingContext>();
                     _itemsToUpdate.Clear();
                     MatchResult matchResult = _matchItemSpec(_itemSpec, item.Item);
                     if (matchResult.IsMatch)
                     {
                         ItemData clonedData = UpdateItem(item, matchResult.CapturedItemsFromReferencedItemTypes);
-                        DecorateItemsWithMetadata(_itemsToUpdate.ToImmutableList(), _metadata, _needToExpandMetadataForEachItem);
+                        DecorateItemsWithMetadata(
+                            _itemsToUpdate,
+                            _metadata,
+                            _needToExpandMetadataForEachItem);
                         return clonedData;
                     }
                 }
@@ -147,7 +166,9 @@ namespace Microsoft.Build.Evaluation
                 }
             }
 
-            private bool QualifiedMetadataReferencesExist(ImmutableArray<ProjectMetadataElement> metadata, out bool? needToExpandMetadataForEachItem)
+            private bool QualifiedMetadataReferencesExist(
+                DeferredMetadata metadata,
+                out bool? needToExpandMetadataForEachItem)
             {
                 needToExpandMetadataForEachItem = NeedToExpandMetadataForEachItem(metadata, out var itemsAndMetadataFound);
 

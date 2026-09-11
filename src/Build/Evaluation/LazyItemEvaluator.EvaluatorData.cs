@@ -12,6 +12,7 @@ using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Shared;
 
 #nullable disable
 
@@ -23,11 +24,16 @@ namespace Microsoft.Build.Evaluation
         {
             private readonly IEvaluatorData<P, I, M, D> _wrappedData;
             private readonly IReadOnlyDictionary<string, LazyItemList> _itemsByType;
+            private readonly ModuleEvaluationReadTracker _moduleEvaluationReadTracker;
 
-            public EvaluatorData(IEvaluatorData<P, I, M, D> wrappedData, IReadOnlyDictionary<string, LazyItemList> itemsByType)
+            public EvaluatorData(
+                IEvaluatorData<P, I, M, D> wrappedData,
+                IReadOnlyDictionary<string, LazyItemList> itemsByType,
+                ModuleEvaluationReadTracker moduleEvaluationReadTracker)
             {
                 _wrappedData = wrappedData;
                 _itemsByType = itemsByType;
+                _moduleEvaluationReadTracker = moduleEvaluationReadTracker;
             }
 
             public IItemDictionary<I> Items => throw new NotImplementedException();
@@ -36,9 +42,11 @@ namespace Microsoft.Build.Evaluation
 
             public ICollection<I> GetItems(string itemType)
             {
-                return _itemsByType.TryGetValue(itemType, out LazyItemList items)
+                ICollection<I> result = _itemsByType.TryGetValue(itemType, out LazyItemList items)
                     ? items.GetMatchedItems(globsToIgnore: ImmutableHashSet<string>.Empty)
                     : Array.Empty<I>();
+                _moduleEvaluationReadTracker?.RecordItems<I, M>(itemType, result);
+                return result;
             }
 
             public IDictionary<string, List<TargetSpecification>> AfterTargets
@@ -226,10 +234,48 @@ namespace Microsoft.Build.Evaluation
                 _wrappedData.RecordImportWithDuplicates(importElement, import, versionEvaluated);
             }
 
-            public P SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, BackEnd.Logging.LoggingContext loggingContext)
+            public P SetProperty(
+                ProjectPropertyElement propertyElement,
+                string evaluatedValueEscaped,
+                BackEnd.Logging.LoggingContext loggingContext,
+                bool preserveEvaluationHistory = true)
             {
-                return _wrappedData.SetProperty(propertyElement, evaluatedValueEscaped, loggingContext);
+                return _wrappedData.SetProperty(
+                    propertyElement,
+                    evaluatedValueEscaped,
+                    loggingContext,
+                    preserveEvaluationHistory);
             }
+
+            public void SetConstantProperties(
+                EvaluationModule module,
+                TableRange properties) =>
+                _wrappedData.SetConstantProperties(module, properties);
+
+            public bool TryGetEscapedPropertyValue(
+                PropertyId propertyId,
+                string propertyName,
+                IElementLocation location,
+                out string escapedValue) =>
+                _wrappedData.TryGetEscapedPropertyValue(
+                    propertyId,
+                    propertyName,
+                    location,
+                    out escapedValue);
+
+            public void SetCompiledProperty(
+                EvaluationModule module,
+                int propertyIndex,
+                string evaluatedValueEscaped,
+                LoggingContext loggingContext) =>
+                _wrappedData.SetCompiledProperty(
+                    module,
+                    propertyIndex,
+                    evaluatedValueEscaped,
+                    loggingContext);
+
+            public bool TryApplyPropertyDelta(PropertyDelta delta) =>
+                _wrappedData.TryApplyPropertyDelta(delta);
 
             public P SetProperty(string name, string evaluatedValueEscaped, bool isGlobalProperty, bool mayBeReserved, LoggingContext loggingContext, bool isEnvironmentVariable = false, bool isCommandLineProperty = false)
             {

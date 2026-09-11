@@ -24,9 +24,11 @@ namespace Microsoft.Build.Evaluation
     /// <typeparam name="I">The type of items to be produced.</typeparam>
     /// <typeparam name="M">The type of metadata on those items.</typeparam>
     /// <typeparam name="D">The type of item definitions to be produced.</typeparam>
-    internal class PropertyTrackingEvaluatorDataWrapper<P, I, M, D> : IEvaluatorData<P, I, M, D>
+    internal class PropertyTrackingEvaluatorDataWrapper<P, I, M, D> :
+        IEvaluatorData<P, I, M, D>,
+        IPropertyValueProvider
         where P : class, IProperty, IEquatable<P>, IValued
-        where I : class, IItem
+        where I : class, IItem<M>
         where M : class, IMetadatum
         where D : class, IItemDefinition<M>
     {
@@ -34,6 +36,7 @@ namespace Microsoft.Build.Evaluation
         private readonly HashSet<string> _overwrittenEnvironmentVariables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly EvaluationLoggingContext _evaluationLoggingContext;
         private readonly PropertyTrackingSetting _settings;
+        private readonly ModuleEvaluationReadTracker? _moduleEvaluationReadTracker;
 
         /// <summary>
         /// Creates an instance of the PropertyTrackingEvaluatorDataWrapper class.
@@ -41,7 +44,12 @@ namespace Microsoft.Build.Evaluation
         /// <param name="dataToWrap">The underlying <see cref="IEvaluatorData{P,I,M,D}"/> to wrap for property tracking.</param>
         /// <param name="evaluationLoggingContext">The <see cref="EvaluationLoggingContext"/> used to log relevant events.</param>
         /// <param name="settingValue">Property tracking setting value</param>
-        public PropertyTrackingEvaluatorDataWrapper(IEvaluatorData<P, I, M, D> dataToWrap, EvaluationLoggingContext evaluationLoggingContext, int settingValue)
+        /// <param name="moduleEvaluationReadTracker">Optional tracker for module evaluation sharing measurements.</param>
+        public PropertyTrackingEvaluatorDataWrapper(
+            IEvaluatorData<P, I, M, D> dataToWrap,
+            EvaluationLoggingContext evaluationLoggingContext,
+            int settingValue,
+            ModuleEvaluationReadTracker? moduleEvaluationReadTracker = null)
         {
             Assumed.NotNull(dataToWrap);
             Assumed.NotNull(evaluationLoggingContext);
@@ -49,6 +57,7 @@ namespace Microsoft.Build.Evaluation
             _wrapped = dataToWrap;
             _evaluationLoggingContext = evaluationLoggingContext;
             _settings = (PropertyTrackingSetting)settingValue;
+            _moduleEvaluationReadTracker = moduleEvaluationReadTracker;
         }
 
         #region IEvaluatorData<> members with tracking-related code in them.
@@ -61,6 +70,7 @@ namespace Microsoft.Build.Evaluation
         public P GetProperty(string name)
         {
             P prop = _wrapped.GetProperty(name);
+            _moduleEvaluationReadTracker?.RecordPropertyRead(name, prop);
             if (IsPropertyReadTrackingRequested)
             {
                 this.TrackPropertyRead(name, prop);
@@ -76,12 +86,48 @@ namespace Microsoft.Build.Evaluation
         public P GetProperty(string name, int startIndex, int endIndex)
         {
             P prop = _wrapped.GetProperty(name, startIndex, endIndex);
+            _moduleEvaluationReadTracker?.RecordPropertyRead(
+                name.Substring(startIndex, endIndex - startIndex + 1),
+                prop);
             if (IsPropertyReadTrackingRequested)
             {
                 this.TrackPropertyRead(name.Substring(startIndex, endIndex - startIndex + 1), prop);
             }
 
             return prop;
+        }
+
+        public bool TryGetEscapedPropertyValue(
+            string name,
+            int startIndex,
+            int endIndex,
+            out string escapedValue)
+        {
+            if (_wrapped is not IPropertyValueProvider valueProvider ||
+                !valueProvider.TryGetEscapedPropertyValue(
+                    name,
+                    startIndex,
+                    endIndex,
+                    out escapedValue))
+            {
+                escapedValue = string.Empty;
+                return false;
+            }
+
+            string propertyName = name.Substring(
+                startIndex,
+                endIndex - startIndex + 1);
+            _moduleEvaluationReadTracker?.RecordPropertyRead(
+                propertyName,
+                escapedValue);
+            if (IsPropertyReadTrackingRequested)
+            {
+                TrackPropertyRead(
+                    propertyName,
+                    propertyFound: true);
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -109,6 +155,36 @@ namespace Microsoft.Build.Evaluation
             return newProperty;
         }
 
+        public void SetConstantProperties(
+            EvaluationModule module,
+            TableRange properties) =>
+            _wrapped.SetConstantProperties(module, properties);
+
+        public bool TryGetEscapedPropertyValue(
+            PropertyId propertyId,
+            string propertyName,
+            IElementLocation location,
+            out string escapedValue) =>
+            _wrapped.TryGetEscapedPropertyValue(
+                propertyId,
+                propertyName,
+                location,
+                out escapedValue);
+
+        public void SetCompiledProperty(
+            EvaluationModule module,
+            int propertyIndex,
+            string evaluatedValueEscaped,
+            LoggingContext loggingContext) =>
+            _wrapped.SetCompiledProperty(
+                module,
+                propertyIndex,
+                evaluatedValueEscaped,
+                loggingContext);
+
+        public bool TryApplyPropertyDelta(PropertyDelta delta) =>
+            _wrapped.TryApplyPropertyDelta(delta);
+
         /// <summary>
         /// Sets a property which comes from the Xml.
         /// Predecessor is any immediately previous property that was overridden by this one during evaluation.
@@ -116,10 +192,26 @@ namespace Microsoft.Build.Evaluation
         /// project file, and whose conditions evaluated to true.
         /// If there are none above this is null.
         /// </summary>
-        public P SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, LoggingContext loggingContext)
+        public P SetProperty(
+            ProjectPropertyElement propertyElement,
+            string evaluatedValueEscaped,
+            LoggingContext loggingContext,
+            bool preserveEvaluationHistory = true)
         {
+            if (!preserveEvaluationHistory)
+            {
+                return _wrapped.SetProperty(
+                    propertyElement,
+                    evaluatedValueEscaped,
+                    loggingContext,
+                    preserveEvaluationHistory: false);
+            }
+
             P? originalProperty = _wrapped.GetProperty(propertyElement.Name);
-            P newProperty = _wrapped.SetProperty(propertyElement, evaluatedValueEscaped, loggingContext);
+            P newProperty = _wrapped.SetProperty(
+                propertyElement,
+                evaluatedValueEscaped,
+                loggingContext);
 
             this.TrackPropertyWrite(
                 originalProperty,
@@ -134,7 +226,12 @@ namespace Microsoft.Build.Evaluation
         #endregion
 
         #region IEvaluatorData<> members that are forwarded directly to wrapped object.
-        public ICollection<I> GetItems(string itemType) => _wrapped.GetItems(itemType);
+        public ICollection<I> GetItems(string itemType)
+        {
+            ICollection<I> items = _wrapped.GetItems(itemType);
+            _moduleEvaluationReadTracker?.RecordItems<I, M>(itemType, items);
+            return items;
+        }
         public int EvaluationId { get => _wrapped.EvaluationId; set => _wrapped.EvaluationId = value; }
         public string Directory => _wrapped.Directory;
         public TaskRegistry TaskRegistry { get => _wrapped.TaskRegistry; set => _wrapped.TaskRegistry = value; }
@@ -199,6 +296,13 @@ namespace Microsoft.Build.Evaluation
         /// <param name="property">The value of the property that was read (null if there is no value).</param>
         private void TrackPropertyRead(string name, P property)
         {
+            TrackPropertyRead(name, property is not null);
+        }
+
+        private void TrackPropertyRead(
+            string name,
+            bool propertyFound)
+        {
             // MSBuild looks up a property called "InnerBuildProperty". If that isn't present,
             // an empty string is returned and it then attempts to look up the value for that property
             // (which is an empty string). Thus this check.
@@ -213,7 +317,7 @@ namespace Microsoft.Build.Evaluation
             {
                 this.TrackEnvironmentVariableRead(name);
             }
-            else if (property == null)
+            else if (!propertyFound)
             {
                 this.TrackUninitializedPropertyRead(name);
             }

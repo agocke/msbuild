@@ -4361,16 +4361,76 @@ namespace Microsoft.Build.Evaluation
             /// <summary>
             /// Sets a property derived from Xml.
             /// </summary>
-            public ProjectProperty SetProperty(ProjectPropertyElement propertyElement, string evaluatedValueEscaped, LoggingContext loggingContext)
+            public ProjectProperty SetProperty(
+                ProjectPropertyElement propertyElement,
+                string evaluatedValueEscaped,
+                LoggingContext loggingContext,
+                bool preserveEvaluationHistory = true)
             {
-                ProjectProperty predecessor = GetProperty(propertyElement.Name);
+                ProjectProperty predecessor = preserveEvaluationHistory
+                    ? GetProperty(propertyElement.Name)
+                    : null;
                 ProjectProperty property = ProjectProperty.Create(Project, propertyElement, evaluatedValueEscaped, predecessor);
                 Properties.Set(property);
 
-                AddToAllEvaluatedPropertiesList(property);
+                if (preserveEvaluationHistory)
+                {
+                    AddToAllEvaluatedPropertiesList(property);
+                }
 
                 return property;
             }
+
+            public void SetConstantProperties(
+                EvaluationModule module,
+                TableRange properties)
+            {
+                for (int i = properties.Start;
+                     i < properties.Start + properties.Count;
+                     i++)
+                {
+                    PropertyTemplate template = module.Properties[i];
+                    ProjectProperty property = ProjectProperty.Create(
+                        Project,
+                        (ProjectPropertyElement)module.GetSource(
+                            template.SourceId),
+                        module.GetStringValue(
+                            template.ConstantValueStringId),
+                        predecessor: null);
+                    Properties.Set(property);
+                }
+            }
+
+            public bool TryGetEscapedPropertyValue(
+                PropertyId propertyId,
+                string propertyName,
+                IElementLocation location,
+                out string escapedValue)
+            {
+                ProjectProperty property = GetProperty(propertyName);
+                escapedValue = property is null
+                    ? null
+                    : ((IProperty)property)
+                        .GetEvaluatedValueEscaped(location);
+                return property is not null;
+            }
+
+            public void SetCompiledProperty(
+                EvaluationModule module,
+                int propertyIndex,
+                string evaluatedValueEscaped,
+                LoggingContext loggingContext)
+            {
+                PropertyTemplate template = module.Properties[propertyIndex];
+                SetProperty(
+                    (ProjectPropertyElement)module.GetSource(template.SourceId),
+                    evaluatedValueEscaped,
+                    loggingContext,
+                    preserveEvaluationHistory: false);
+            }
+
+            public bool TryApplyPropertyDelta(PropertyDelta delta) =>
+                false;
 
             /// <summary>
             /// Retrieves an existing target, if any.
