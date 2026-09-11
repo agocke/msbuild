@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using Microsoft.Build.BackEnd;
 using Microsoft.Build.Construction;
@@ -233,6 +234,46 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             Assert.True(foundExpectedParameter);
             Assert.False(foundNotExpectedParameter);
+        }
+
+        [Fact]
+        public void SharesLoadedTypeForEquivalentAssemblyPaths()
+        {
+            string assemblyPath = typeof(TaskToTestFactories).Assembly.Location;
+            string equivalentPath = Path.Combine(
+                Path.GetDirectoryName(assemblyPath),
+                ".",
+                Path.GetFileName(assemblyPath));
+
+            LoadedType first = InitializeFactoryFromAssemblyFile(assemblyPath);
+            LoadedType second = InitializeFactoryFromAssemblyFile(equivalentPath);
+
+            Assert.Same(first, second);
+            Assert.Equal(FileUtilities.NormalizePath(assemblyPath), first.Assembly.AssemblyFile);
+        }
+
+        [Fact]
+        public void SharedLoadedTypeKeepsPropertyPolicyRegistrationLocal()
+        {
+            string assemblyPath = typeof(TaskToTestFactories).Assembly.Location;
+            var firstFactory = new AssemblyTaskFactory();
+            var secondFactory = new AssemblyTaskFactory();
+            LoadedType first = InitializeFactoryFromAssemblyFile(assemblyPath, firstFactory);
+            LoadedType second = InitializeFactoryFromAssemblyFile(assemblyPath, secondFactory);
+
+            Assert.Same(first, second);
+
+            var firstWrapper = new TaskFactoryWrapper(firstFactory, first, "TaskToTestFactories", TaskHostParameters.Empty);
+            var secondWrapper = new TaskFactoryWrapper(secondFactory, second, "TaskToTestFactories", TaskHostParameters.Empty);
+            TaskPropertyInfo firstProperty = firstWrapper.GetProperty("ExpectedParameter");
+            TaskPropertyInfo secondProperty = secondWrapper.GetProperty("ExpectedParameter");
+
+            Assert.NotSame(firstProperty, secondProperty);
+            firstProperty.Initialized = true;
+            firstProperty.Log = false;
+
+            Assert.False(secondProperty.Initialized);
+            Assert.True(secondProperty.Log);
         }
 
         /// <summary>
@@ -794,6 +835,21 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             _loadedType = _taskFactory.InitializeFactory(_loadInfo, "TaskToTestFactories", new Dictionary<string, TaskPropertyInfo>(), string.Empty, factoryParameters, explicitlyLaunchTaskHost, new TestLoggingContext(null!, new BuildEventContext(1, 2, 3, 4)), ElementLocation.Create("NONE"), String.Empty);
             Assert.True(_loadedType.Assembly.Equals(_loadInfo)); // "Expected the AssemblyLoadInfo to be equal"
+        }
+
+        private static LoadedType InitializeFactoryFromAssemblyFile(string assemblyPath, AssemblyTaskFactory taskFactory = null)
+        {
+            taskFactory ??= new AssemblyTaskFactory();
+            return taskFactory.InitializeFactory(
+                AssemblyLoadInfo.Create(assemblyName: null, assemblyPath),
+                "TaskToTestFactories",
+                new Dictionary<string, TaskPropertyInfo>(),
+                string.Empty,
+                TaskHostParameters.Empty,
+                taskHostExplicitlyRequested: false,
+                new TestLoggingContext(null!, new BuildEventContext(1, 2, 3, 4)),
+                ElementLocation.Create("NONE"),
+                string.Empty);
         }
 
 #endregion

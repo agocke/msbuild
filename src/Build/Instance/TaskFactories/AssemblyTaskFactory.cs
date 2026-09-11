@@ -262,7 +262,13 @@ namespace Microsoft.Build.BackEnd
 
                 string assemblyName = loadInfo.AssemblyName ?? Path.GetFileName(loadInfo.AssemblyFile);
                 using var assemblyLoadsTracker = AssemblyLoadsTracker.StartTracking(targetLoggingContext, AssemblyLoadingContext.TaskRun, assemblyName);
-                _loadedType = _typeLoader.Load(taskName, loadInfo, targetLoggingContext.LogWarning, taskHostExplicitlyRequested, taskHostParamsMatchCurrentProc);
+                _loadedType = TaskAssemblyCache.GetOrLoad(
+                    _typeLoader,
+                    taskName,
+                    loadInfo,
+                    taskHostExplicitlyRequested,
+                    taskHostParamsMatchCurrentProc,
+                    targetLoggingContext.LogWarning);
                 ProjectErrorUtilities.VerifyThrowInvalidProject(_loadedType != null, elementLocation, "TaskLoadFailure", taskName, loadInfo.AssemblyLocation, String.Empty);
             }
             catch (TargetInvocationException e)
