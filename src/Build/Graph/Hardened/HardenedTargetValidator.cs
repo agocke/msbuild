@@ -815,12 +815,6 @@ internal sealed class HardenedTargetValidator
             }
         }
 
-        if (taskDescriptor.Classification == HardenedTaskClassification.DeclaredIO &&
-            !HasExplicitDeclaredIOLists(task, taskDescriptor))
-        {
-            taskDescriptor = HardenedTaskDescriptor.Unaudited;
-        }
-
         HardenedTaskClassification classification = taskDescriptor.Classification;
         bool isCallTarget = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "CallTarget");
         bool isMSBuild = MSBuildNameIgnoreCaseComparer.Default.Equals(task.Name, "MSBuild");
@@ -1058,29 +1052,6 @@ internal sealed class HardenedTargetValidator
             canStopOnFailure,
             Executed: !pureTaskExecuted && !isStaticallyEmptyMSBuild,
             callTargetScope?.Clone());
-    }
-
-    private static bool HasExplicitDeclaredIOLists(
-        ProjectTaskInstance task,
-        HardenedTaskDescriptor descriptor)
-    {
-        foreach (string parameterName in descriptor.InputPathParameters)
-        {
-            if (!TryGetTaskParameter(task, parameterName, out _, out _))
-            {
-                return false;
-            }
-        }
-
-        foreach (string parameterName in descriptor.OutputPathParameters)
-        {
-            if (!TryGetTaskParameter(task, parameterName, out _, out _))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private bool CanTaskStopOnFailure(

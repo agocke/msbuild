@@ -3789,6 +3789,8 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     <WriteLinesToFile
         File="$(TargetFrameworkMonikerAssemblyAttributesPath)"
         Lines="$(TargetFrameworkMonikerAssemblyAttributeText)"
+        DeclaredInputs=""
+        DeclaredOutputs="$(TargetFrameworkMonikerAssemblyAttributesPath)"
         Overwrite="true"
         ContinueOnError="true"
         Condition="'@(Compile)' != '' and '$(TargetFrameworkMonikerAssemblyAttributeText)' != ''"
@@ -3931,7 +3933,13 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <Output TaskParameter="HashResult" PropertyName="CoreCompileDependencyHash" />
     </Hash>
 
-    <WriteLinesToFile Lines="$(CoreCompileDependencyHash)" File="$(IntermediateOutputPath)$(MSBuildProjectFile).CoreCompileInputs.cache" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <WriteLinesToFile
+        Lines="$(CoreCompileDependencyHash)"
+        File="$(IntermediateOutputPath)$(MSBuildProjectFile).CoreCompileInputs.cache"
+        DeclaredInputs="$(IntermediateOutputPath)$(MSBuildProjectFile).CoreCompileInputs.cache"
+        DeclaredOutputs="$(IntermediateOutputPath)$(MSBuildProjectFile).CoreCompileInputs.cache"
+        Overwrite="true"
+        WriteOnlyWhenDifferent="true" />
 
     <ItemGroup>
       <FileWrites Include="$(IntermediateOutputPath)$(MSBuildProjectFile).CoreCompileInputs.cache" />

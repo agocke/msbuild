@@ -1124,17 +1124,19 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
             [FileUtilities.NormalizePath(projectFolder.Path, "obj/generated.txt")]);
     }
 
-    [Fact]
-    public void MissingDeclaredListLeavesInvocationUnaudited()
+    [Theory]
+    [InlineData("DeclaredOutputs=\"obj/generated.txt\"", "DeclaredInputs")]
+    [InlineData("DeclaredInputs=\"obj/generated.txt\"", "DeclaredOutputs")]
+    public void RejectsMissingDeclaredList(string suppliedDeclaration, string missingParameter)
     {
         using TestEnvironment environment = TestEnvironment.Create(_output);
         ProjectInstance project = CreateProjectInstance(
             environment,
-            """
+            $"""
             <Project>
               <Target Name="Build">
                 <Consume File="obj/generated.txt"
-                         DeclaredOutputs="obj/generated.txt" />
+                         {suppliedDeclaration} />
               </Target>
             </Project>
             """);
@@ -1147,7 +1149,11 @@ public sealed class HardenedTargetValidator_Tests(ITestOutputHelper output)
                     outputPathParameters: ["DeclaredOutputs"]),
             });
 
-        validator.Validate(project, "Build").ShouldBeEmpty();
+        IReadOnlyList<InvalidProjectFileException> diagnostics = validator.Validate(project, "Build");
+
+        diagnostics.Count.ShouldBe(1);
+        diagnostics[0].ErrorCode.ShouldBe("MSB4286");
+        diagnostics[0].Message.ShouldContain($"a missing '{missingParameter}' parameter");
         validator.GetDeclaredIOFootprintsForTesting().ShouldBeEmpty();
     }
 
