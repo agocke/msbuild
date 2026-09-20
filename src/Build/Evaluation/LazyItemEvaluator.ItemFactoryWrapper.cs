@@ -77,6 +77,12 @@ namespace Microsoft.Build.Evaluation
                 SetItemElement();
                 _wrappedItemFactory.SetMetadata(metadata, destinationItems);
             }
+
+            public void SetMetadata(IEnumerable<KeyValuePair<ProjectMetadataElement, string>> metadata, I destinationItem)
+            {
+                SetItemElement();
+                _wrappedItemFactory.SetMetadata(metadata, destinationItem);
+            }
         }
     }
 }

@@ -2325,10 +2325,8 @@ namespace Microsoft.Build.Execution
                 /// </summary>
                 public void SetMetadata(IEnumerable<KeyValuePair<ProjectMetadataElement, string>> metadataList, IEnumerable<ProjectItemInstance> destinationItems)
                 {
-                    // Set up a single dictionary that can be applied to all the items
-                    ImmutableDictionary<string, string> metadata = ImmutableDictionaryExtensions.EmptyMetadata;
-                    IEnumerable<KeyValuePair<string, string>> projectMetadataInstances = metadataList.Select(metadatum => new KeyValuePair<string, string>(metadatum.Key.Name, metadatum.Value));
-                    metadata = metadata.SetItems(projectMetadataInstances, ProjectMetadataInstance.VerifyThrowReservedName);
+                    ImmutableDictionary<string, string> metadata =
+                        CreateMetadata(metadataList);
 
                     if (metadata.Count > 0)
                     {
@@ -2337,6 +2335,42 @@ namespace Microsoft.Build.Execution
                             item._taskItem.SetMetadata(metadata);
                         }
                     }
+                }
+
+                public void SetMetadata(IEnumerable<KeyValuePair<ProjectMetadataElement, string>> metadataList, ProjectItemInstance destinationItem)
+                {
+                    ImmutableDictionary<string, string> metadata =
+                        CreateMetadata(metadataList);
+                    if (metadata.Count > 0)
+                    {
+                        destinationItem._taskItem.SetMetadata(metadata);
+                    }
+                }
+
+                private static ImmutableDictionary<string, string>
+                    CreateMetadata(
+                    IEnumerable<KeyValuePair<
+                        ProjectMetadataElement,
+                        string>> metadataList)
+                {
+                    if (metadataList is ConstantItemMetadata
+                        constantMetadata)
+                    {
+                        return constantMetadata.Values;
+                    }
+
+                    IEnumerable<KeyValuePair<string, string>>
+                        projectMetadataInstances =
+                            metadataList.Select(
+                                metadatum =>
+                                    new KeyValuePair<string, string>(
+                                        metadatum.Key.Name,
+                                        metadatum.Value));
+                    return ImmutableDictionaryExtensions.EmptyMetadata
+                        .SetItems(
+                            projectMetadataInstances,
+                            ProjectMetadataInstance
+                                .VerifyThrowReservedName);
                 }
 
                 /// <summary>
@@ -2492,6 +2526,12 @@ namespace Microsoft.Build.Execution
                 /// Applies the supplied metadata to the destination item.
                 /// </summary>
                 public void SetMetadata(IEnumerable<KeyValuePair<ProjectMetadataElement, string>> metadata, IEnumerable<TaskItem> destinationItems)
+                {
+                    // Not difficult to implement, but we do not expect to go here.
+                    Assumed.Unreachable();
+                }
+
+                public void SetMetadata(IEnumerable<KeyValuePair<ProjectMetadataElement, string>> metadata, TaskItem destinationItem)
                 {
                     // Not difficult to implement, but we do not expect to go here.
                     Assumed.Unreachable();

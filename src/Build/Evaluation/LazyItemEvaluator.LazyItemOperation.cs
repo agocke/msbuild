@@ -22,40 +22,98 @@ namespace Microsoft.Build.Evaluation
         {
             private readonly string _itemType;
             private readonly ImmutableDictionary<string, LazyItemList> _referencedItemLists;
+            private EvaluatorData _operationEvaluatorData;
+            private ItemFactoryWrapper _operationItemFactory;
+            private Expander<P, I> _operationExpander;
 
             protected readonly LazyItemEvaluator<P, I, M, D> _lazyEvaluator;
             protected readonly ProjectItemElement _itemElement;
             protected readonly ItemSpec<P, I> _itemSpec;
-            protected readonly EvaluatorData _evaluatorData;
-            protected readonly Expander<P, I> _expander;
             protected readonly bool _conditionResult;
 
             // This is used only when evaluating an expression, which instantiates
             //  the items and then removes them
-            protected readonly IItemFactory<I, I> _itemFactory;
             internal ItemSpec<P, I> Spec => _itemSpec;
+
+            protected EvaluatorData _evaluatorData =>
+                _operationEvaluatorData ??=
+                    new EvaluatorData(
+                        _lazyEvaluator._outerEvaluatorData,
+                        _referencedItemLists,
+                        _lazyEvaluator._moduleEvaluationReadTracker);
+
+            protected IItemFactory<I, I> _itemFactory =>
+                _operationItemFactory ??=
+                    new ItemFactoryWrapper(
+                        _itemElement,
+                        _lazyEvaluator._itemFactory);
+
+            protected Expander<P, I> _expander
+            {
+                get
+                {
+                    if (_operationExpander is null)
+                    {
+                        _operationExpander =
+                            new Expander<P, I>(
+                                _evaluatorData,
+                                _evaluatorData,
+                                _lazyEvaluator.EvaluationContext,
+                                _lazyEvaluator._loggingContext);
+                        _itemSpec.Expander = _operationExpander;
+                    }
+
+                    return _operationExpander;
+                }
+            }
 
             protected LazyItemOperation(OperationBuilder builder, LazyItemEvaluator<P, I, M, D> lazyEvaluator)
             {
                 _itemElement = builder.ItemElement;
                 _itemType = builder.ItemType;
                 _itemSpec = builder.ItemSpec;
-                _referencedItemLists = builder.ReferencedItemLists.ToImmutable();
+                _referencedItemLists =
+                    builder.ToReferencedItemLists();
                 _conditionResult = builder.ConditionResult;
 
                 _lazyEvaluator = lazyEvaluator;
 
-                _evaluatorData = new EvaluatorData(
-                    _lazyEvaluator._outerEvaluatorData,
-                    _referencedItemLists,
-                    _lazyEvaluator._moduleEvaluationReadTracker);
-                _itemFactory = new ItemFactoryWrapper(_itemElement, _lazyEvaluator._itemFactory);
-                _expander = new Expander<P, I>(_evaluatorData, _evaluatorData, _lazyEvaluator.EvaluationContext, _lazyEvaluator._loggingContext);
-
-                _itemSpec.Expander = _expander;
+                foreach (ItemSpecFragment fragment in _itemSpec.Fragments)
+                {
+                    if (fragment is
+                        ItemSpec<P, I>.ItemExpressionFragment)
+                    {
+                        _ = _expander;
+                        break;
+                    }
+                }
             }
 
             protected FileMatcher FileMatcher => _lazyEvaluator.FileMatcher;
+
+            protected I CreateItem(
+                ProjectItemElement itemElement,
+                string include,
+                string includeBeforeWildcardExpansion,
+                string definingProject)
+            {
+                _lazyEvaluator._itemFactory.ItemElement = itemElement;
+                return _lazyEvaluator._itemFactory.CreateItem(
+                    include,
+                    includeBeforeWildcardExpansion,
+                    definingProject);
+            }
+
+            protected void SetMetadata(
+                ProjectItemElement itemElement,
+                ConstantItemMetadata metadata,
+                I destinationItem)
+            {
+                _lazyEvaluator._itemFactory.ItemElement = itemElement;
+                _lazyEvaluator._itemFactory.SetMetadata(
+                    metadata,
+                    destinationItem);
+            }
 
             public void Apply(OrderedItemDataCollection.Builder listBuilder, ImmutableHashSet<string> globsToIgnore)
             {
@@ -239,9 +297,23 @@ namespace Microsoft.Build.Evaluation
                 DeferredMetadata metadata,
                 bool? needToExpandMetadata = null)
             {
-                if (metadata.Count > 0)
+                if (metadata.Count == 0)
                 {
-                    ////////////////////////////////////////////////////
+                    return;
+                }
+
+                ConstantItemMetadata constantMetadata =
+                    metadata.GetConstantMetadata();
+                if (constantMetadata is not null)
+                {
+                    _itemFactory.SetMetadata(
+                        constantMetadata,
+                        itemBatchingContexts.Select(
+                            i => i.OperationItem));
+                    return;
+                }
+
+                ////////////////////////////////////////////////////
                     // UNDONE: Implement batching here.
                     //
                     // We want to allow built-in metadata in metadata values here.
@@ -359,7 +431,6 @@ namespace Microsoft.Build.Evaluation
 
                         // End of legal area for metadata expressions.
                         _expander.Metadata = null;
-                    }
                 }
             }
 

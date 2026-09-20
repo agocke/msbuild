@@ -1024,6 +1024,16 @@ namespace Microsoft.Build.Evaluation
                 }
             }
 
+            public void SetMetadata(IEnumerable<KeyValuePair<ProjectMetadataElement, string>> metadata, ProjectItem destinationItem)
+            {
+                foreach (KeyValuePair<ProjectMetadataElement, string> metadatum in metadata)
+                {
+                    ((IItem<ProjectMetadata>)destinationItem).SetMetadata(
+                        metadatum.Key,
+                        metadatum.Value);
+                }
+            }
+
             /// <summary>
             /// Creates an item based on the provided item, with the specified include and item type.
             /// </summary>

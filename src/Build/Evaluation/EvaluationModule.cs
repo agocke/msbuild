@@ -2,13 +2,16 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using Microsoft.Build.Construction;
+using Microsoft.Build.Execution;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -18,6 +21,70 @@ using ReservedPropertyNames = Microsoft.Build.Internal.ReservedPropertyNames;
 
 namespace Microsoft.Build.Evaluation
 {
+    internal sealed class ConstantItemMetadata :
+        IEnumerable<KeyValuePair<ProjectMetadataElement, string>>
+    {
+        private readonly ImmutableArray<
+            KeyValuePair<ProjectMetadataElement, string>> _entries;
+        private ImmutableDictionary<string, string> _values;
+
+        internal ConstantItemMetadata(
+            ImmutableArray<
+                KeyValuePair<ProjectMetadataElement, string>> entries)
+        {
+            _entries = entries;
+        }
+
+        internal ImmutableDictionary<string, string> Values
+        {
+            get
+            {
+                ImmutableDictionary<string, string> values =
+                    Volatile.Read(ref _values);
+                if (values is null)
+                {
+                    ImmutableDictionary<string, string>.Builder builder =
+                        ImmutableDictionaryExtensions.EmptyMetadata
+                            .ToBuilder();
+                    foreach (KeyValuePair<
+                                 ProjectMetadataElement,
+                                 string> entry in _entries)
+                    {
+                        ProjectMetadataInstance
+                            .VerifyThrowReservedName(entry.Key.Name);
+                        builder[entry.Key.Name] =
+                            entry.Value ?? string.Empty;
+                    }
+
+                    values = builder.ToImmutable();
+                    Interlocked.CompareExchange(
+                        ref _values,
+                        values,
+                        null);
+                    values = _values;
+                }
+
+                return values;
+            }
+        }
+
+        public ImmutableArray<
+            KeyValuePair<ProjectMetadataElement, string>>.Enumerator
+            GetEnumerator() =>
+            _entries.GetEnumerator();
+
+        IEnumerator<KeyValuePair<ProjectMetadataElement, string>>
+            IEnumerable<KeyValuePair<
+                ProjectMetadataElement,
+                string>>.GetEnumerator() =>
+            ((IEnumerable<KeyValuePair<
+                ProjectMetadataElement,
+                string>>)_entries).GetEnumerator();
+
+        IEnumerator IEnumerable.GetEnumerator() =>
+            ((IEnumerable)_entries).GetEnumerator();
+    }
+
     internal readonly struct EvaluationOperationId : IEquatable<EvaluationOperationId>
     {
         internal EvaluationOperationId(
@@ -1231,6 +1298,8 @@ namespace Microsoft.Build.Evaluation
         private readonly ConcurrentDictionary<
             (int CacheKey, string EvaluatedItemSpec),
             ItemSpecFragmentDescriptor[]> _expandedItemSpecs = new();
+        private readonly object[] _constantItemMetadata;
+        private static readonly object s_notConstantItemMetadata = new();
         private int _handle;
 
         private EvaluationModule(
@@ -1312,6 +1381,7 @@ namespace Microsoft.Build.Evaluation
             ItemDefinitionGroups = itemDefinitionGroups;
             ItemDefinitions = itemDefinitions;
             Metadata = metadata;
+            _constantItemMetadata = new object[metadata.Length];
             UsingTasks = usingTasks;
             Targets = targets;
             TaskPrograms = taskPrograms;
@@ -1438,6 +1508,110 @@ namespace Microsoft.Build.Evaluation
 
             fragments = ItemSpecParser.Parse(evaluatedItemSpec, location);
             return _expandedItemSpecs.GetOrAdd(key, fragments);
+        }
+
+        internal ConstantItemMetadata GetConstantItemMetadata(
+            TableRange metadata)
+        {
+            if (metadata.Count == 0)
+            {
+                return null;
+            }
+
+            ref object slot =
+                ref _constantItemMetadata[metadata.Start];
+            object cached = Volatile.Read(ref slot);
+            if (cached is null)
+            {
+                cached =
+                    CreateConstantItemMetadata(metadata) ??
+                    s_notConstantItemMetadata;
+                Interlocked.CompareExchange(
+                    ref slot,
+                    cached,
+                    null);
+                cached = slot;
+            }
+
+            return ReferenceEquals(
+                    cached,
+                    s_notConstantItemMetadata)
+                ? null
+                : (ConstantItemMetadata)cached;
+        }
+
+        private ConstantItemMetadata CreateConstantItemMetadata(
+            TableRange metadata)
+        {
+            var entries = ImmutableArray.CreateBuilder<
+                KeyValuePair<ProjectMetadataElement, string>>(
+                metadata.Count);
+            int end = metadata.Start + metadata.Count;
+            for (int i = metadata.Start; i < end; i++)
+            {
+                MetadataTemplate template = Metadata[i];
+                if (template.CompiledConditionId != 0 ||
+                    template.CompiledValueParts.Start < 0)
+                {
+                    return null;
+                }
+
+                TableRange parts = template.CompiledValueParts;
+                string value;
+                if (parts.Count == 0)
+                {
+                    value = string.Empty;
+                }
+                else if (parts.Count == 1)
+                {
+                    CompiledMetadataValuePart part =
+                        CompiledMetadataValueParts[parts.Start];
+                    if (part.Kind !=
+                        CompiledMetadataValuePartKind.Literal)
+                    {
+                        return null;
+                    }
+
+                    value = GetStringValue(part.Value);
+                }
+                else
+                {
+                    var valueBuilder = new StringBuilder();
+                    int partsEnd = parts.Start + parts.Count;
+                    for (int partIndex = parts.Start;
+                         partIndex < partsEnd;
+                         partIndex++)
+                    {
+                        CompiledMetadataValuePart part =
+                            CompiledMetadataValueParts[partIndex];
+                        if (part.Kind !=
+                            CompiledMetadataValuePartKind.Literal)
+                        {
+                            return null;
+                        }
+
+                        valueBuilder.Append(
+                            GetStringValue(part.Value));
+                    }
+
+                    value = valueBuilder.ToString();
+                }
+
+                ProjectMetadataElement element =
+                    (ProjectMetadataElement)GetSource(
+                        template.SourceId);
+                entries.Add(
+                    new KeyValuePair<
+                        ProjectMetadataElement,
+                        string>(
+                        element,
+                        FileUtilities.MaybeAdjustFilePath(
+                            value,
+                            Header.DirectoryPath)));
+            }
+
+            return new ConstantItemMetadata(
+                entries.MoveToImmutable());
         }
 
         internal PropertyDelta GetConstantPropertyDelta(TableRange properties)

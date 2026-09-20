@@ -22,7 +22,7 @@ namespace Microsoft.Build.Evaluation
             public RemoveOperation(RemoveOperationBuilder builder, LazyItemEvaluator<P, I, M, D> lazyEvaluator)
                 : base(builder, lazyEvaluator)
             {
-                _matchOnMetadata = builder.MatchOnMetadata.ToImmutable();
+                _matchOnMetadata = builder.ToMatchOnMetadata();
 
                 ProjectFileErrorUtilities.VerifyThrowInvalidProjectFile(
                     _matchOnMetadata.IsEmpty || _itemSpec.Fragments.All(f => f is ItemSpec<P, I>.ItemExpressionFragment),
@@ -111,7 +111,11 @@ namespace Microsoft.Build.Evaluation
 
         private class RemoveOperationBuilder : OperationBuilder
         {
-            public ImmutableList<string>.Builder MatchOnMetadata { get; } = ImmutableList.CreateBuilder<string>();
+            private ImmutableList<string>.Builder _matchOnMetadata = null;
+
+            public ImmutableList<string>.Builder MatchOnMetadata =>
+                _matchOnMetadata ??=
+                    ImmutableList.CreateBuilder<string>();
 
             public MatchOnMetadataOptions MatchOnMetadataOptions { get; set; }
 
@@ -122,6 +126,10 @@ namespace Microsoft.Build.Evaluation
                 : base(itemElement, itemType, conditionResult)
             {
             }
+
+            public ImmutableList<string> ToMatchOnMetadata() =>
+                _matchOnMetadata?.ToImmutable() ??
+                ImmutableList<string>.Empty;
         }
     }
 }

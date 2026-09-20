@@ -1959,6 +1959,118 @@ namespace Microsoft.Build.UnitTests.Evaluation
         }
 
         [Fact]
+        public void CompactModuleBatchesConstantLiteralItemsWithoutCrossingReferenceBoundary()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "constant-literal-items.proj",
+                """
+                <Project>
+                  <ItemGroup>
+                    <Input Include="one">
+                      <Marker>first</Marker>
+                    </Input>
+                    <Input Include="two">
+                      <Marker>second</Marker>
+                    </Input>
+                    <Snapshot Include="@(Input)" />
+                    <Input Include="three">
+                      <Marker>third</Marker>
+                    </Input>
+                  </ItemGroup>
+                </Project>
+                """);
+            ProjectCollection collection =
+                environment.CreateProjectCollection().Collection;
+            ProjectRootElement root =
+                ProjectRootElement.Open(
+                    projectFile.Path,
+                    collection);
+            EvaluationContext context =
+                EvaluationContext
+                    .CreateForCompiledModuleEvaluation();
+
+            ProjectInstance first =
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext = context,
+                        ProjectCollection = collection,
+                    });
+            ProjectInstance second =
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext = context,
+                        ProjectCollection = collection,
+                    });
+            ProjectInstance scalar =
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext =
+                            EvaluationContext.Create(
+                                EvaluationContext.SharingPolicy
+                                    .Shared),
+                        ProjectCollection = collection,
+                    });
+
+            first.GetItems("Input")
+                .Select(
+                    item =>
+                        $"{item.EvaluatedInclude}|{item.GetMetadataValue("Marker")}")
+                .ShouldBe(
+                    [
+                        "one|first",
+                        "two|second",
+                        "three|third",
+                    ]);
+            first.GetItems("Input")
+                .Select(
+                    item =>
+                        $"{item.EvaluatedInclude}|{item.GetMetadataValue("Marker")}")
+                .ShouldBe(
+                    scalar.GetItems("Input")
+                        .Select(
+                            item =>
+                                $"{item.EvaluatedInclude}|{item.GetMetadataValue("Marker")}"));
+            first.GetItems("Snapshot")
+                .Select(
+                    item =>
+                        $"{item.EvaluatedInclude}|{item.GetMetadataValue("Marker")}")
+                .ShouldBe(
+                    [
+                        "one|first",
+                        "two|second",
+                    ]);
+            first.GetItems("Snapshot")
+                .Select(
+                    item =>
+                        $"{item.EvaluatedInclude}|{item.GetMetadataValue("Marker")}")
+                .ShouldBe(
+                    scalar.GetItems("Snapshot")
+                        .Select(
+                            item =>
+                                $"{item.EvaluatedInclude}|{item.GetMetadataValue("Marker")}"));
+
+            first.GetItems("Input").First()
+                .SetMetadata("Marker", "changed");
+            second.GetItems("Input")
+                .Select(
+                    item =>
+                        $"{item.EvaluatedInclude}|{item.GetMetadataValue("Marker")}")
+                .ShouldBe(
+                    [
+                        "one|first",
+                        "two|second",
+                        "three|third",
+                    ]);
+        }
+
+        [Fact]
         public void CompactModuleInterpreterPreservesDeferredConditionsAndSelectedClosure()
         {
             using TestEnvironment environment = TestEnvironment.Create();

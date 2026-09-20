@@ -264,6 +264,24 @@ namespace Microsoft.Build.Evaluation
                 _isReferenced = true;
             }
 
+            public bool TryAppendConstantLiteral(
+                ProjectItemElement itemElement,
+                int elementOrder,
+                string value,
+                ConstantItemMetadata metadata,
+                bool conditionResult)
+            {
+                return !_isReferenced &&
+                    _cache is null &&
+                    Operation is IncludeOperation include &&
+                    include.TryAppendConstantLiteral(
+                        itemElement,
+                        elementOrder,
+                        value,
+                        metadata,
+                        conditionResult);
+            }
+
             private void AddItemsToCache(ImmutableHashSet<string> globsToIgnore, OrderedItemDataCollection items)
             {
                 if (_cache == null)
@@ -486,20 +504,36 @@ namespace Microsoft.Build.Evaluation
             {
                 _memoizedOperation.MarkAsReferenced();
             }
+
+            public bool TryAppendConstantLiteral(
+                ProjectItemElement itemElement,
+                int elementOrder,
+                string value,
+                ConstantItemMetadata metadata,
+                bool conditionResult) =>
+                _memoizedOperation.TryAppendConstantLiteral(
+                    itemElement,
+                    elementOrder,
+                    value,
+                    metadata,
+                    conditionResult);
         }
 
         private class OperationBuilder
         {
             // WORKAROUND: Unnecessary boxed allocation: https://github.com/dotnet/corefx/issues/24563
             private static readonly ImmutableDictionary<string, LazyItemList> s_emptyIgnoreCase = ImmutableDictionary.Create<string, LazyItemList>(StringComparer.OrdinalIgnoreCase);
+            private ImmutableDictionary<string, LazyItemList>.Builder _referencedItemLists = null;
 
             public ProjectItemElement ItemElement { get; set; }
             public string ItemType { get; set; }
             public ItemSpec<P, I> ItemSpec { get; set; }
 
-            public ImmutableDictionary<string, LazyItemList>.Builder ReferencedItemLists { get; } = Traits.Instance.EscapeHatches.UseCaseSensitiveItemNames ?
-                ImmutableDictionary.CreateBuilder<string, LazyItemList>() :
-                s_emptyIgnoreCase.ToBuilder();
+            public ImmutableDictionary<string, LazyItemList>.Builder ReferencedItemLists =>
+                _referencedItemLists ??=
+                    Traits.Instance.EscapeHatches.UseCaseSensitiveItemNames
+                        ? ImmutableDictionary.CreateBuilder<string, LazyItemList>()
+                        : s_emptyIgnoreCase.ToBuilder();
 
             public bool ConditionResult { get; set; }
 
@@ -512,13 +546,24 @@ namespace Microsoft.Build.Evaluation
                 ItemType = itemType;
                 ConditionResult = conditionResult;
             }
+
+            public ImmutableDictionary<string, LazyItemList>
+                ToReferencedItemLists() =>
+                _referencedItemLists?.ToImmutable() ??
+                (Traits.Instance.EscapeHatches.UseCaseSensitiveItemNames
+                    ? ImmutableDictionary<string, LazyItemList>.Empty
+                    : s_emptyIgnoreCase);
         }
 
         private class OperationBuilderWithMetadata : OperationBuilder
         {
-            public readonly ImmutableArray<ProjectMetadataElement>.Builder Metadata = ImmutableArray.CreateBuilder<ProjectMetadataElement>();
+            private ImmutableArray<ProjectMetadataElement>.Builder _metadata = null;
             private EvaluationModule _metadataModule;
             private TableRange _metadataRange;
+
+            public ImmutableArray<ProjectMetadataElement>.Builder Metadata =>
+                _metadata ??=
+                    ImmutableArray.CreateBuilder<ProjectMetadataElement>();
 
             public OperationBuilderWithMetadata(
                 ProjectItemElement itemElement,
@@ -538,7 +583,9 @@ namespace Microsoft.Build.Evaluation
 
             public DeferredMetadata ToMetadata() =>
                 _metadataModule is null
-                    ? new DeferredMetadata(Metadata.ToImmutable())
+                    ? new DeferredMetadata(
+                        _metadata?.ToImmutable() ??
+                        ImmutableArray<ProjectMetadataElement>.Empty)
                     : new DeferredMetadata(_metadataModule, _metadataRange);
         }
 
@@ -694,6 +741,9 @@ namespace Microsoft.Build.Evaluation
                     ? _elements[index].ContainingProject.DirectoryPath
                     : _module.Header.DirectoryPath;
 
+            internal ConstantItemMetadata GetConstantMetadata() =>
+                _module?.GetConstantItemMetadata(_range);
+
             private MetadataTemplate GetTemplate(int index) =>
                 _module.Metadata[_range.Start + index];
         }
@@ -739,6 +789,11 @@ namespace Microsoft.Build.Evaluation
             ItemOperationData item,
             bool conditionResult)
         {
+            if (TryAppendConstantLiteral(item, conditionResult))
+            {
+                return;
+            }
+
             LazyItemOperation operation = item.OperationKind switch
             {
                 ItemOperationKind.Include =>
@@ -765,6 +820,51 @@ namespace Microsoft.Build.Evaluation
                 out LazyItemList previousItemList);
             LazyItemList newList = new LazyItemList(previousItemList, operation);
             _itemLists[item.ItemType] = newList;
+        }
+
+        private bool TryAppendConstantLiteral(
+            ItemOperationData item,
+            bool conditionResult)
+        {
+            if (item.OperationKind != ItemOperationKind.Include ||
+                item.Module is null ||
+                item.Exclude.Length != 0 ||
+                item.CompiledItemSpecFragments.Count != 1 ||
+                !_itemLists.TryGetValue(
+                    item.ItemType,
+                    out LazyItemList previousItemList))
+            {
+                return false;
+            }
+
+            CompiledItemSpecFragment fragment =
+                item.Module.CompiledItemSpecFragments[
+                    item.CompiledItemSpecFragments.Start];
+            if (fragment.Kind !=
+                CompiledItemSpecFragmentKind.Value)
+            {
+                return false;
+            }
+
+            ConstantItemMetadata metadata =
+                item.Module.GetConstantItemMetadata(item.Metadata);
+            if (item.Metadata.Count > 0 && metadata is null)
+            {
+                return false;
+            }
+
+            if (!previousItemList.TryAppendConstantLiteral(
+                    item.Element,
+                    _nextElementOrder,
+                    item.Module.GetStringValue(fragment.TextStringId),
+                    metadata,
+                    conditionResult))
+            {
+                return false;
+            }
+
+            _nextElementOrder++;
+            return true;
         }
 
         private UpdateOperation BuildUpdateOperation(
