@@ -60,9 +60,10 @@ items, and declared output files and directories.
 
 Reuse of graph-construction results is **partial-evaluation reuse**.
 
-Actual result caching is outside the scope of this specification. The
-execution graph is designed to make a later caching layer possible, but this
-design does not define result lookup, storage, eviction, transfer, or replay.
+The initial result cache is a local, engine-owned implementation for ready
+Declared-IO task invocations. Remote storage, eviction, partial-evaluation
+reuse, and caching of whole project results remain outside the scope of this
+specification.
 
 ## The law
 
@@ -332,6 +333,14 @@ annotated task are outside the static guarantee.
 
 ### T2. Declared-IO
 
+A Declared-IO annotation asserts that the task's observable result is a
+deterministic function of its parameter values, the contents and relevant
+metadata of its declared inputs, and the immutable task implementation and host
+semantics captured by the execution-graph identity. A correctly annotated task
+does not observe undeclared files, network state, the clock, mutable environment
+state, or other ambient inputs. This applies transitively to code loaded by the
+task, such as compiler analyzers and generators.
+
 A Declared-IO task exposes conventional `DeclaredInputs` and
 `DeclaredOutputs` parameters that carry the complete finite input and output
 path lists for an invocation. These declaration-list parameters are separate
@@ -340,8 +349,10 @@ to appear in the input list, the output list, both lists, or neither list
 without assigning a fixed filesystem role to that operational parameter.
 
 Both declaration-list parameters must be supplied explicitly for the contract
-to apply to an invocation. An explicit empty value is an empty list. If either
-parameter is absent, that invocation is Unaudited.
+to apply to an invocation. An explicit empty value is an empty list. Hardened
+validation rejects an invocation of an annotated Declared-IO task if either
+parameter is absent; authors must supply an explicit empty value when the
+corresponding path list is empty.
 
 For example:
 
@@ -385,7 +396,8 @@ items or properties during graph construction, the target must add that
 already-known value through static property or item operations.
 
 The engine validates the declared paths during graph construction. It trusts
-that the task does not perform undeclared externally observable I/O.
+that the task is deterministic under the declared contract and does not perform
+undeclared externally observable I/O.
 
 ### T3. Unaudited
 
@@ -458,8 +470,35 @@ A task invocation result contains:
 - declared deletions;
 - structured task diagnostics.
 
-How a later caching system stores or replays this result is outside this
-specification.
+The initial local result cache is enabled only when hardened validation is
+active and `MSBuildHardenedResultCacheDirectory` is nonempty. The cache
+directory is engine infrastructure, not an input or output of the task. A task
+does not receive the cache location and does not read or write cache entries.
+
+The cache key contains:
+
+- a cache schema version;
+- the exact task type and task assembly content;
+- the MSBuild, runtime, operating-system, architecture, and culture identities;
+- the project path and execution directory;
+- canonical values of all bound task parameters, including ordered item
+  values and metadata;
+- canonical declared output paths;
+- the existence and content of every canonical declared input.
+
+The initial cache stores only successful in-process invocations with regular
+file outputs and no MSBuild task `<Output>` elements. It records both present
+and absent declared outputs. A hit validates every cached payload before
+restoring outputs, updates restored output timestamps for ordinary incremental
+build semantics, and replays supported structured task messages and warnings
+through the current task logging context. An invocation that emits an event
+kind the cache cannot reproduce executes normally but is not stored.
+
+Entries are published from a staging directory by atomic rename while holding
+a per-key cross-process file lock. Missing, corrupt, inaccessible, or
+unsupported entries are low-importance logged misses; they never become
+success-shaped results. The engine executes the task normally and may replace
+a corrupt entry after successful execution.
 
 ### T7. Output updates
 

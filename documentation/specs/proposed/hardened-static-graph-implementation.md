@@ -954,8 +954,12 @@ the packaged form used to avoid loading task code.
 - Represent Declared-IO classification with
   `MSBuildDeclaredIOTaskAttribute`; annotated tasks use the conventional
   `DeclaredInputs` and `DeclaredOutputs` list parameters.
-- Treat an annotated task invocation with missing declaration-list parameters
-  as Unaudited; explicit empty parameters represent empty lists.
+- Treat the annotation as an assertion that all observable results are
+  deterministic functions of task parameters, declared filesystem inputs, and
+  the fixed task implementation and host semantics represented by the
+  execution graph. Code loaded by the task is part of this transitive contract.
+- Reject an annotated task invocation with missing declaration-list parameters;
+  explicit empty parameters represent empty lists.
 - Represent invocation modes in which that contract applies with
   `MSBuildDeclaredIORequiresUnsetAttribute`.
 - Honor task overrides and runtime/architecture identity when selecting the
@@ -1051,10 +1055,42 @@ Validate T2 declarations without executing or monitoring the task.
   project input set.
 - Detect overlapping declared outputs when statically decidable.
 - Mark Unaudited invocations and containing project results as not cacheable
-  in validation metadata; do not implement caching behavior.
+  in validation metadata.
 
 The engine trusts that the task obeys its declaration. There is no sandbox,
 filesystem tracker, post-execution verification, or implementation audit.
+
+## Milestone 4a - Local Declared-IO result cache
+
+### Goal
+
+Reuse successful ready Declared-IO task results without changing ordinary task
+execution or introducing a separate hardened executor.
+
+### Work
+
+- Enable the cache only for hardened builds with a nonempty
+  `MSBuildHardenedResultCacheDirectory`.
+- Intercept an invocation after normal task construction and parameter binding
+  but before `Execute`.
+- Build a versioned content key from the task implementation, fixed host
+  semantics including project and culture identity, canonical bound parameters,
+  declared output paths, and declared input existence and content.
+- Serialize present and absent regular-file outputs plus supported task
+  messages, command lines, and warnings.
+- Validate all payload hashes before restoration and replay diagnostics through
+  the ordinary `TaskHost`.
+- Publish entries with per-key cross-process locking, a staging directory, and
+  atomic rename.
+- Cache only successful in-process invocations without task `<Output>`
+  elements. Treat unsupported event kinds, directory inputs or outputs, cache
+  corruption, and cache I/O failures as low-importance logged misses followed
+  by ordinary task execution.
+
+This first implementation derives the key and footprint from the actual bound
+task instance. Hardened validation remains responsible for proving that the
+declaration expressions are static and complete; the cache does not perform a
+second graph-construction workflow.
 
 ## Milestone 5 - Project and target edges
 
@@ -1130,7 +1166,7 @@ completely:
   producers;
 - directory outputs, declared deletions, and stale-file removal;
 - design-time build contracts;
-- task-result equivalence and caching.
+- remote task-result storage, eviction, and whole-project result caching.
 
 ## Validation gates
 
