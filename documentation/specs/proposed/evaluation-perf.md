@@ -18,3 +18,6 @@ One of the big risks is accidentally changing the current behaviour of evaluatio
 The plan for evaluation at the moment is to add more code markers during execution so we can use PerfStar to have a detailed view of how long each part of evaluation phase takes.
 
 Larger changes to the evaluation are possible and under consideration for future iterations, like trying to cache the evaluation result in MSBuild. However we are focusing on investigation and performance gains with less work at the moment.
+
+Rejected experiments and their measured outcomes are tracked in
+[Evaluation performance dead ends](evaluation-performance-dead-ends.md).
