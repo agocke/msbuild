@@ -118,6 +118,55 @@ namespace Microsoft.Build.Evaluation
         internal ImmutableArray<PropertyDeltaEntry> Entries { get; }
     }
 
+    internal sealed class PropertyPrefixState
+    {
+        private readonly Dictionary<PropertyId, PropertyDeltaEntry>
+            _entriesById;
+
+        internal PropertyPrefixState(
+            Dictionary<PropertyId, PropertyValueRef> values,
+            Dictionary<PropertyId, string> names)
+        {
+            _entriesById =
+                new Dictionary<PropertyId, PropertyDeltaEntry>(
+                    values.Count);
+            foreach (KeyValuePair<PropertyId, PropertyValueRef> pair in values)
+            {
+                _entriesById.Add(pair.Key, new PropertyDeltaEntry(
+                    pair.Key,
+                    names[pair.Key],
+                    pair.Value));
+            }
+
+            Count = values.Count;
+        }
+
+        internal int Count { get; }
+
+        internal bool TryGet(
+            PropertyId id,
+            out PropertyValueRef value)
+        {
+            if (_entriesById.TryGetValue(
+                    id,
+                    out PropertyDeltaEntry entry))
+            {
+                value = entry.Value;
+                return true;
+            }
+
+            value = default;
+            return false;
+        }
+
+        internal string GetName(PropertyId id) =>
+            _entriesById[id].Name;
+
+        internal Dictionary<PropertyId, PropertyDeltaEntry>.ValueCollection
+            Entries =>
+            _entriesById.Values;
+    }
+
     internal sealed class ConstantPropertySegmentState
     {
         private PropertyDelta _constantEffects;
@@ -148,22 +197,30 @@ namespace Microsoft.Build.Evaluation
             new Dictionary<PropertyId, PropertyValueRef>();
         private readonly Dictionary<PropertyId, string> _names =
             new Dictionary<PropertyId, string>();
+        private readonly HashSet<PropertyId> _hiddenBaseValues =
+            new HashSet<PropertyId>();
+        private PropertyPrefixState _baseState;
 
         internal CompactPropertyEnvironment(PropertyIdentityTable identities)
         {
             _identities = identities;
         }
 
-        internal int Count => _values.Count;
+        internal int Count =>
+            _values.Count +
+            (_baseState?.Count ?? 0) -
+            _hiddenBaseValues.Count;
 
-        internal string GetName(PropertyId id) => _names[id];
+        internal string GetName(PropertyId id) =>
+            _names.TryGetValue(id, out string name)
+                ? name
+                : _baseState.GetName(id);
 
         internal void Apply(PropertyDelta delta)
         {
             foreach (PropertyDeltaEntry entry in delta.Entries)
             {
-                _values[entry.Id] = entry.Value;
-                _names[entry.Id] = entry.Name;
+                Set(entry.Id, entry.Name, entry.Value);
             }
         }
 
@@ -172,18 +229,37 @@ namespace Microsoft.Build.Evaluation
             string name,
             PropertyValueRef value)
         {
+            if (_baseState?.TryGet(id, out _) == true)
+            {
+                _hiddenBaseValues.Add(id);
+            }
+
             _values[id] = value;
             _names[id] = name;
         }
 
-        internal bool TryGet(PropertyId id, out PropertyValueRef value) =>
-            _values.TryGetValue(id, out value);
+        internal bool TryGet(PropertyId id, out PropertyValueRef value)
+        {
+            if (_values.TryGetValue(id, out value))
+            {
+                return true;
+            }
+
+            if (!_hiddenBaseValues.Contains(id) &&
+                _baseState?.TryGet(id, out value) == true)
+            {
+                return true;
+            }
+
+            value = default;
+            return false;
+        }
 
         internal bool TryGet(string name, out PropertyValueRef value)
         {
             if (_identities.TryGetId(name, out PropertyId id))
             {
-                return _values.TryGetValue(id, out value);
+                return TryGet(id, out value);
             }
 
             value = default;
@@ -197,7 +273,7 @@ namespace Microsoft.Build.Evaluation
         {
             if (_identities.TryGetId(name, out id))
             {
-                return _values.TryGetValue(id, out value);
+                return TryGet(id, out value);
             }
 
             value = default;
@@ -207,7 +283,13 @@ namespace Microsoft.Build.Evaluation
         internal bool Remove(PropertyId id)
         {
             _names.Remove(id);
-            return _values.Remove(id);
+            bool removed = _values.Remove(id);
+            if (_baseState?.TryGet(id, out _) == true)
+            {
+                removed |= _hiddenBaseValues.Add(id);
+            }
+
+            return removed;
         }
 
         internal bool Remove(string name)
@@ -216,9 +298,37 @@ namespace Microsoft.Build.Evaluation
                    Remove(id);
         }
 
+        internal bool TryCreatePrefixState(
+            out PropertyPrefixState state)
+        {
+            if (_baseState is not null ||
+                _hiddenBaseValues.Count != 0)
+            {
+                state = null;
+                return false;
+            }
+
+            state = new PropertyPrefixState(_values, _names);
+            return true;
+        }
+
+        internal bool TryAttachPrefixState(
+            PropertyPrefixState state)
+        {
+            if (_baseState is not null ||
+                _values.Count != 0 ||
+                _hiddenBaseValues.Count != 0)
+            {
+                return false;
+            }
+
+            _baseState = state;
+            return true;
+        }
+
         internal PropertyDeltaEntry[] Drain()
         {
-            var entries = new PropertyDeltaEntry[_values.Count];
+            var entries = new PropertyDeltaEntry[Count];
             int index = 0;
             foreach (KeyValuePair<PropertyId, PropertyValueRef> pair in _values)
             {
@@ -229,8 +339,22 @@ namespace Microsoft.Build.Evaluation
                         pair.Value);
             }
 
+            if (_baseState is not null)
+            {
+                foreach (PropertyDeltaEntry entry in
+                         _baseState.Entries)
+                {
+                    if (!_hiddenBaseValues.Contains(entry.Id))
+                    {
+                        entries[index++] = entry;
+                    }
+                }
+            }
+
             _values.Clear();
             _names.Clear();
+            _hiddenBaseValues.Clear();
+            _baseState = null;
             return entries;
         }
     }

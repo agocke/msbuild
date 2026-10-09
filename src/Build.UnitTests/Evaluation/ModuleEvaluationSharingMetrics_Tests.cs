@@ -1017,6 +1017,250 @@ namespace Microsoft.Build.UnitTests.Evaluation
         }
 
         [Fact]
+        public void CompiledPropertyPrefixAttachesSharedStateByLiveIns()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "property-prefix.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <ConstantOne>one</ConstantOne>
+                    <ConstantTwo>two</ConstantTwo>
+                  </PropertyGroup>
+                  <PropertyGroup>
+                    <First>$(ConstantOne)-$(Flavor)</First>
+                    <Internal>$(First)-internal</Internal>
+                  </PropertyGroup>
+                  <PropertyGroup Condition="'$(Mode)' == 'debug'">
+                    <Conditional>$(Internal)-conditional</Conditional>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Boundary Include="item" />
+                  </ItemGroup>
+                  <PropertyGroup>
+                    <After>$(Internal)-after</After>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectCollection collection =
+                environment.CreateProjectCollection().Collection;
+            ProjectRootElement root =
+                ProjectRootElement.Open(projectFile.Path, collection);
+            EvaluationContext context =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    useCompiledModuleEffectBatches: true);
+
+            ProjectInstance first =
+                Evaluate("A", "debug", "noise-1");
+            ProjectInstance repeated =
+                Evaluate("A", "debug", "noise-2");
+            ProjectInstance distinct =
+                Evaluate("B", "debug", "noise-3");
+
+            first.GetPropertyValue("Conditional")
+                .ShouldBe("one-A-internal-conditional");
+            repeated.GetPropertyValue("After")
+                .ShouldBe("one-A-internal-after");
+            distinct.GetPropertyValue("After")
+                .ShouldBe("one-B-internal-after");
+            first.CompactPropertyDeltaApplications.ShouldBe(1);
+            repeated.CompactPropertyDeltaApplications.ShouldBe(0);
+            distinct.CompactPropertyDeltaApplications.ShouldBe(1);
+
+            EvaluationModule module =
+                context.EvaluationModuleCache.GetModule(root);
+            PropertyPrefixPlan prefix = module.PropertyPrefix;
+            prefix.ShouldNotBeNull();
+            prefix.Elements.Count.ShouldBe(3);
+            prefix.LiveIns
+                .Select(read =>
+                    module.GetStringValue(read.NameStringId))
+                .ShouldBe(new[] { "Flavor", "Mode" });
+            prefix.CacheEntryCount.ShouldBe(2);
+            prefix.MissCount.ShouldBe(2);
+            prefix.HitCount.ShouldBe(1);
+
+            repeated.SetProperty("First", "override");
+            repeated.GetPropertyValue("First").ShouldBe("override");
+            repeated.RemoveProperty("Internal").ShouldBeTrue();
+            repeated.GetPropertyValue("Internal").ShouldBeEmpty();
+            first.GetPropertyValue("Internal")
+                .ShouldBe("one-A-internal");
+
+            ProjectInstance Evaluate(
+                string flavor,
+                string mode,
+                string irrelevant) =>
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext = context,
+                        GlobalProperties =
+                            new Dictionary<string, string>
+                            {
+                                ["Flavor"] = flavor,
+                                ["Mode"] = mode,
+                                ["Irrelevant"] = irrelevant,
+                            },
+                        ProjectCollection = collection,
+                    });
+        }
+
+        [Fact]
+        public void PropertyPrefixKeyDistinguishesUndefinedAndEmpty()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "property-prefix-undefined.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Result>prefix-$(Input)-suffix</Result>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectCollection collection =
+                environment.CreateProjectCollection().Collection;
+            ProjectRootElement root =
+                ProjectRootElement.Open(projectFile.Path, collection);
+            EvaluationContext context =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    useCompiledModuleEffectBatches: true);
+
+            Evaluate(new Dictionary<string, string>())
+                .GetPropertyValue("Result")
+                .ShouldBe("prefix--suffix");
+            Evaluate(new Dictionary<string, string>())
+                .GetPropertyValue("Result")
+                .ShouldBe("prefix--suffix");
+            Evaluate(
+                    new Dictionary<string, string>
+                    {
+                        ["Input"] = string.Empty,
+                    })
+                .GetPropertyValue("Result")
+                .ShouldBe("prefix--suffix");
+
+            PropertyPrefixPlan prefix =
+                context.EvaluationModuleCache.GetModule(root)
+                    .PropertyPrefix;
+            prefix.CacheEntryCount.ShouldBe(2);
+            prefix.MissCount.ShouldBe(2);
+            prefix.HitCount.ShouldBe(1);
+
+            ProjectInstance Evaluate(
+                IDictionary<string, string> globals) =>
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext = context,
+                        GlobalProperties = globals,
+                        ProjectCollection = collection,
+                    });
+        }
+
+        [Fact]
+        public void PropertyPrefixFallsBackForNonOverridableGlobal()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "property-prefix-global.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Result>project</Result>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectCollection collection =
+                environment.CreateProjectCollection().Collection;
+            ProjectRootElement root =
+                ProjectRootElement.Open(projectFile.Path, collection);
+            EvaluationContext context =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    useCompiledModuleEffectBatches: true);
+
+            ProjectInstance instance =
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext = context,
+                        GlobalProperties =
+                            new Dictionary<string, string>
+                            {
+                                ["Result"] = "global",
+                            },
+                        ProjectCollection = collection,
+                    });
+
+            instance.GetPropertyValue("Result").ShouldBe("global");
+            PropertyPrefixPlan prefix =
+                context.EvaluationModuleCache.GetModule(root)
+                    .PropertyPrefix;
+            prefix.ShouldNotBeNull();
+            prefix.CacheEntryCount.ShouldBe(0);
+            prefix.HitCount.ShouldBe(0);
+            prefix.MissCount.ShouldBe(0);
+        }
+
+        [Fact]
+        public void PropertyPrefixKeyIncludesTreatAsLocalGlobalState()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "property-prefix-local-global.proj",
+                """
+                <Project TreatAsLocalProperty="Result">
+                  <PropertyGroup>
+                    <Result>project</Result>
+                  </PropertyGroup>
+                </Project>
+                """);
+            ProjectCollection collection =
+                environment.CreateProjectCollection().Collection;
+            ProjectRootElement root =
+                ProjectRootElement.Open(projectFile.Path, collection);
+            EvaluationContext context =
+                EvaluationContext.CreateForCompiledModuleEvaluation(
+                    useCompiledModuleEffectBatches: true);
+
+            Evaluate(null).GetPropertyValue("Result")
+                .ShouldBe("project");
+            Evaluate("one").GetPropertyValue("Result")
+                .ShouldBe("project");
+            Evaluate("one").GetPropertyValue("Result")
+                .ShouldBe("project");
+            Evaluate("two").GetPropertyValue("Result")
+                .ShouldBe("project");
+
+            PropertyPrefixPlan prefix =
+                context.EvaluationModuleCache.GetModule(root)
+                    .PropertyPrefix;
+            prefix.CacheEntryCount.ShouldBe(3);
+            prefix.MissCount.ShouldBe(3);
+            prefix.HitCount.ShouldBe(1);
+
+            ProjectInstance Evaluate(string? result) =>
+                ProjectInstance.FromProjectRootElement(
+                    root,
+                    new ProjectOptions
+                    {
+                        EvaluationContext = context,
+                        GlobalProperties = result is null
+                            ? new Dictionary<string, string>()
+                            : new Dictionary<string, string>
+                            {
+                                ["Result"] = result,
+                            },
+                        ProjectCollection = collection,
+                    });
+        }
+
+        [Fact]
         public void ResidualProgramExecutesSimplePropertyConditions()
         {
             using TestEnvironment environment = TestEnvironment.Create();

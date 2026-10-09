@@ -4432,6 +4432,17 @@ namespace Microsoft.Build.Evaluation
             public bool TryApplyPropertyDelta(PropertyDelta delta) =>
                 false;
 
+            public bool TryCreatePropertyPrefixState(
+                out PropertyPrefixState state)
+            {
+                state = null;
+                return false;
+            }
+
+            public bool TryAttachPropertyPrefixState(
+                PropertyPrefixState state) =>
+                false;
+
             /// <summary>
             /// Retrieves an existing target, if any.
             /// </summary>

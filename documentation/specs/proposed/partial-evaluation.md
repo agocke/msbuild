@@ -109,3 +109,7 @@ Partial evaluation and a shared `EvaluationContext` are complementary levers. A 
 caches file-system probes and SDK resolution across projects; partial evaluation skips whole passes
 within each project. Batch scenarios that read one property from many projects (such as the SDK
 release-property locator) benefit from using both together.
+
+The compiled `ProjectInstance` prototype can additionally reuse a deterministic leading property
+region by [attaching an immutable prefix state](prefix-state-attachment.md), avoiding assignment
+replay for configurations with equivalent live-in values.

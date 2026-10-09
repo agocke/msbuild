@@ -277,6 +277,14 @@ namespace Microsoft.Build.Evaluation
             public bool TryApplyPropertyDelta(PropertyDelta delta) =>
                 _wrappedData.TryApplyPropertyDelta(delta);
 
+            public bool TryCreatePropertyPrefixState(
+                out PropertyPrefixState state) =>
+                _wrappedData.TryCreatePropertyPrefixState(out state);
+
+            public bool TryAttachPropertyPrefixState(
+                PropertyPrefixState state) =>
+                _wrappedData.TryAttachPropertyPrefixState(state);
+
             public P SetProperty(string name, string evaluatedValueEscaped, bool isGlobalProperty, bool mayBeReserved, LoggingContext loggingContext, bool isEnvironmentVariable = false, bool isCommandLineProperty = false)
             {
                 return _wrappedData.SetProperty(name, evaluatedValueEscaped, isGlobalProperty, mayBeReserved, loggingContext: loggingContext, isCommandLineProperty);

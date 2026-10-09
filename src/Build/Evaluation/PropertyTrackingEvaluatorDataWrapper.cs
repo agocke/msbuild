@@ -185,6 +185,14 @@ namespace Microsoft.Build.Evaluation
         public bool TryApplyPropertyDelta(PropertyDelta delta) =>
             _wrapped.TryApplyPropertyDelta(delta);
 
+        public bool TryCreatePropertyPrefixState(
+            out PropertyPrefixState state) =>
+            _wrapped.TryCreatePropertyPrefixState(out state);
+
+        public bool TryAttachPropertyPrefixState(
+            PropertyPrefixState state) =>
+            _wrapped.TryAttachPropertyPrefixState(state);
+
         /// <summary>
         /// Sets a property which comes from the Xml.
         /// Predecessor is any immediately previous property that was overridden by this one during evaluation.

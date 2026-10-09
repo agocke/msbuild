@@ -1362,6 +1362,493 @@ namespace Microsoft.Build.Evaluation
         internal int SourceId { get; }
     }
 
+    internal sealed class PropertyPrefixKey :
+        IEquatable<PropertyPrefixKey>
+    {
+        private readonly string[] _components;
+        private readonly int _hashCode;
+
+        internal PropertyPrefixKey(string[] components)
+        {
+            _components = components;
+
+            int hashCode = 17;
+            foreach (string component in components)
+            {
+                hashCode = unchecked(
+                    (hashCode * 31) ^
+                    (component is null
+                        ? 0
+                        : StringComparer.Ordinal.GetHashCode(component)));
+                hashCode = unchecked(
+                    (hashCode * 31) ^
+                    (component is null ? 1 : 0));
+            }
+
+            _hashCode = hashCode;
+        }
+
+        public bool Equals(PropertyPrefixKey other)
+        {
+            if (other is null ||
+                _components.Length != other._components.Length)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < _components.Length; i++)
+            {
+                if (!string.Equals(
+                        _components[i],
+                        other._components[i],
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public override bool Equals(object obj) =>
+            obj is PropertyPrefixKey other && Equals(other);
+
+        public override int GetHashCode() => _hashCode;
+    }
+
+    internal sealed class PropertyPrefixPlan
+    {
+        private readonly ConcurrentDictionary<
+            PropertyPrefixKey,
+            PropertyPrefixState> _states = new();
+        private readonly HashSet<PropertyId> _assignedPropertyIds;
+        private long _hits;
+        private long _misses;
+
+        private PropertyPrefixPlan(
+            TableRange elements,
+            ImmutableArray<CompiledPropertyExternalRead> liveIns,
+            HashSet<PropertyId> assignedPropertyIds)
+        {
+            Elements = elements;
+            LiveIns = liveIns;
+            _assignedPropertyIds = assignedPropertyIds;
+        }
+
+        internal TableRange Elements { get; }
+
+        internal ImmutableArray<CompiledPropertyExternalRead> LiveIns
+        {
+            get;
+        }
+
+        internal int CacheEntryCount => _states.Count;
+
+        internal long HitCount => Interlocked.Read(ref _hits);
+
+        internal long MissCount => Interlocked.Read(ref _misses);
+
+        internal bool ContainsAssignedProperty(PropertyId id) =>
+            _assignedPropertyIds.Contains(id);
+
+        internal bool TryGet(
+            PropertyPrefixKey key,
+            out PropertyPrefixState state)
+        {
+            if (_states.TryGetValue(key, out state))
+            {
+                Interlocked.Increment(ref _hits);
+                return true;
+            }
+
+            Interlocked.Increment(ref _misses);
+            return false;
+        }
+
+        internal void Publish(
+            PropertyPrefixKey key,
+            PropertyPrefixState state) =>
+            _states.TryAdd(key, state);
+
+        internal static PropertyPrefixPlan TryCreate(
+            EvaluationModule module)
+        {
+            if (module.Header.TopImplicitImports.Count != 0)
+            {
+                return null;
+            }
+
+            var liveIns =
+                ImmutableArray.CreateBuilder<
+                    CompiledPropertyExternalRead>();
+            var liveInIds = new HashSet<PropertyId>();
+            var assignedPropertyIds = new HashSet<PropertyId>();
+            var definitelyDefined = new HashSet<PropertyId>();
+            int prefixElementCount = 0;
+            TableRange rootElements = module.Header.RootElements;
+            for (int elementIndex = rootElements.Start;
+                 elementIndex <
+                 rootElements.Start + rootElements.Count;
+                 elementIndex++)
+            {
+                ModuleElement element = module.Elements[elementIndex];
+                if (element.Kind != ModuleElementKind.PropertyGroup)
+                {
+                    break;
+                }
+
+                PropertyGroupTemplate group =
+                    module.PropertyGroups[element.LocalIndex];
+                if (!IsEligiblePropertyGroup(module, group))
+                {
+                    break;
+                }
+
+                AddConditionLiveIns(
+                    module,
+                    group.CompiledConditionId,
+                    definitelyDefined,
+                    liveInIds,
+                    liveIns);
+
+                int propertyEnd =
+                    group.Properties.Start + group.Properties.Count;
+                for (int propertyIndex = group.Properties.Start;
+                     propertyIndex < propertyEnd;
+                     propertyIndex++)
+                {
+                    PropertyTemplate property =
+                        module.Properties[propertyIndex];
+                    if (property.IsDeadStore)
+                    {
+                        continue;
+                    }
+
+                    AddConditionLiveIns(
+                        module,
+                        property.CompiledConditionId,
+                        definitelyDefined,
+                        liveInIds,
+                        liveIns);
+                    AddPropertyValueLiveIns(
+                        module,
+                        property,
+                        definitelyDefined,
+                        liveInIds,
+                        liveIns);
+
+                    assignedPropertyIds.Add(property.PropertyId);
+
+                    if (group.CompiledConditionId == 0 &&
+                        property.CompiledConditionId == 0)
+                    {
+                        definitelyDefined.Add(property.PropertyId);
+                    }
+                }
+
+                prefixElementCount++;
+            }
+
+            return prefixElementCount == 0 ||
+                   assignedPropertyIds.Count == 0
+                ? null
+                : new PropertyPrefixPlan(
+                    new TableRange(
+                        rootElements.Start,
+                        prefixElementCount),
+                    liveIns.ToImmutable(),
+                    assignedPropertyIds);
+        }
+
+        private static bool IsEligiblePropertyGroup(
+            EvaluationModule module,
+            PropertyGroupTemplate group)
+        {
+            if (group.CompiledConditionId < 0 ||
+                !IsEligibleCondition(
+                    module,
+                    group.CompiledConditionId))
+            {
+                return false;
+            }
+
+            int segmentEnd =
+                group.PropertySegments.Start +
+                group.PropertySegments.Count;
+            for (int segmentIndex = group.PropertySegments.Start;
+                 segmentIndex < segmentEnd;
+                 segmentIndex++)
+            {
+                if (module.PropertySegments[segmentIndex].Kind !=
+                    PropertySegmentKind.CompiledEffectBatch)
+                {
+                    return false;
+                }
+            }
+
+            int propertyEnd =
+                group.Properties.Start + group.Properties.Count;
+            for (int propertyIndex = group.Properties.Start;
+                 propertyIndex < propertyEnd;
+                 propertyIndex++)
+            {
+                PropertyTemplate property =
+                    module.Properties[propertyIndex];
+                if (property.RequiresExpansion ||
+                    property.CompiledConditionId < 0 ||
+                    !IsEligibleCondition(
+                        module,
+                        property.CompiledConditionId))
+                {
+                    return false;
+                }
+
+                TableRange parts = property.CompiledValueParts;
+                for (int partIndex = parts.Start;
+                     partIndex < parts.Start + parts.Count;
+                     partIndex++)
+                {
+                    if (module.CompiledPropertyValueParts[partIndex].Kind is
+                        CompiledPropertyValuePartKind
+                            .ContextualPropertyReference or
+                        CompiledPropertyValuePartKind.Function)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsEligibleCondition(
+            EvaluationModule module,
+            int conditionId)
+        {
+            if (conditionId == 0)
+            {
+                return true;
+            }
+
+            CompiledCondition condition =
+                module.CompiledConditions[conditionId];
+            TableRange instructions = condition.Instructions;
+            for (int instructionIndex = instructions.Start;
+                 instructionIndex <
+                 instructions.Start + instructions.Count;
+                 instructionIndex++)
+            {
+                CompiledConditionInstruction instruction =
+                    module.CompiledConditionInstructions[
+                        instructionIndex];
+                if (instruction.Kind is
+                    CompiledConditionInstructionKind
+                        .BranchIfComparisonFalse or
+                    CompiledConditionInstructionKind
+                        .BranchIfComparisonTrue or
+                    CompiledConditionInstructionKind.ReturnComparison)
+                {
+                    CompiledConditionComparison comparison =
+                        module.CompiledConditionComparisons[
+                            instruction.Argument0];
+                    if (!IsEligibleConditionOperand(
+                            module,
+                            comparison.Left) ||
+                        !IsEligibleConditionOperand(
+                            module,
+                            comparison.Right))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsEligibleConditionOperand(
+            EvaluationModule module,
+            CompiledConditionOperand operand)
+        {
+            if (operand.Kind is
+                CompiledConditionOperandKind.Literal or
+                CompiledConditionOperandKind.Property)
+            {
+                return true;
+            }
+
+            if (operand.Kind !=
+                CompiledConditionOperandKind.ExpandedValue)
+            {
+                return false;
+            }
+
+            for (int partIndex = operand.Value;
+                 partIndex < operand.Value + operand.Count;
+                 partIndex++)
+            {
+                if (module.CompiledConditionValueParts[partIndex].Kind is
+                    not (CompiledConditionValuePartKind.Literal or
+                    CompiledConditionValuePartKind.Property))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static void AddConditionLiveIns(
+            EvaluationModule module,
+            int conditionId,
+            HashSet<PropertyId> definitelyDefined,
+            HashSet<PropertyId> liveInIds,
+            ImmutableArray<CompiledPropertyExternalRead>.Builder liveIns)
+        {
+            if (conditionId == 0)
+            {
+                return;
+            }
+
+            CompiledCondition condition =
+                module.CompiledConditions[conditionId];
+            var visitedComparisons = new HashSet<int>();
+            TableRange instructions = condition.Instructions;
+            for (int instructionIndex = instructions.Start;
+                 instructionIndex <
+                 instructions.Start + instructions.Count;
+                 instructionIndex++)
+            {
+                CompiledConditionInstruction instruction =
+                    module.CompiledConditionInstructions[
+                        instructionIndex];
+                if (instruction.Kind is not (
+                        CompiledConditionInstructionKind
+                            .BranchIfComparisonFalse or
+                        CompiledConditionInstructionKind
+                            .BranchIfComparisonTrue or
+                        CompiledConditionInstructionKind
+                            .ReturnComparison) ||
+                    !visitedComparisons.Add(instruction.Argument0))
+                {
+                    continue;
+                }
+
+                CompiledConditionComparison comparison =
+                    module.CompiledConditionComparisons[
+                        instruction.Argument0];
+                AddConditionOperandLiveIns(
+                    module,
+                    comparison.Left,
+                    definitelyDefined,
+                    liveInIds,
+                    liveIns);
+                AddConditionOperandLiveIns(
+                    module,
+                    comparison.Right,
+                    definitelyDefined,
+                    liveInIds,
+                    liveIns);
+            }
+        }
+
+        private static void AddConditionOperandLiveIns(
+            EvaluationModule module,
+            CompiledConditionOperand operand,
+            HashSet<PropertyId> definitelyDefined,
+            HashSet<PropertyId> liveInIds,
+            ImmutableArray<CompiledPropertyExternalRead>.Builder liveIns)
+        {
+            if (operand.Kind == CompiledConditionOperandKind.Property)
+            {
+                AddLiveIn(
+                    module.CompiledConditionPropertyReads[operand.Value],
+                    definitelyDefined,
+                    liveInIds,
+                    liveIns);
+                return;
+            }
+
+            if (operand.Kind !=
+                CompiledConditionOperandKind.ExpandedValue)
+            {
+                return;
+            }
+
+            for (int partIndex = operand.Value;
+                 partIndex < operand.Value + operand.Count;
+                 partIndex++)
+            {
+                CompiledConditionValuePart part =
+                    module.CompiledConditionValueParts[partIndex];
+                if (part.Kind ==
+                    CompiledConditionValuePartKind.Property)
+                {
+                    AddLiveIn(
+                        module.CompiledConditionPropertyReads[
+                            part.Value],
+                        definitelyDefined,
+                        liveInIds,
+                        liveIns);
+                }
+            }
+        }
+
+        private static void AddPropertyValueLiveIns(
+            EvaluationModule module,
+            PropertyTemplate property,
+            HashSet<PropertyId> definitelyDefined,
+            HashSet<PropertyId> liveInIds,
+            ImmutableArray<CompiledPropertyExternalRead>.Builder liveIns)
+        {
+            TableRange parts = property.CompiledValueParts;
+            for (int partIndex = parts.Start;
+                 partIndex < parts.Start + parts.Count;
+                 partIndex++)
+            {
+                CompiledPropertyValuePart part =
+                    module.CompiledPropertyValueParts[partIndex];
+                switch (part.Kind)
+                {
+                    case CompiledPropertyValuePartKind
+                        .ExternalPropertyReference:
+                        AddLiveIn(
+                            module.CompiledPropertyExternalReads[
+                                part.Value],
+                            definitelyDefined,
+                            liveInIds,
+                            liveIns);
+                        break;
+                    case CompiledPropertyValuePartKind
+                        .PropertyReference:
+                        PropertyTemplate referencedProperty =
+                            module.Properties[part.Value];
+                        AddLiveIn(
+                            new CompiledPropertyExternalRead(
+                                referencedProperty.PropertyId,
+                                referencedProperty.NameStringId),
+                            definitelyDefined,
+                            liveInIds,
+                            liveIns);
+                        break;
+                }
+            }
+        }
+
+        private static void AddLiveIn(
+            CompiledPropertyExternalRead read,
+            HashSet<PropertyId> definitelyDefined,
+            HashSet<PropertyId> liveInIds,
+            ImmutableArray<CompiledPropertyExternalRead>.Builder liveIns)
+        {
+            if (!definitelyDefined.Contains(read.PropertyId) &&
+                liveInIds.Add(read.PropertyId))
+            {
+                liveIns.Add(read);
+            }
+        }
+    }
+
     internal sealed class EvaluationModule
     {
         private readonly ImmutableDictionary<ProjectPropertyElement, PropertyAssignmentOperation>
@@ -1373,6 +1860,9 @@ namespace Microsoft.Build.Evaluation
         private readonly ConcurrentDictionary<long, PropertyDelta>
             _constantPropertyDeltas =
                 new ConcurrentDictionary<long, PropertyDelta>();
+        private PropertyPrefixPlan _propertyPrefix;
+        private bool _propertyPrefixInitialized;
+        private object _propertyPrefixInitializationLock;
         private readonly ConcurrentDictionary<
             (int CacheKey, string EvaluatedItemSpec),
             ItemSpecFragmentDescriptor[]> _expandedItemSpecs = new();
@@ -1544,6 +2034,13 @@ namespace Microsoft.Build.Evaluation
         internal ImmutableArray<PropertyAssignmentOperation> PropertyAssignments { get; }
 
         internal ImmutableArray<ConditionOperation> PropertyGroupConditionOperations { get; }
+
+        internal PropertyPrefixPlan PropertyPrefix =>
+            LazyInitializer.EnsureInitialized(
+                ref _propertyPrefix,
+                ref _propertyPrefixInitialized,
+                ref _propertyPrefixInitializationLock,
+                () => PropertyPrefixPlan.TryCreate(this));
 
         internal string GetExpressionValue(int expressionId)
         {

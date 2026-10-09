@@ -316,6 +316,19 @@ namespace Microsoft.Build.Evaluation
         bool TryApplyPropertyDelta(PropertyDelta delta);
 
         /// <summary>
+        /// Attempts to capture the current compact property state as an immutable
+        /// reusable prefix.
+        /// </summary>
+        bool TryCreatePropertyPrefixState(
+            out PropertyPrefixState state);
+
+        /// <summary>
+        /// Attempts to install an immutable reusable prefix as the compact
+        /// property base.
+        /// </summary>
+        bool TryAttachPropertyPrefixState(PropertyPrefixState state);
+
+        /// <summary>
         /// Publishes a contiguous range of constant compiled property effects
         /// without design-time history.
         /// </summary>

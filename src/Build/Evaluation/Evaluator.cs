@@ -1163,12 +1163,117 @@ namespace Microsoft.Build.Evaluation
             {
                 ApplyModuleHeader(module);
                 EvaluateModuleImports(module, module.Header.TopImplicitImports);
+                TableRange rootElements = module.Header.RootElements;
+                int consumedPrefixElements =
+                    ReferenceEquals(
+                        module.Source,
+                        _projectRootElement)
+                        ? EvaluatePropertyPrefix(module)
+                        : 0;
                 EvaluateModuleElements(
                     module,
-                    module.Header.RootElements,
+                    new TableRange(
+                        rootElements.Start + consumedPrefixElements,
+                        rootElements.Count - consumedPrefixElements),
                     trackElements: false);
                 EvaluateModuleImports(module, module.Header.BottomImplicitImports);
             }
+        }
+
+        private int EvaluatePropertyPrefix(EvaluationModule module)
+        {
+            PropertyPrefixPlan prefix = module.PropertyPrefix;
+            if (!_evaluationContext.UseCompiledModuleEffectBatches ||
+                prefix is null ||
+                _data.ShouldEvaluateForDesignTime ||
+                !TryCreatePropertyPrefixKey(
+                    module,
+                    prefix,
+                    out PropertyPrefixKey key))
+            {
+                return 0;
+            }
+
+            if (prefix.TryGet(key, out PropertyPrefixState cached))
+            {
+                return _data.TryAttachPropertyPrefixState(cached)
+                    ? prefix.Elements.Count
+                    : 0;
+            }
+
+            EvaluateModuleElements(
+                module,
+                prefix.Elements,
+                trackElements: false);
+            if (_data.TryCreatePropertyPrefixState(
+                    out PropertyPrefixState candidate))
+            {
+                prefix.Publish(key, candidate);
+            }
+
+            return prefix.Elements.Count;
+        }
+
+        private bool TryCreatePropertyPrefixKey(
+            EvaluationModule module,
+            PropertyPrefixPlan prefix,
+            out PropertyPrefixKey key)
+        {
+            var components = new List<string>(
+                prefix.LiveIns.Length + 4);
+            foreach (CompiledPropertyExternalRead liveIn in
+                     prefix.LiveIns)
+            {
+                components.Add(
+                    _data.TryGetEscapedPropertyValue(
+                        liveIn.PropertyId,
+                        module.GetStringValue(liveIn.NameStringId),
+                        ElementLocation.EmptyLocation,
+                        out string escapedValue)
+                        ? escapedValue
+                        : null);
+            }
+
+            var localGlobalOverrides =
+                new List<(PropertyId Id, string Value)>();
+            foreach (ProjectPropertyInstance globalProperty in
+                     _data.GlobalPropertiesDictionary)
+            {
+                if (!_evaluationContext.EvaluationModuleCache
+                        .PropertyIdentities.TryGetId(
+                            globalProperty.Name,
+                            out PropertyId propertyId) ||
+                    !prefix.ContainsAssignedProperty(propertyId))
+                {
+                    continue;
+                }
+
+                if (!_data.GlobalPropertiesToTreatAsLocal.Contains(
+                        globalProperty.Name))
+                {
+                    key = null;
+                    return false;
+                }
+
+                localGlobalOverrides.Add((
+                    propertyId,
+                    ((IProperty)globalProperty)
+                        .EvaluatedValueEscaped));
+            }
+
+            localGlobalOverrides.Sort(
+                static (left, right) =>
+                    left.Id.Value.CompareTo(right.Id.Value));
+            foreach ((PropertyId id, string value) in
+                     localGlobalOverrides)
+            {
+                components.Add(id.Value.ToString(
+                    CultureInfo.InvariantCulture));
+                components.Add(value);
+            }
+
+            key = new PropertyPrefixKey(components.ToArray());
+            return true;
         }
 
         private void ApplyModuleHeader(EvaluationModule module)

@@ -2073,6 +2073,22 @@ namespace Microsoft.Build.Execution
             return true;
         }
 
+        bool IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.TryCreatePropertyPrefixState(
+            out PropertyPrefixState state)
+        {
+            if (_compactProperties is null)
+            {
+                state = null;
+                return false;
+            }
+
+            return _compactProperties.TryCreatePrefixState(out state);
+        }
+
+        bool IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.TryAttachPropertyPrefixState(
+            PropertyPrefixState state) =>
+            _compactProperties?.TryAttachPrefixState(state) == true;
+
         /// <summary>
         /// Retrieves an existing target, if any.
         /// </summary>
@@ -2129,18 +2145,16 @@ namespace Microsoft.Build.Execution
         [DebuggerStepThrough]
         public ProjectPropertyInstance GetProperty(string name)
         {
-            ProjectPropertyInstance property = _properties[name];
-            if (property is not null ||
-                _compactProperties is null ||
+            if (_compactProperties is null ||
                 !_compactProperties.TryGet(
                     name,
                     out PropertyId propertyId,
                     out PropertyValueRef compactValue))
             {
-                return property;
+                return _properties[name];
             }
 
-            property = ProjectPropertyInstance.Create(
+            ProjectPropertyInstance property = ProjectPropertyInstance.Create(
                 _compactProperties.GetName(propertyId),
                 compactValue.EscapedValue,
                 mayBeReserved: false,
@@ -2158,17 +2172,26 @@ namespace Microsoft.Build.Execution
         [DebuggerStepThrough]
         ProjectPropertyInstance IPropertyProvider<ProjectPropertyInstance>.GetProperty(string name, int startIndex, int endIndex)
         {
-            ProjectPropertyInstance property =
-                _properties.GetProperty(name, startIndex, endIndex);
-            if (property is not null || _compactProperties is null)
+            if (_compactProperties is not null &&
+                _compactProperties.TryGet(
+                    name.Substring(
+                        startIndex,
+                        endIndex - startIndex + 1),
+                    out PropertyId propertyId,
+                    out PropertyValueRef compactValue))
             {
+                ProjectPropertyInstance property =
+                    ProjectPropertyInstance.Create(
+                        _compactProperties.GetName(propertyId),
+                        compactValue.EscapedValue,
+                        mayBeReserved: false,
+                        _isImmutable);
+                _compactProperties.Remove(propertyId);
+                _properties.Set(property);
                 return property;
             }
 
-            return GetProperty(
-                name.Substring(
-                    startIndex,
-                    endIndex - startIndex + 1));
+            return _properties.GetProperty(name, startIndex, endIndex);
         }
 
         bool IPropertyValueProvider.TryGetEscapedPropertyValue(
