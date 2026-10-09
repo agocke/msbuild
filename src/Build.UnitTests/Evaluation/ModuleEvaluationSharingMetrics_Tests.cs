@@ -2839,6 +2839,200 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 .ShouldBe(-1);
         }
 
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void SpecializedMetadataValuesPreserveOrderedWritesAndConfiguration(bool useProjectInstance)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "specialized-metadata.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <First>first</First>
+                    <Second>second</Second>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Input Include="skip.cs;one.cs;two.txt;three.cs">
+                      <Stable Condition="'%(Filename)' != 'skip'">$(First)-$(Second)-$(Flavor)</Stable>
+                      <Value>$(First)-%(Filename)-$(Second)-%(Extension)-$(Flavor)</Value>
+                      <Long>%(Filename)$(First)%(Extension)$(Second)%(Identity)$(Flavor)%(Filename)</Long>
+                      <Previous>before-%(Filename)</Previous>
+                      <Previous>%(Previous)-$(First)-$(Second)</Previous>
+                      <ObservedValue>$(Observed)-%(Filename)</ObservedValue>
+                      <LaterRead Condition="'%(Filename)' == 'skip'">$(Observed)</LaterRead>
+                      <Skipped Condition="'false' == 'true'">$([System.IO.File]::ReadAllText('missing.file'))</Skipped>
+                    </Input>
+                    <Input Update="@(Input)">
+                      <Previous>%(Previous)-updated</Previous>
+                      <Value>$(Flavor)-%(Previous)-$(First)$(Second)</Value>
+                    </Input>
+                  </ItemGroup>
+                </Project>
+                """);
+            EvaluationContext context =
+                EvaluationContext.CreateForCompiledModuleEvaluation(useCompiledModuleEffectBatches: true);
+
+            string[] flavors = ["debug", "release"];
+            foreach (string flavor in flavors)
+            {
+                var globals = new Dictionary<string, string>
+                {
+                    ["Flavor"] = flavor,
+                    ["Observed"] = "observed",
+                };
+                var optimizedOptions = new ProjectOptions
+                {
+                    EvaluationContext = context,
+                    GlobalProperties = globals,
+                    ProjectCollection = environment.CreateProjectCollection().Collection,
+                };
+                var scalarOptions = new ProjectOptions
+                {
+                    EvaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated),
+                    GlobalProperties = globals,
+                    ProjectCollection = environment.CreateProjectCollection().Collection,
+                };
+                if (useProjectInstance)
+                {
+                    ProjectInstance optimized = ProjectInstance.FromFile(projectFile.Path, optimizedOptions);
+                    ProjectInstance scalar = ProjectInstance.FromFile(projectFile.Path, scalarOptions);
+                    AssertSpecializedMetadata(
+                        optimized.GetItems("Input").Select(item => new Func<string, string>(item.GetMetadataValue)).ToArray(),
+                        scalar.GetItems("Input").Select(item => new Func<string, string>(item.GetMetadataValue)).ToArray(),
+                        flavor);
+                    optimized.GetProperty("Observed").Location.ShouldBe(scalar.GetProperty("Observed").Location);
+                }
+                else
+                {
+                    Project optimized = Project.FromFile(projectFile.Path, optimizedOptions);
+                    Project scalar = Project.FromFile(projectFile.Path, scalarOptions);
+                    AssertSpecializedMetadata(
+                        optimized.GetItems("Input").Select(item => new Func<string, string>(item.GetMetadataValue)).ToArray(),
+                        scalar.GetItems("Input").Select(item => new Func<string, string>(item.GetMetadataValue)).ToArray(),
+                        flavor);
+                    optimized.GetItems("Input").ElementAt(1).GetMetadata("Previous").Predecessor.EvaluatedValue
+                        .ShouldBe("before-one-first-second");
+                    optimized.GetProperty("Observed").Location.ShouldBe(scalar.GetProperty("Observed").Location);
+                }
+            }
+
+            static void AssertSpecializedMetadata(
+                Func<string, string>[] optimized,
+                Func<string, string>[] scalar,
+                string flavor)
+            {
+                optimized.Length.ShouldBe(4);
+                string[] names = ["Stable", "Value", "Long", "Previous", "ObservedValue", "LaterRead", "Skipped"];
+                foreach (string name in names)
+                {
+                    optimized.Select(getValue => getValue(name))
+                        .ShouldBe(scalar.Select(getValue => getValue(name)));
+                }
+
+                optimized[0]("Stable").ShouldBeEmpty();
+                optimized[1]("Stable").ShouldBe($"first-second-{flavor}");
+                optimized[3]("Stable").ShouldBeSameAs(optimized[2]("Stable"));
+                optimized[1]("Value").ShouldBe($"{flavor}-before-one-first-second-updated-firstsecond");
+            }
+        }
+
+        [Theory]
+        [InlineData("@(Source)")]
+        [InlineData("%(Filename)")]
+        [InlineData("$(Undefined)")]
+        [InlineData("%24%28Undefined%29;%25%28Filename%29;%40%28Source%29")]
+        [InlineData("$")]
+        public void SpecializedMetadataValuesPreserveIntroducedSyntaxFallback(string injected)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "specialized-fallback.proj",
+                """
+                <Project>
+                  <ItemGroup>
+                    <Source Include="source.cs" />
+                    <Input Include="one.cs;two.txt;three.cs">
+                      <Value>%(Filename)-$(Injected)</Value>
+                      <AcrossParts>$(Injected)(Undefined)-%(Filename)</AcrossParts>
+                      <Empty>$(Undefined)%(Missing)</Empty>
+                    </Input>
+                  </ItemGroup>
+                </Project>
+                """);
+            var globals = new Dictionary<string, string> { ["Injected"] = injected };
+            ProjectInstance optimized = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext =
+                        EvaluationContext.CreateForCompiledModuleEvaluation(useCompiledModuleEffectBatches: true),
+                    GlobalProperties = globals,
+                    ProjectCollection = environment.CreateProjectCollection().Collection,
+                });
+            ProjectInstance scalar = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated),
+                    GlobalProperties = globals,
+                    ProjectCollection = environment.CreateProjectCollection().Collection,
+                });
+
+            optimized.GetItems("Input")
+                .Select(item => $"{item.EvaluatedInclude}|{item.GetMetadataValue("Value")}|{item.GetMetadataValue("AcrossParts")}|{item.GetMetadataValue("Empty")}")
+                .ShouldBe(scalar.GetItems("Input")
+                    .Select(item => $"{item.EvaluatedInclude}|{item.GetMetadataValue("Value")}|{item.GetMetadataValue("AcrossParts")}|{item.GetMetadataValue("Empty")}"));
+        }
+
+        [Fact]
+        public void SpecializedMetadataValuesKeepCapturedQualifiedMetadataDynamic()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "specialized-captured.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Prefix>prefix</Prefix>
+                    <Suffix>suffix</Suffix>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Source Include="one.cs"><Marker>first</Marker></Source>
+                    <Source Include="two.cs"><Marker>second</Marker></Source>
+                    <Input Include="one.cs;two.cs"><Marker>original</Marker></Input>
+                    <Input Update="@(Source)">
+                      <Marker>$(Prefix)-%(Source.Marker)-$(Suffix)</Marker>
+                      <Combined>%(Input.Marker)-$(Prefix)$(Suffix)-%(Source.Filename)</Combined>
+                    </Input>
+                  </ItemGroup>
+                </Project>
+                """);
+            ProjectInstance optimized = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext =
+                        EvaluationContext.CreateForCompiledModuleEvaluation(useCompiledModuleEffectBatches: true),
+                    ProjectCollection = environment.CreateProjectCollection().Collection,
+                });
+            ProjectInstance scalar = ProjectInstance.FromFile(
+                projectFile.Path,
+                new ProjectOptions
+                {
+                    EvaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated),
+                    ProjectCollection = environment.CreateProjectCollection().Collection,
+                });
+
+            optimized.GetItems("Input")
+                .Select(item => item.GetMetadataValue("Combined"))
+                .ShouldBe(scalar.GetItems("Input").Select(item => item.GetMetadataValue("Combined")));
+            optimized.GetItems("Input")
+                .Select(item => item.GetMetadataValue("Combined"))
+                .ShouldBe(["prefix-first-suffix-prefixsuffix-one", "prefix-second-suffix-prefixsuffix-two"]);
+        }
+
         [Fact]
         public void CompactModuleCacheRelowersMutatedRoot()
         {

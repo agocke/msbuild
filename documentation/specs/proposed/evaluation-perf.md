@@ -157,3 +157,76 @@ The paired user-CPU saving was 5.357 seconds, with an interval of -2.206 to
 succeeded, and all saved 760 asset path/hash pairs matched the candidate
 control. The bounded change is retained for its repeatable allocation savings,
 not a claimed macro win. Further operation specialization remains separate.
+
+## Specialize repeated item metadata expressions
+
+The existing compiled metadata-value interpreter already lowers literal,
+property, and metadata references. An operation-local residual program now
+folds each maximal contiguous literal/property region, including interior
+regions, against the finalized item-pass property environment. Current-item
+and captured qualified metadata remain dynamic. Short residual expressions
+execute direct reads and `string.Concat`; longer expressions retain an
+ordered builder loop.
+
+Binding happens only after a metadata condition succeeds and after the
+operation has already decorated an item. Single-part expressions retain
+their existing fast path. The first binding evaluates source parts in their
+original order. Materialized property references are retained as residual
+read observers, preserving environment-read notifications and the last-read
+location used by BuildCheck without repeating property lookup. Compact
+property values bind without materializing property objects. Programs belong
+to the lazy item operation, not the shared module or another configuration.
+Conditions, writes, predecessor history, expansion-syntax fallback, and the
+filesystem-dependent path-adjustment heuristic remain at runtime. This is
+part of the existing compiled-module effect-batching opt-in.
+
+The first eager prototype added about 53 MiB of exclusive item-operation
+allocation by binding many single-use expressions. Delaying binding removed
+that cost, but retaining property lookup for every residual observation did
+not show repeatable expansion-CPU savings. Binding property observers
+separately from their stable values produced the following two balanced
+diagnostic pairs, with identical item probes and standard meters disabled.
+Both variants include the committed no-slash helper; only the engine assembly
+was exchanged. Each NuGet child executed 777,850 `ProjectToBuild` metadata
+expansions and 1,655 Update decorations:
+
+| Metric | Previous interpreter | Bound residual program |
+| --- | ---: | ---: |
+| Mean expansion aggregate thread CPU | 3.002 s | 2.140 s |
+| Mean expansion allocated bytes | 153,869,796 | 154,855,360 |
+| Mean Update decoration aggregate thread CPU | 13.224 s | 12.114 s |
+| Mean Update decoration allocated bytes | 501,648,660 | 502,618,108 |
+
+Expansion CPU fell in both pairs (by 0.925 and 0.797 aggregate seconds),
+averaging about **0.861 seconds (28.7%)**, with about **0.94 MiB** additional
+allocation for binding in that section. Across all profiled item operations,
+exclusive allocation was about 2.8 MiB lower on average; this small difference
+is not attributed wholly to the specializer. All four restores succeeded and
+all 760 asset path/hash pairs matched.
+
+These are instrumented, aggregate thread-CPU observations, not graph elapsed
+time or a statistically established CPU or restore wall-time improvement.
+
+Ten subsequent counter-free, order-balanced restore pairs after one warmup
+per variant compared the previous interpreter plus the committed no-slash
+helper with the residual-program implementation. Both variants ran from the
+same isolated SDK with the same package cache, asynchronous logging, and
+three evaluation/action-graph opt-ins. Neither engine contained the temporary
+item probes; no meter listener, startup hook, or binary logger was enabled.
+Only `Microsoft.Build.dll` changed between variants:
+
+| Metric | Previous interpreter | Bound residual program | Paired saving (95% CI) |
+| --- | ---: | ---: | ---: |
+| Mean restore wall time | 19.612 s | 19.517 s | 0.095 s [-0.185, 0.375] |
+| Mean user CPU time | 138.168 s | 137.549 s | 0.619 s [-2.423, 3.661] |
+| Mean system CPU time | 12.829 s | 12.883 s | -0.054 s [-0.657, 0.549] |
+| Mean peak RSS | 2,129,199 KiB | 2,163,379 KiB | -34,180 KiB [-95,104, 26,744] |
+
+The mean wall saving is about **0.5%**, but its paired Student-t interval
+includes zero: **no end-to-end gain or regression is established**. The
+user-CPU comparison is also inconclusive. Peak RSS averaged about 33.4 MiB
+higher, with an inconclusive paired interval. All 22 restores, including
+warmups, succeeded, and every snapshot's 760 asset path/hash pairs matched.
+These samples are a new paired cohort; their absolute times should not be
+compared directly with earlier experiments to attribute additional savings.
+The phase-level CPU reduction remains the demonstrated benefit.

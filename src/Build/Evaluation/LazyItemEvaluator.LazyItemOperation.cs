@@ -25,6 +25,8 @@ namespace Microsoft.Build.Evaluation
             private EvaluatorData _operationEvaluatorData;
             private ItemFactoryWrapper _operationItemFactory;
             private Expander<P, I> _operationExpander;
+            private SpecializedMetadataValue[] _specializedMetadataValues;
+            private bool _metadataWasDecorated;
 
             protected readonly LazyItemEvaluator<P, I, M, D> _lazyEvaluator;
             protected readonly ProjectItemElement _itemElement;
@@ -346,6 +348,7 @@ namespace Microsoft.Build.Evaluation
 
                     if (needToExpandMetadata.Value)
                     {
+                        bool specializeValues = _metadataWasDecorated;
                         foreach (var itemContext in itemBatchingContexts)
                         {
                             _expander.Metadata = itemContext.GetMetadataTable();
@@ -370,8 +373,12 @@ namespace Microsoft.Build.Evaluation
                                         metadata,
                                         i,
                                         metadataElement,
-                                        metadataExpansionOptions));
+                                        metadataExpansionOptions,
+                                        specializeValues));
                             }
+
+                            specializeValues = true;
+                            _metadataWasDecorated = true;
                         }
 
                         // End of legal area for metadata expressions.
@@ -438,7 +445,8 @@ namespace Microsoft.Build.Evaluation
                 DeferredMetadata metadata,
                 int index,
                 ProjectMetadataElement metadataElement,
-                ExpanderOptions expanderOptions)
+                ExpanderOptions expanderOptions,
+                bool specialize = false)
             {
                 TableRange compiledParts =
                     metadata.GetCompiledValueParts(index);
@@ -446,12 +454,41 @@ namespace Microsoft.Build.Evaluation
                         .UseCompiledModuleEffectBatches &&
                     compiledParts.Start >= 0)
                 {
-                    string compiledValue =
-                        EvaluateCompiledMetadataValueExpansion(
+                    string compiledValue;
+                    if (specialize && compiledParts.Count > 1)
+                    {
+                        _specializedMetadataValues ??=
+                            new SpecializedMetadataValue[metadata.Count];
+                        SpecializedMetadataValue specialized =
+                            _specializedMetadataValues[index];
+                        if (specialized is null)
+                        {
+                            specialized = SpecializeMetadataValue(
+                                metadata.Module,
+                                compiledParts,
+                                metadataElement.Location,
+                                out compiledValue);
+                            _specializedMetadataValues[index] = specialized;
+                        }
+                        else
+                        {
+                            compiledValue = specialized.Evaluate(
+                                _expander.Metadata,
+                                metadataElement.Location);
+                        }
+                    }
+                    else
+                    {
+                        compiledValue = EvaluateCompiledMetadataValueExpansion(
                             metadata.Module,
                             compiledParts,
-                            metadataElement.Location,
-                            metadata.GetDirectory(index));
+                            metadataElement.Location);
+                    }
+
+                    // Path adjustment can observe the filesystem, even for a constant value.
+                    compiledValue = FileUtilities.MaybeAdjustFilePath(
+                        compiledValue,
+                        metadata.GetDirectory(index));
 
                     if (!compiledValue.Contains(
                             "$(",
@@ -480,84 +517,237 @@ namespace Microsoft.Build.Evaluation
             private string EvaluateCompiledMetadataValueExpansion(
                 EvaluationModule module,
                 TableRange parts,
-                IElementLocation location,
-                string directory)
+                IElementLocation location)
             {
-                string expanded;
                 if (parts.Count == 1)
                 {
-                    expanded = EvaluateCompiledMetadataValueExpansionPart(
-                        module,
-                        parts.Start,
-                        location);
+                    return EvaluateCompiledMetadataValueExpansionPart(module, parts.Start, location);
                 }
-                else if (parts.Count == 2)
+
+                if (parts.Count == 2)
                 {
-                    expanded = string.Concat(
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start,
-                            location),
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start + 1,
-                            location));
+                    return string.Concat(
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start, location),
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start + 1, location));
                 }
-                else if (parts.Count == 3)
+
+                if (parts.Count == 3)
                 {
-                    expanded = string.Concat(
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start,
-                            location),
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start + 1,
-                            location),
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start + 2,
-                            location));
+                    return string.Concat(
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start, location),
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start + 1, location),
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start + 2, location));
                 }
-                else if (parts.Count == 4)
+
+                if (parts.Count == 4)
                 {
-                    expanded = string.Concat(
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start,
-                            location),
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start + 1,
-                            location),
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start + 2,
-                            location),
-                        EvaluateCompiledMetadataValueExpansionPart(
-                            module,
-                            parts.Start + 3,
-                            location));
+                    return string.Concat(
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start, location),
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start + 1, location),
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start + 2, location),
+                        EvaluateCompiledMetadataValueExpansionPart(module, parts.Start + 3, location));
                 }
-                else
+
+                var builder = new StringBuilder();
+                int end = parts.Start + parts.Count;
+                for (int i = parts.Start; i < end; i++)
                 {
-                    var builder = new StringBuilder();
-                    int end = parts.Start + parts.Count;
-                    for (int i = parts.Start; i < end; i++)
+                    builder.Append(EvaluateCompiledMetadataValueExpansionPart(module, i, location));
+                }
+
+                return builder.ToString();
+            }
+
+            private SpecializedMetadataValue SpecializeMetadataValue(
+                EvaluationModule module,
+                TableRange parts,
+                IElementLocation location,
+                out string expanded)
+            {
+                string[] values = new string[parts.Count];
+                P[] observers = new P[parts.Count];
+                for (int i = 0; i < values.Length; i++)
+                {
+                    // Bind only after the condition succeeds, preserving first-use read order.
+                    CompiledMetadataValuePart part = module.CompiledMetadataValueParts[parts.Start + i];
+                    if (part.Kind == CompiledMetadataValuePartKind.Property)
                     {
-                        builder.Append(
-                            EvaluateCompiledMetadataValueExpansionPart(
-                                module,
-                                i,
-                                location));
+                        CompiledPropertyExternalRead read = module.CompiledConditionPropertyReads[part.Value];
+                        values[i] = _evaluatorData.TryGetEscapedPropertyValue(
+                            read.PropertyId,
+                            module.GetStringValue(read.NameStringId),
+                            location,
+                            out string value,
+                            out observers[i])
+                            ? value
+                            : string.Empty;
+                    }
+                    else
+                    {
+                        values[i] = EvaluateCompiledMetadataValueExpansionPart(
+                            module,
+                            parts.Start + i,
+                            location);
+                    }
+                }
+
+                var residual = new List<SpecializedMetadataValuePart>();
+                var propertyReads = new List<P>();
+                int start = 0;
+                while (start < parts.Count)
+                {
+                    CompiledMetadataValuePart part =
+                        module.CompiledMetadataValueParts[parts.Start + start];
+                    if (part.Kind == CompiledMetadataValuePartKind.Metadata)
+                    {
+                        residual.Add(new SpecializedMetadataValuePart(
+                            module.GetStringValue(part.Count),
+                            module.GetStringValue(part.Value),
+                            default));
+                        start++;
+                        continue;
                     }
 
-                    expanded = builder.ToString();
+                    int end = start;
+                    int readStart = propertyReads.Count;
+                    while (end < parts.Count)
+                    {
+                        part = module.CompiledMetadataValueParts[parts.Start + end];
+                        if (part.Kind == CompiledMetadataValuePartKind.Metadata)
+                        {
+                            break;
+                        }
+
+                        if (observers[end] is not null)
+                        {
+                            propertyReads.Add(observers[end]);
+                        }
+
+                        end++;
+                    }
+
+                    string value;
+                    int count = end - start;
+                    if (count == 1)
+                    {
+                        value = values[start];
+                    }
+                    else if (count == 2)
+                    {
+                        value = string.Concat(values[start], values[start + 1]);
+                    }
+                    else if (count == 3)
+                    {
+                        value = string.Concat(values[start], values[start + 1], values[start + 2]);
+                    }
+                    else if (count == 4)
+                    {
+                        value = string.Concat(values[start], values[start + 1], values[start + 2], values[start + 3]);
+                    }
+                    else
+                    {
+                        var builder = new StringBuilder();
+                        for (int i = start; i < end; i++)
+                        {
+                            builder.Append(values[i]);
+                        }
+
+                        value = builder.ToString();
+                    }
+
+                    residual.Add(new SpecializedMetadataValuePart(
+                        value,
+                        itemType: null,
+                        new TableRange(readStart, propertyReads.Count - readStart)));
+                    start = end;
                 }
 
-                return FileUtilities.MaybeAdjustFilePath(
-                    expanded,
-                    directory);
+                SpecializedMetadataValuePart[] residualParts = residual.ToArray();
+                expanded = residualParts.Length == 1 && residualParts[0].ItemType is null
+                    ? residualParts[0].Value
+                    : string.Concat(values);
+                return new SpecializedMetadataValue(residualParts, propertyReads.ToArray());
+            }
+
+            private readonly struct SpecializedMetadataValuePart
+            {
+                internal SpecializedMetadataValuePart(string value, string itemType, TableRange propertyReads)
+                {
+                    Value = value;
+                    ItemType = itemType;
+                    PropertyReads = propertyReads;
+                }
+
+                internal string Value { get; }
+                internal string ItemType { get; }
+                internal TableRange PropertyReads { get; }
+            }
+
+            private sealed class SpecializedMetadataValue
+            {
+                private readonly SpecializedMetadataValuePart[] _parts;
+                private readonly P[] _propertyReads;
+
+                internal SpecializedMetadataValue(
+                    SpecializedMetadataValuePart[] parts,
+                    P[] propertyReads)
+                {
+                    _parts = parts;
+                    _propertyReads = propertyReads;
+                }
+
+                internal string Evaluate(IMetadataTable metadata, IElementLocation location)
+                {
+                    return _parts.Length switch
+                    {
+                        1 => EvaluatePart(0, metadata, location),
+                        2 => string.Concat(
+                            EvaluatePart(0, metadata, location),
+                            EvaluatePart(1, metadata, location)),
+                        3 => string.Concat(
+                            EvaluatePart(0, metadata, location),
+                            EvaluatePart(1, metadata, location),
+                            EvaluatePart(2, metadata, location)),
+                        4 => string.Concat(
+                            EvaluatePart(0, metadata, location),
+                            EvaluatePart(1, metadata, location),
+                            EvaluatePart(2, metadata, location),
+                            EvaluatePart(3, metadata, location)),
+                        _ => EvaluateMany(metadata, location),
+                    };
+                }
+
+                private string EvaluateMany(IMetadataTable metadata, IElementLocation location)
+                {
+                    var builder = new StringBuilder();
+                    for (int i = 0; i < _parts.Length; i++)
+                    {
+                        builder.Append(EvaluatePart(i, metadata, location));
+                    }
+
+                    return builder.ToString();
+                }
+
+                private string EvaluatePart(int index, IMetadataTable metadata, IElementLocation location)
+                {
+                    SpecializedMetadataValuePart part = _parts[index];
+                    if (part.ItemType is not null)
+                    {
+                        return part.ItemType.Length == 0
+                            ? metadata.GetEscapedValue(part.Value)
+                            : metadata.GetEscapedValue(part.ItemType, part.Value);
+                    }
+
+                    // Property values are final in the item pass, but reads can still log
+                    // environment access or update the location used by BuildCheck.
+                    int end = part.PropertyReads.Start + part.PropertyReads.Count;
+                    for (int i = part.PropertyReads.Start; i < end; i++)
+                    {
+                        _propertyReads[i].GetEvaluatedValueEscaped(location);
+                    }
+
+                    return part.Value;
+                }
             }
 
             private string EvaluateCompiledMetadataValueExpansionPart(

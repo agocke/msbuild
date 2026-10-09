@@ -302,6 +302,17 @@ namespace Microsoft.Build.Evaluation
             out string escapedValue);
 
         /// <summary>
+        /// Binds the value and any property object whose read has observable effects.
+        /// Compact values do not require an observer or a materialized property object.
+        /// </summary>
+        bool TryGetEscapedPropertyValue(
+            PropertyId propertyId,
+            string propertyName,
+            IElementLocation location,
+            out string escapedValue,
+            out P property);
+
+        /// <summary>
         /// Publishes one dynamically specialized compiled property effect.
         /// </summary>
         void SetCompiledProperty(

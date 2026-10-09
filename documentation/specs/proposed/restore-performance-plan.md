@@ -193,6 +193,8 @@ must similarly fall back before emitting events or changing lookup state.
 | Async logging notification coalescing | Committed; retains ordered events | `02aa3e5bf`, `src/Build/BackEnd/Components/Logging/LoggingService.cs` |
 | Constant-literal item batching | Committed | `63c870657` |
 | Source-bound fixed imports and `Exists` arguments | Committed, opt-in; results and filesystem observations remain dynamic | `3221e3cdb`, `80b4865ef`, [measurements](evaluation-perf.md) |
+| Separator-free path-adjustment fast exit | Committed, default-on; filesystem-dependent paths retain the existing heuristic | `f524becbc`, [measurements](evaluation-perf.md#avoid-copying-nonpath-metadata-expansions-on-unix) |
+| Operation-local metadata-expression specialization | Working implementation, existing effect-batching opt-in; folds invariant regions while retaining dynamic metadata and read effects | [phase measurements](evaluation-perf.md#specialize-repeated-item-metadata-expressions); macro impact not established |
 | Prefix property-state attachment | **Uncommitted prototype**, with zero hits on the measured restore workload; not part of a proven branch gain | [partial evaluation](partial-evaluation.md); the local `prefix-state-attachment.md` draft is not committed |
 
 The existing opt-ins include
@@ -225,10 +227,13 @@ Do not sum local phase savings or project them onto restore wall time.
    value expansion and writes in `ProjectToBuild` Updates are measured
    allocation hotspots; `Compile` Updates spend most of their measured
    decoration cost on SDK scalar conditions with property functions.
-   Investigate reusable source-derived expansion plans and metadata
-   representation without replaying item-specific results or suppressing
-   observable writes. Preserve item-local ordering, predecessor history,
-   qualified metadata, and filesystem observations.
+   The first operation-local residual expansion program reduces measured
+   `ProjectToBuild` expansion CPU by about 29% in two diagnostic pairs,
+   with about 1 MiB of extra binding allocation in that section. Measure
+   accumulated macro performance and investigate remaining metadata
+   representation cost without replaying item-specific results or
+   suppressing observable writes. Preserve item-local ordering, predecessor
+   history, qualified metadata, and filesystem observations.
 2. **Continue specializing properties/imports.** This pass is effectively
    tied with items (about 66 aggregate CPU seconds and 4.18 GiB of
    allocations). Separate remaining scalar-condition and property-state

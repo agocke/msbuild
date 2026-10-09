@@ -4405,9 +4405,17 @@ namespace Microsoft.Build.Evaluation
                 PropertyId propertyId,
                 string propertyName,
                 IElementLocation location,
-                out string escapedValue)
+                out string escapedValue) =>
+                TryGetEscapedPropertyValue(propertyId, propertyName, location, out escapedValue, out _);
+
+            public bool TryGetEscapedPropertyValue(
+                PropertyId propertyId,
+                string propertyName,
+                IElementLocation location,
+                out string escapedValue,
+                out ProjectProperty property)
             {
-                ProjectProperty property = GetProperty(propertyName);
+                property = GetProperty(propertyName);
                 escapedValue = property is null
                     ? null
                     : ((IProperty)property)

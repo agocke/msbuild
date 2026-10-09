@@ -171,6 +171,19 @@ namespace Microsoft.Build.Evaluation
                 location,
                 out escapedValue);
 
+        public bool TryGetEscapedPropertyValue(
+            PropertyId propertyId,
+            string propertyName,
+            IElementLocation location,
+            out string escapedValue,
+            out P property) =>
+            _wrapped.TryGetEscapedPropertyValue(
+                propertyId,
+                propertyName,
+                location,
+                out escapedValue,
+                out property);
+
         public void SetCompiledProperty(
             EvaluationModule module,
             int propertyIndex,

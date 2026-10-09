@@ -2010,7 +2010,23 @@ namespace Microsoft.Build.Execution
             PropertyId propertyId,
             string propertyName,
             IElementLocation location,
-            out string escapedValue)
+            out string escapedValue) =>
+            TryGetEscapedPropertyValue(propertyId, propertyName, location, out escapedValue, out _);
+
+        bool IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.TryGetEscapedPropertyValue(
+            PropertyId propertyId,
+            string propertyName,
+            IElementLocation location,
+            out string escapedValue,
+            out ProjectPropertyInstance property) =>
+            TryGetEscapedPropertyValue(propertyId, propertyName, location, out escapedValue, out property);
+
+        private bool TryGetEscapedPropertyValue(
+            PropertyId propertyId,
+            string propertyName,
+            IElementLocation location,
+            out string escapedValue,
+            out ProjectPropertyInstance property)
         {
             if (_compactProperties is not null &&
                 _compactProperties.TryGet(
@@ -2018,11 +2034,11 @@ namespace Microsoft.Build.Execution
                     out PropertyValueRef compactValue))
             {
                 escapedValue = compactValue.EscapedValue;
+                property = null;
                 return true;
             }
 
-            ProjectPropertyInstance property =
-                _properties.GetProperty(propertyName);
+            property = _properties.GetProperty(propertyName);
             escapedValue = property is null
                 ? null
                 : ((IProperty)property)
