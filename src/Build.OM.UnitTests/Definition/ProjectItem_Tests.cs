@@ -807,7 +807,7 @@ namespace Microsoft.Build.UnitTests.OM.Definition
             ProjectGetterResultsInDriveEnumerationWarning(unevaluatedInclude);
         }
 
-        [UnixOnlyTheory]
+        [UnixOnlyTheory(Skip = "Enumerates the filesystem root; requires bounded filesystem isolation.")]
         [InlineData(@"/**/*.log")]
         [InlineData(@"$(empty)/**/*.log")]
         [InlineData(@"/$(empty)**/*.log")]
@@ -901,7 +901,7 @@ namespace Microsoft.Build.UnitTests.OM.Definition
             CleanContentsAndCreateProjectInstanceFromFileWithDriveEnumeratingWildcard(content, false);
         }
 
-        [UnixOnlyTheory]
+        [UnixOnlyTheory(Skip = "Enumerates the filesystem root; requires bounded filesystem isolation.")]
         [ActiveIssue("https://github.com/dotnet/msbuild/issues/8373")]
         [InlineData(
             ImportProjectElement,
