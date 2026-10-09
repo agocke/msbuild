@@ -6,8 +6,11 @@ work, but they should not be repeated without a materially different
 architecture or workload.
 
 The measurements below use the .NET runtime static-graph restore workload,
-which evaluates 1,643 project configurations. The retention target is roughly
-one second of wall-time improvement with a positive 95% confidence interval.
+which evaluates 1,643 project configurations. The roughly one-second
+wall-time improvement with a positive 95% confidence interval was the
+**historical retention gate for these experiments**, not the current policy
+for small, bounded specializations. For that policy and the existing-semantics
+goal, see the [classic restore performance plan](restore-performance-plan.md).
 
 ## Property program and SSA variants
 
