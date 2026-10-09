@@ -14,8 +14,10 @@ using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Engine.UnitTests.TestComparers;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
+using Microsoft.Build.FileSystem;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Graph;
+using Microsoft.Build.Shared.FileSystem;
 using Microsoft.Build.Unittest;
 using Shouldly;
 using Xunit;
@@ -2045,6 +2047,242 @@ namespace Microsoft.Build.UnitTests.Evaluation
             project.GetPropertyValue("Value").ShouldBe("relocated");
             project.Imports.Single().ImportedProject.FullPath
                 .ShouldBe(Path.Combine(relocatedDirectory, "second.props"));
+        }
+
+        [Theory]
+        [InlineData("Exists('$(MSBuildThisFileDirectory)probe.file')", true, true)]
+        [InlineData("!Exists('$(MSBuildThisFileDirectory)probe.file')", true, false)]
+        [InlineData("'$(Gate)' == 'yes' And Exists('$(MSBuildThisFileDirectory)probe.file')", true, true)]
+        [InlineData("'$(Gate)' == 'no' Or Exists('$(MSBuildThisFileDirectory)probe.file')", true, true)]
+        [InlineData("'false' == 'true' And Exists('$(MSBuildThisFileDirectory)missing.file')", true, false)]
+        [InlineData("'true' == 'true' Or Exists('$(MSBuildThisFileDirectory)missing.file')", true, true)]
+        [InlineData("Exists('$(MSBuildThisFileDirectory).\\probe.file')", true, true)]
+        [InlineData("Exists('$(MSBuildThisFileDirectory).')", true, true)]
+        [InlineData("Exists('$(MSBuildThisFileDirectory)$(Probe)')", false, true)]
+        [InlineData("Exists('$(MSBuildThisFileDirectory)probe%2efile')", false, true)]
+        [InlineData("Exists('$(MSBuildThisFileDirectory)probe.file;$(MSBuildThisFileDirectory)probe.file')", false, true)]
+        public void CompiledExistsPreservesPredicatesAndFallback(
+            string condition,
+            bool compiled,
+            bool result)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            _ = environment.CreateFile("probe.file", string.Empty);
+            var file = environment.CreateFile(
+                "exists.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Hit Condition="{condition}">yes</Hit>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Check Include="item">
+                      <Marker Condition="{condition}">yes</Marker>
+                    </Check>
+                  </ItemGroup>
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.CreateForCompiledModuleEvaluation(
+                useCompiledModuleEffectBatches: true);
+            var globals = new Dictionary<string, string> { ["Gate"] = "yes", ["Probe"] = "probe.file" };
+            Project optimized = EvaluateWithGlobals(
+                file.Path, environment.CreateProjectCollection().Collection, context, globals);
+            Project scalar = EvaluateWithGlobals(
+                file.Path,
+                environment.CreateProjectCollection().Collection,
+                EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared),
+                globals);
+
+            AssertEquivalentProperties(scalar, optimized);
+            optimized.GetPropertyValue("Hit").ShouldBe(result ? "yes" : string.Empty);
+            optimized.GetItems("Check").Single().GetMetadataValue("Marker")
+                .ShouldBe(scalar.GetItems("Check").Single().GetMetadataValue("Marker"));
+            (context.EvaluationModuleCache.GetModule(optimized.Xml).Properties[0].CompiledConditionId > 0)
+                .ShouldBe(compiled);
+        }
+
+        [Fact]
+        public void CompiledExistsObservesFileCreationAndDeletionWithoutRebinding()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var file = environment.CreateFile(
+                "exists.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Hit Condition="Exists('$(MSBuildThisFileDirectory)probe.file')">yes</Hit>
+                  </PropertyGroup>
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.CreateForCompiledModuleEvaluation(
+                useCompiledModuleEffectBatches: true).ContextWithFileSystem(FileSystems.Default);
+            Project project = EvaluateWithGlobals(
+                file.Path, environment.CreateProjectCollection().Collection, context, new Dictionary<string, string>());
+            EvaluationModule module = context.EvaluationModuleCache.GetModule(project.Xml);
+            project.GetPropertyValue("Hit").ShouldBeEmpty();
+            module.CompiledConditionComparisons.ShouldContain(
+                comparison => comparison.Kind == CompiledConditionKind.Exists);
+
+            var probe = environment.CreateFile("probe.file", string.Empty);
+            project.MarkDirty();
+            project.ReevaluateIfNecessary(context);
+            project.GetPropertyValue("Hit").ShouldBe("yes");
+            context.EvaluationModuleCache.GetModule(project.Xml).ShouldBeSameAs(module);
+
+            File.Delete(probe.Path);
+            project.MarkDirty();
+            project.ReevaluateIfNecessary(context);
+            project.GetPropertyValue("Hit").ShouldBeEmpty();
+            context.EvaluationModuleCache.GetModule(project.Xml).ShouldBeSameAs(module);
+        }
+
+        [Fact]
+        public void CompiledExistsBindsEachSourceFileSeparately()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            _ = environment.CreateFile("probe.file", string.Empty);
+            string directory = environment.CreateFolder().Path;
+            var import = environment.CreateFile(
+                Path.Combine(directory, "import.props"),
+                """
+                <Project>
+                  <PropertyGroup>
+                    <ImportedHit Condition="Exists('$(MSBuildThisFileDirectory)probe.file')">yes</ImportedHit>
+                  </PropertyGroup>
+                </Project>
+                """);
+            var file = environment.CreateFile(
+                "exists.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <RootHit Condition="Exists('$(MSBuildThisFileDirectory)probe.file')">yes</RootHit>
+                  </PropertyGroup>
+                  <Import Project="{import.Path}" />
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.CreateForCompiledModuleEvaluation(
+                useCompiledModuleEffectBatches: true).ContextWithFileSystem(FileSystems.Default);
+            Project project = EvaluateWithGlobals(
+                file.Path, environment.CreateProjectCollection().Collection, context, new Dictionary<string, string>());
+            project.GetPropertyValue("RootHit").ShouldBe("yes");
+            project.GetPropertyValue("ImportedHit").ShouldBeEmpty();
+
+            _ = environment.CreateFile(Path.Combine(directory, "probe.file"), string.Empty);
+            project.MarkDirty();
+            project.ReevaluateIfNecessary(context);
+            project.GetPropertyValue("ImportedHit").ShouldBe("yes");
+        }
+
+        [Fact]
+        public void CompiledExistsRebindsWhenSourceFileMoves()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            _ = environment.CreateFile("probe.file", string.Empty);
+            string directory = environment.CreateFolder().Path;
+            var relocated = environment.CreateFile(Path.Combine(directory, "exists.proj"), "<Project />");
+            var file = environment.CreateFile(
+                "exists.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Hit Condition="Exists('$(MSBuildThisFileDirectory)probe.file')">yes</Hit>
+                  </PropertyGroup>
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.CreateForCompiledModuleEvaluation(
+                useCompiledModuleEffectBatches: true);
+            Project project = EvaluateWithGlobals(
+                file.Path, environment.CreateProjectCollection().Collection, context, new Dictionary<string, string>());
+            EvaluationModule module = context.EvaluationModuleCache.GetModule(project.Xml);
+            project.GetPropertyValue("Hit").ShouldBe("yes");
+
+            project.Xml.FullPath = relocated.Path;
+            project.ReevaluateIfNecessary(context);
+            project.GetPropertyValue("Hit").ShouldBeEmpty();
+            context.EvaluationModuleCache.GetModule(project.Xml).ShouldNotBeSameAs(module);
+        }
+
+        [Fact]
+        public void CompiledExistsImportConditionsPreserveLoadedProjectCache()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var import = environment.CreateFile("cached.props", "<Project />");
+            var file = environment.CreateFile(
+                "exists.proj",
+                """
+                <Project>
+                  <ImportGroup Condition="Exists('$(MSBuildThisFileDirectory)cached.props')">
+                    <Import Project="$(MSBuildThisFileDirectory)cached.props"
+                            Condition="Exists('$(MSBuildThisFileDirectory)cached.props')" />
+                  </ImportGroup>
+                </Project>
+                """);
+            ProjectCollection optimizedCollection = environment.CreateProjectCollection().Collection;
+            ProjectCollection scalarCollection = environment.CreateProjectCollection().Collection;
+            ProjectRootElement optimizedImport = ProjectRootElement.Open(import.Path, optimizedCollection);
+            ProjectRootElement scalarImport = ProjectRootElement.Open(import.Path, scalarCollection);
+            File.Delete(import.Path);
+
+            Project optimized = EvaluateWithGlobals(
+                file.Path, optimizedCollection,
+                EvaluationContext.CreateForCompiledModuleEvaluation(useCompiledModuleEffectBatches: true),
+                new Dictionary<string, string>());
+            Project scalar = EvaluateWithGlobals(
+                file.Path, scalarCollection,
+                EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared),
+                new Dictionary<string, string>());
+            optimized.Imports.Single().ImportedProject.ShouldBeSameAs(optimizedImport);
+            scalar.Imports.Single().ImportedProject.ShouldBeSameAs(scalarImport);
+        }
+
+        [Theory]
+        [InlineData("'false' == 'true' And ", 0)]
+        [InlineData("'true' == 'true' Or ", 0)]
+        [InlineData("'true' == 'true' And ", 1)]
+        public void CompiledExistsPreservesShortCircuitProbeOrder(string prefix, int expectedProbes)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var file = environment.CreateFile(
+                "exists.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Hit Condition="{prefix}Exists('$(MSBuildThisFileDirectory)probe.file')">yes</Hit>
+                  </PropertyGroup>
+                </Project>
+                """);
+            var optimizedFileSystem = new ExistsCountingFileSystem();
+            var scalarFileSystem = new ExistsCountingFileSystem();
+            Project optimized = EvaluateWithGlobals(
+                file.Path, environment.CreateProjectCollection().Collection,
+                EvaluationContext.CreateForCompiledModuleEvaluation(useCompiledModuleEffectBatches: true)
+                    .ContextWithFileSystem(optimizedFileSystem),
+                new Dictionary<string, string>());
+            Project scalar = EvaluateWithGlobals(
+                file.Path, environment.CreateProjectCollection().Collection,
+                EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared)
+                    .ContextWithFileSystem(scalarFileSystem),
+                new Dictionary<string, string>());
+
+            optimized.GetPropertyValue("Hit").ShouldBe(scalar.GetPropertyValue("Hit"));
+            optimizedFileSystem.Probes.ShouldBe(expectedProbes);
+            scalarFileSystem.Probes.ShouldBe(expectedProbes);
+        }
+
+        private sealed class ExistsCountingFileSystem : MSBuildFileSystemBase
+        {
+            internal int Probes { get; private set; }
+
+            public override bool FileOrDirectoryExists(string path)
+            {
+                if (path.EndsWith("probe.file", StringComparison.Ordinal))
+                {
+                    Probes++;
+                }
+
+                return base.FileOrDirectoryExists(path);
+            }
         }
 
         [Fact]

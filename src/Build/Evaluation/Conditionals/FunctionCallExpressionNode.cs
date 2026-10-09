@@ -27,6 +27,20 @@ namespace Microsoft.Build.Evaluation
             _arguments = arguments;
         }
 
+        internal bool TryGetSingleExistsArgument(out string argument)
+        {
+            if (_functionName.Equals("Exists", StringComparison.OrdinalIgnoreCase) &&
+                _arguments.Count == 1 &&
+                _arguments[0] is StringExpressionNode node)
+            {
+                argument = node.UnexpandedValue;
+                return true;
+            }
+
+            argument = null;
+            return false;
+        }
+
         /// <summary>
         /// Evaluate node as boolean
         /// </summary>

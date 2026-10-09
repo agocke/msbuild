@@ -69,3 +69,54 @@ individual macro result is inconclusive. Evaluate restore wall time across
 accumulated changes rather than require a large gain from each specialization.
 Phase savings are not necessarily additive: parallelism, GC, and bottleneck
 shifts can change how much reaches the critical path.
+
+## Source-bound Exists specialization
+
+The same effect-batching opt-in binds single-path `Exists` and `!Exists`
+arguments based on `$(MSBuildThisFileDirectory)` plus a literal suffix.
+These predicates use the existing compiled condition branches, including
+short-circuiting `And`/`Or`, and apply to property, import, and metadata
+conditions. Their argument strings are shared module constants rather than
+expanded task items and a temporary file list on every execution.
+
+The existence result is not cached by the specialization. Each execution uses
+the same filesystem and, where the ordinary evaluator supplies it, loaded
+project cache. Existing filesystem caching policy is unchanged. Bound argument
+strings retain the ordinary path representation; they are not independently
+canonicalized. Unix separator fixing happens before binding, just as it does
+before ordinary `Exists` expansion. Dynamic suffixes, escaping, lists,
+unsupported surrounding expressions, and unsaved source files fall back.
+Source relocation or edits invalidate the bindings. Filesystem predicates are
+not eligible for the pure prefix-state attachment prototype.
+
+Two diagnostic restores per variant observed 119,218 ordinary `Exists` calls
+before specialization, including 6,148 source-directory-based arguments.
+The narrow lowering specializes 4,727 executions; 1,421 retain ordinary
+argument preparation. Including those fallbacks, the measurements were:
+
+| Argument preparation | Ordinary path | Specialized path |
+| --- | ---: | ---: |
+| Mean cumulative elapsed time | 430.162 ms | 118.520 ms |
+| Mean allocated bytes | 20,630,844 | 4,256,364 |
+
+This removes 72.4% of measured preparation elapsed time and 79.4% of measured
+allocations, about 16.4 MB per restore. Thread-local allocation measurements
+exclude filesystem probes and module lowering; bound preparation measured zero
+steady-state allocations. Temporary instrumentation was removed afterward.
+
+Twelve successful uninstrumented restores in six order-balanced pairs used the
+same isolated SDK path and command as the import experiment, with only the
+engine exchanged. One invocation with a mistyped switch failed before restore
+and was excluded and rerun. Mean wall time was 22.230 seconds for the baseline
+and 23.215 seconds for the specialization. The paired improvement was -0.985
+seconds, with a 95% Student-t interval of -2.294 to 0.324 seconds. This sample
+trends slower and does not establish a macro gain or rule out a regression.
+The retained opt-in prototype has demonstrated local work/allocation savings,
+not an end-to-end performance win.
+
+Four follow-up restores with the existing evaluation meters enabled found
+unchanged executed property-batch, property-effect, expansion, and function
+counts. Exactly 4,727 condition evaluations moved from scalar to compiled
+handling. This did not reveal broader property-batch activation as an
+explanation for the slower macro sample. These observer-heavy, overlapping
+phase timers are diagnostic evidence, not additional macro measurements.

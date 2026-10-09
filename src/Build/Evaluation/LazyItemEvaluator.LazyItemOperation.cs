@@ -706,6 +706,13 @@ namespace Microsoft.Build.Evaluation
             {
                 CompiledConditionComparison comparison =
                     module.CompiledConditionComparisons[comparisonId];
+                if (comparison.Kind is CompiledConditionKind.Exists or CompiledConditionKind.NotExists)
+                {
+                    bool exists = Evaluator<P, I, M, D>.EvaluateCompiledExists(
+                        module, comparison.Left.Value, _lazyEvaluator.EvaluationContext.FileSystem);
+                    return comparison.Kind == CompiledConditionKind.Exists ? exists : !exists;
+                }
+
                 string left = EvaluateCompiledMetadataOperand(
                     module,
                     comparison.Left,

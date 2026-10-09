@@ -726,6 +726,8 @@ namespace Microsoft.Build.Evaluation
     {
         Equal,
         NotEqual,
+        Exists,
+        NotExists,
     }
 
     internal enum CompiledConditionInstructionKind : byte
@@ -762,6 +764,7 @@ namespace Microsoft.Build.Evaluation
         Property,
         ExpandedValue,
         Metadata,
+        SourceBoundPath,
     }
 
     internal enum CompiledConditionValuePartKind : byte
@@ -991,11 +994,19 @@ namespace Microsoft.Build.Evaluation
 
         internal static CompiledImportPath TryCreate(ProjectImportElement import)
         {
+            if (import.SdkReference is not null)
+            {
+                return null;
+            }
+
+            string path = TryBind(import.Project, import.ProjectLocation.File);
+            return path is null ? null : new CompiledImportPath(path);
+        }
+
+        internal static string TryBind(string expression, string file)
+        {
             const string prefix = "$(MSBuildThisFileDirectory)";
-            string expression = import.Project;
-            string file = import.ProjectLocation.File;
-            if (import.SdkReference is not null ||
-                string.IsNullOrEmpty(file) ||
+            if (string.IsNullOrEmpty(file) ||
                 !expression.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
                 expression.Length == prefix.Length)
             {
@@ -1021,7 +1032,7 @@ namespace Microsoft.Build.Evaluation
                 }
             }
 
-            return new CompiledImportPath(expandedPath);
+            return expandedPath;
         }
     }
 
@@ -2237,7 +2248,8 @@ namespace Microsoft.Build.Evaluation
                         condition,
                         parserOptions,
                         _sources[sourceId].ConditionLocation,
-                        out CompiledConditionProgramData program))
+                        out CompiledConditionProgramData program,
+                        allowSourceBoundExists: true))
                 {
                     return -1;
                 }
@@ -2318,6 +2330,10 @@ namespace Microsoft.Build.Evaluation
                     return operand.Kind switch
                     {
                         CompiledConditionOperandKind.Literal =>
+                            new CompiledConditionOperand(
+                                operand.Kind,
+                                GetStringId(program.Strings[operand.Value])),
+                        CompiledConditionOperandKind.SourceBoundPath =>
                             new CompiledConditionOperand(
                                 operand.Kind,
                                 GetStringId(program.Strings[operand.Value])),

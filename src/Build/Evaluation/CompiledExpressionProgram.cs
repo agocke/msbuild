@@ -1357,7 +1357,8 @@ namespace Microsoft.Build.Evaluation
             ParserOptions parserOptions,
             ElementLocation location,
             out CompiledConditionProgramData program,
-            bool allowExtendedExpressions = false)
+            bool allowExtendedExpressions = false,
+            bool allowSourceBoundExists = false)
         {
             program = null;
             if (string.IsNullOrEmpty(condition))
@@ -1389,7 +1390,8 @@ namespace Microsoft.Build.Evaluation
                 allowMetadata:
                     parserOptions == ParserOptions.AllowAll,
                 allowPropertyFunctions: allowExtendedExpressions,
-                allowMetadataValueParts: allowExtendedExpressions);
+                allowMetadataValueParts: allowExtendedExpressions,
+                sourceBoundExistsLocation: allowSourceBoundExists ? location : null);
             if (!builder.TryCompile(expression))
             {
                 return false;
@@ -1441,6 +1443,7 @@ namespace Microsoft.Build.Evaluation
             private readonly bool _allowMetadata;
             private readonly bool _allowPropertyFunctions;
             private readonly bool _allowMetadataValueParts;
+            private readonly ElementLocation _sourceBoundExistsLocation;
             internal readonly List<string> _strings = new();
             internal readonly List<string> _propertyNames = new();
             internal readonly List<CompiledConditionValuePart> _valueParts = new();
@@ -1461,12 +1464,14 @@ namespace Microsoft.Build.Evaluation
                 bool allowItemVectors,
                 bool allowMetadata,
                 bool allowPropertyFunctions,
-                bool allowMetadataValueParts)
+                bool allowMetadataValueParts,
+                ElementLocation sourceBoundExistsLocation = null)
             {
                 _allowItemVectors = allowItemVectors;
                 _allowMetadata = allowMetadata;
                 _allowPropertyFunctions = allowPropertyFunctions;
                 _allowMetadataValueParts = allowMetadataValueParts;
+                _sourceBoundExistsLocation = sourceBoundExistsLocation;
             }
 
             internal bool TryCompile(GenericExpressionNode expression)
@@ -1627,6 +1632,36 @@ namespace Microsoft.Build.Evaluation
                 GenericExpressionNode expression,
                 out int comparisonId)
             {
+                GenericExpressionNode predicate = expression is NotExpressionNode not
+                    ? not.LeftChild
+                    : expression;
+                if (_sourceBoundExistsLocation is not null &&
+                    predicate is FunctionCallExpressionNode function &&
+                    function.TryGetSingleExistsArgument(out string argument))
+                {
+                    string path = CompiledImportPath.TryBind(
+                        FileUtilities.FixFilePath(argument),
+                        _sourceBoundExistsLocation.File);
+                    if (path is not null)
+                    {
+                        comparisonId = _comparisons.Count;
+                        int emptyStringId = GetStringId(string.Empty);
+                        _comparisons.Add(new CompiledConditionComparison(
+                            expression is NotExpressionNode
+                                ? CompiledConditionKind.NotExists
+                                : CompiledConditionKind.Exists,
+                            new CompiledConditionOperand(
+                                CompiledConditionOperandKind.SourceBoundPath,
+                                GetStringId(path)),
+                            new CompiledConditionOperand(
+                                CompiledConditionOperandKind.Literal,
+                                emptyStringId),
+                            GetStringId(argument),
+                            emptyStringId));
+                        return true;
+                    }
+                }
+
                 if (expression is StringExpressionNode booleanExpression &&
                     booleanExpression.IsExpandable &&
                     TryCompileOperand(

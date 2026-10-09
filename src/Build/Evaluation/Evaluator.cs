@@ -2312,7 +2312,8 @@ namespace Microsoft.Build.Evaluation
         private bool EvaluateCompiledCondition(
             EvaluationModule module,
             int conditionId,
-            bool collectConditionedProperties = true)
+            bool collectConditionedProperties = true,
+            ProjectRootElementCacheBase projectRootElementCache = null)
         {
             using var measurement =
                 EvaluationPerformanceInstrumentation.Measure(
@@ -2344,7 +2345,8 @@ namespace Microsoft.Build.Evaluation
                                 module,
                                 instruction.Argument0,
                                 location,
-                                collectConditionedProperties))
+                                collectConditionedProperties,
+                                projectRootElementCache))
                         {
                             instructionIndex +=
                                 instruction.Argument1;
@@ -2361,7 +2363,8 @@ namespace Microsoft.Build.Evaluation
                                 module,
                                 instruction.Argument0,
                                 location,
-                                collectConditionedProperties))
+                                collectConditionedProperties,
+                                projectRootElementCache))
                         {
                             instructionIndex +=
                                 instruction.Argument1;
@@ -2378,7 +2381,8 @@ namespace Microsoft.Build.Evaluation
                             module,
                             instruction.Argument0,
                             location,
-                            collectConditionedProperties);
+                            collectConditionedProperties,
+                            projectRootElementCache);
                     case CompiledConditionInstructionKind.ReturnFalse:
                         return false;
                     case CompiledConditionInstructionKind.ReturnTrue:
@@ -2394,10 +2398,21 @@ namespace Microsoft.Build.Evaluation
             EvaluationModule module,
             int comparisonId,
             IElementLocation location,
-            bool collectConditionedProperties)
+            bool collectConditionedProperties,
+            ProjectRootElementCacheBase projectRootElementCache)
         {
             CompiledConditionComparison comparison =
                 module.CompiledConditionComparisons[comparisonId];
+            if (comparison.Kind is CompiledConditionKind.Exists or CompiledConditionKind.NotExists)
+            {
+                bool exists = EvaluateCompiledExists(
+                    module,
+                    comparison.Left.Value,
+                    _evaluationContext.FileSystem,
+                    _data.ShouldEvaluateForDesignTime ? projectRootElementCache : null);
+                return comparison.Kind == CompiledConditionKind.Exists ? exists : !exists;
+            }
+
             string left = EvaluateCompiledConditionOperand(
                 module,
                 comparison.Left,
@@ -2429,6 +2444,24 @@ namespace Microsoft.Build.Evaluation
             return comparison.Kind == CompiledConditionKind.Equal
                 ? equal
                 : !equal;
+        }
+
+        internal static bool EvaluateCompiledExists(
+            EvaluationModule module,
+            int pathStringId,
+            IFileSystem fileSystem,
+            ProjectRootElementCacheBase projectRootElementCache = null)
+        {
+            string path = module.GetStringValue(pathStringId);
+            try
+            {
+                return projectRootElementCache?.TryGet(path) is not null ||
+                    FileUtilities.FileOrDirectoryExistsNoThrow(path, fileSystem);
+            }
+            catch (Exception exception) when (ExceptionHandling.IsIoRelatedException(exception))
+            {
+                return false;
+            }
         }
 
         private string EvaluateCompiledConditionOperand(
@@ -3949,7 +3982,8 @@ namespace Microsoft.Build.Evaluation
                             ? importGroup.CompiledConditionId == 0 ||
                               EvaluateCompiledCondition(
                                   module,
-                                  importGroup.CompiledConditionId)
+                                  importGroup.CompiledConditionId,
+                                  projectRootElementCache: _projectRootElementCache)
                             : EvaluateConditionCollectingConditionedProperties(
                                 source,
                                 ExpanderOptions.ExpandProperties,
@@ -4127,7 +4161,8 @@ namespace Microsoft.Build.Evaluation
                         compiledConditionId == 0 ||
                         EvaluateCompiledCondition(
                             module,
-                            compiledConditionId);
+                            compiledConditionId,
+                            projectRootElementCache: _projectRootElementCache);
                 }
 
                 ExpandAndLoadImportsFromUnescapedImportExpressionConditioned(
