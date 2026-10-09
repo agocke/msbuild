@@ -112,3 +112,48 @@ counts. Exactly 4,727 condition evaluations moved from scalar to compiled
 handling. This did not reveal broader property-batch activation as an
 explanation for the slower macro sample. These observer-heavy, overlapping
 phase timers are diagnostic evidence, not additional macro measurements.
+
+## Avoid copying nonpath metadata expansions on Unix
+
+Item-application attribution found that the compiled metadata expansion path
+calls `FileUtilities.MaybeAdjustFilePath` for each result. On Unix, both its
+string and memory overloads copied every nonempty, non-exempt value into a
+character array, even if the value contained neither `/` nor `\`. A new
+early exit returns such values unchanged before allocating. Values containing
+either separator still execute the existing filesystem-dependent heuristic.
+This is an internal allocation optimization, active by default; it does not
+bind properties early, cache filesystem decisions, or merge metadata writes.
+
+Two balanced diagnostic pairs used the committed `27a86bf` candidate with the
+three evaluation/action-graph opt-ins enabled. Only the Framework assembly
+containing the helper was exchanged. Identical operation-level probes ran in
+both variants, with standard meter listeners disabled to avoid charging their
+callbacks to metadata evaluation. The 777,850 `ProjectToBuild` metadata
+expansions per restore measured:
+
+| Metric | Existing helper | No-slash early exit |
+| --- | ---: | ---: |
+| Mean allocated bytes | 307,994,988 | 153,863,096 |
+| Mean aggregate thread CPU | 4.095 s | 3.542 s |
+
+This eliminates about **147 MiB (50.0%)** of measured expansion allocations.
+Across all profiled item operations, exclusive managed allocation fell by
+about 195 MiB. The aggregate CPU values are diagnostic observations across
+parallel evaluation threads, not wall-time savings or a statistically
+established CPU improvement. The probes themselves add overhead.
+
+Six balanced, counter-free restore pairs after one warmup per variant gave:
+
+| Metric | Existing helper | No-slash early exit |
+| --- | ---: | ---: |
+| Mean restore wall time | 25.018 s | 24.722 s |
+| Mean user CPU time | 174.618 s | 169.262 s |
+| Mean system CPU time | 17.688 s | 17.333 s |
+
+The paired wall saving was 0.297 seconds, with a 95% Student-t interval of
+-1.379 to 1.972 seconds: **no end-to-end gain or regression is established**.
+The paired user-CPU saving was 5.357 seconds, with an interval of -2.206 to
+12.920 seconds. Both macro comparisons are inconclusive. Every restore
+succeeded, and all saved 760 asset path/hash pairs matched the candidate
+control. The bounded change is retained for its repeatable allocation savings,
+not a claimed macro win. Further operation specialization remains separate.

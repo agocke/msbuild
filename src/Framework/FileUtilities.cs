@@ -730,7 +730,7 @@ namespace Microsoft.Build.Framework
             // have no slashes.
             if (NativeMethods.IsWindows || string.IsNullOrEmpty(value)
                 || value.StartsWith("$(", comparisonType) || value.StartsWith("@(", comparisonType)
-                || value.StartsWith("\\\\", comparisonType))
+                || value.StartsWith("\\\\", comparisonType) || value.IndexOfAny(Slashes) < 0)
             {
                 return value;
             }
@@ -750,6 +750,11 @@ namespace Microsoft.Build.Framework
         internal static ReadOnlyMemory<char> MaybeAdjustFilePath(ReadOnlyMemory<char> value, string baseDirectory = "")
         {
             if (NativeMethods.IsWindows || value.IsEmpty)
+            {
+                return value;
+            }
+
+            if (value.Span.IndexOfAny(UnixDirectorySeparator, WindowsDirectorySeparator) < 0)
             {
                 return value;
             }

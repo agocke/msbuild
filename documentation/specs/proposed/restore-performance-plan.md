@@ -67,6 +67,81 @@ These numbers came from a different checkout, SDK, and capture than this
 branch's recent ~22-25-second restores. They locate work but do not establish
 current progress toward the goal or a current per-layer budget gap.
 
+## Current restore baseline (October 2026)
+
+The control is the clean common ancestor with this branch, `1eecb3d38`, not
+current upstream `main`. The candidate is the clean committed `27a86bf`
+tree; the uncommitted prefix-state prototype is excluded. Both engines ran
+from the same isolated SDK against `dotnet/runtime` static-graph restore with
+the same package cache and asynchronous logging. The "opt-in" candidate sets
+compiled module evaluation, module effect batching, and action-graph partial
+evaluation; "default" leaves those three switches unset. After warmup, ten
+balanced, counter-free pairs per comparison gave:
+
+| Comparison | Stock mean | Candidate mean | Paired wall saving (95% CI) |
+| --- | ---: | ---: | ---: |
+| Stock vs. candidate opt-in | 31.313 s | 22.623 s | 8.690 s [7.929, 9.451] |
+| Stock vs. candidate default | 30.544 s | 24.684 s | 5.860 s [5.390, 6.330] |
+
+These are separate stock cohorts, not a paired default-versus-opt-in
+comparison or per-commit attribution. Opt-in saved 58.740 seconds of paired
+user CPU but raised peak RSS by a mean 176,382 KiB. Candidate default saved
+wall time while using 27.533 seconds *more* paired user CPU. All sampled
+restores completed; the 760 `project.assets.json` path/hash pairs matched
+across stock, default, and opt-in diagnostic snapshots. This establishes
+output equivalence for those assets, not complete graph or diagnostic parity.
+At 22.623 seconds, the opt-in path is still roughly 16.6-17.6 seconds above
+the 5-6-second design goal.
+
+Diagnostic graph-construction events measured 14.42 seconds for stock,
+15.58 seconds for candidate default, and 9.85 seconds for candidate opt-in
+in one run each. These runs enabled EventSource and are **not** the
+counter-free wall samples. Stock has no matching evaluation/execution meters.
+Two additional opt-in diagnostics using the candidate's coarse evaluation
+events measured graph construction at 9.68-9.84 seconds, with 173-177
+seconds of *process CPU* and 9.32 GiB of managed allocations in that
+interval. In those runs, thread-local evaluation-pass accounting covered
+1,655 evaluations:
+
+| Opt-in evaluation pass | Aggregate thread CPU | Managed allocation |
+| --- | ---: | ---: |
+| Properties and imports | 65.6-67.2 s | 4.17-4.18 GiB |
+| Items, including lazy application | 67.0-68.5 s | 3.99-4.00 GiB |
+| All evaluation passes | 145.3-149.0 s | 9.06-9.07 GiB |
+
+Pass CPU is summed over concurrent threads, **not** elapsed graph wall time.
+The pass allocation counts include instrumentation and represent the work
+performed in each synchronous pass, not objects still live after restore.
+Corresponding candidate-default runs put the two large passes at roughly
+112-117 and 103-108 seconds of aggregate thread CPU and 5.95 and 6.99 GiB
+of allocations. The opt-in's graph/evaluation interval remains much larger
+than the ~1.5-second design budget. Its diagnostic `BuildSession` scope
+lasted roughly 11-12 seconds, but these nested/parallel measurements are
+not a precise additive wall-time decomposition.
+
+An isolated, instrumented candidate further split item applications by
+operation and item type. With the standard meter listener **disabled** to
+avoid charging its own counter callbacks to item conditions, two runs found
+that the 1,655 `ProjectToBuild` `Update="@(ProjectToBuild)"` applications
+allocated about 702 MiB; metadata decoration accounted for **652 MiB
+(93%)**. Within decoration, compiled metadata conditions allocated about
+27 MiB, metadata value expansion about 294 MiB, and metadata writes about
+149 MiB. The remaining allocation includes diagnostic scopes and other
+metadata-loop work, not an identified product hot method. `Compile` Update
+decoration allocated about 114 MiB; its scalar metadata conditions in the
+SDK's default-item targets are a separate cost. Earlier runs with the
+standard meter listener enabled charged hundreds of additional MiB to
+these same scopes, illustrating observer bias. The diagnostic-only item
+probes still perturb CPU and allocation; no per-operation wall-time saving
+has been established. All 760 asset hashes matched the candidate control.
+
+The first bounded item-expansion improvement removes a Unix helper's
+character-array copy for values with no slash characters. It halves measured
+`ProjectToBuild` metadata-expansion allocations (about 147 MiB saved per
+restore) without changing metadata write order or filesystem decisions.
+Six counter-free restore pairs have an inconclusive wall result; see the
+[detailed measurements](evaluation-perf.md#avoid-copying-nonpath-metadata-expansions-on-unix).
+
 ## Partially evaluate the existing interpreter
 
 Treat MSBuild XML and the evaluated object model as the source language and
@@ -137,27 +212,31 @@ argument-preparation time but its six-pair wall result was inconclusive.
 The `Exists` specialization removed 72.4% of preparation time and 79.4% of
 preparation allocations in its diagnostic comparison; its six-pair restore
 result *trended slower* and cannot rule out a regression. Both measurements
-were opt-in and made in different runs. The full branch has **no new
-source-aligned all-up measurement** that can be compared directly with the
-August 23.93-second breakdown or the other branch's reported 19.498-second
-candidate. Do not sum phase savings or project them onto restore wall time.
+were opt-in and made in different runs. The accumulated branch now has the source-aligned all-up measurement above,
+but its stock control and experimental setup differ from the August
+23.93-second breakdown and the other branch's 19.498-second candidate.
+Do not sum local phase savings or project them onto restore wall time.
 
 ## Next boundaries under classic semantics
 
-1. **Re-establish an attributable current baseline.** Measure counter-free
-   process wall against a source-aligned control, and separately decompose
-   graph/evaluation, non-task target/intrinsic work, complete task execution,
-   and the remaining process/NuGet work. Compare work counts and outputs.
-   Determine whether the recent `Exists` macro trend persists in an
-   accumulated, controlled measurement before broadening its eligibility.
-2. **Reduce evaluation state construction.** Reuse larger source-derived
-   regions and compile common property, condition, import, item, and metadata
-   operations. Measure interpreter overhead *and* the cost of constructing
-   final mutable state. Explore coarse immutable prefix-state attachment
-   only where live-ins, global-property precedence, source identity, and
-   logging can be matched; the current root-only prototype removes no work
-   in this restore. Continue to observe dynamic imports, `Exists`, and
-   globs rather than memoize their outcomes.
+1. **Reduce item-application metadata work.** The opt-in item pass consumes
+   roughly 67-69 aggregate CPU seconds and 4 GiB of allocations across the
+   restore, marginally ahead of properties/imports in CPU. Per-item metadata
+   value expansion and writes in `ProjectToBuild` Updates are measured
+   allocation hotspots; `Compile` Updates spend most of their measured
+   decoration cost on SDK scalar conditions with property functions.
+   Investigate reusable source-derived expansion plans and metadata
+   representation without replaying item-specific results or suppressing
+   observable writes. Preserve item-local ordering, predecessor history,
+   qualified metadata, and filesystem observations.
+2. **Continue specializing properties/imports.** This pass is effectively
+   tied with items (about 66 aggregate CPU seconds and 4.18 GiB of
+   allocations). Separate remaining scalar-condition and property-state
+   construction cost before choosing a larger source-derived segment.
+   Explore coarse immutable prefix-state attachment only where live-ins,
+   global-property precedence, source identity, and logging can be matched;
+   the current root-only prototype removes no work in this restore. Dynamic
+   imports and `Exists` results must still be observed, not memoized.
 3. **Lower common target pre-body and intrinsic work.** The current target
    plans cover body actions but do not establish a direct path through every
    condition, dependency, batching, `Inputs`, `Outputs`, and up-to-date

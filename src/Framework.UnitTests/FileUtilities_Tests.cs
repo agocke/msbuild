@@ -926,10 +926,12 @@ public class FileUtilities_Tests
             Directory.SetCurrentDirectory(tmpDirectory);
 
             // We are in <tmp_dir> and second is not under that, so this won't convert
-            Assert.Equal("second\\file.txt", FileUtilities.MaybeAdjustFilePath("second\\file.txt"));
+            FileUtilities.MaybeAdjustFilePath("second\\file.txt").ShouldBe("second\\file.txt");
+            FileUtilities.MaybeAdjustFilePath("second\\file.txt".AsMemory()).ToString().ShouldBe("second\\file.txt");
 
             // .. but if we have baseDirectory:firstDirectory, then it will
-            Assert.Equal("second/file.txt", FileUtilities.MaybeAdjustFilePath("second\\file.txt", firstDirectory));
+            FileUtilities.MaybeAdjustFilePath("second\\file.txt", firstDirectory).ShouldBe("second/file.txt");
+            FileUtilities.MaybeAdjustFilePath("second\\file.txt".AsMemory(), firstDirectory).ToString().ShouldBe("second/file.txt");
         }
         finally
         {
@@ -940,6 +942,37 @@ public class FileUtilities_Tests
             Directory.SetCurrentDirectory(oldCWD);
         }
     }
+
+#if NET
+    [UnixOnlyTheory]
+    [InlineData("file.txt")]
+    [InlineData("Configuration=Debug;RuntimeConfiguration=Release")]
+    [InlineData("'quoted value'")]
+    [InlineData("%2f;%(Metadata);$(Property);@(Items)")]
+    public void MaybeAdjustFilePathWithoutSlashesDoesNotAllocate(string value)
+    {
+        ReadOnlyMemory<char> memory = value.AsMemory();
+        for (int i = 0; i < 64; i++)
+        {
+            FileUtilities.MaybeAdjustFilePath(value);
+            FileUtilities.MaybeAdjustFilePath(memory);
+        }
+
+        string result = null;
+        ReadOnlyMemory<char> memoryResult = default;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 256; i++)
+        {
+            result = FileUtilities.MaybeAdjustFilePath(value);
+            memoryResult = FileUtilities.MaybeAdjustFilePath(memory);
+        }
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        result.ShouldBeSameAs(value);
+        memoryResult.Equals(memory).ShouldBeTrue();
+        allocated.ShouldBe(0);
+    }
+#endif
 
     /// <summary>
     /// MaybeAdjustFilePath should correctly convert backslashes to forward slashes
