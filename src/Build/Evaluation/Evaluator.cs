@@ -3848,14 +3848,18 @@ namespace Microsoft.Build.Evaluation
                 module.Header.DirectoryPath,
                 (ProjectImportElement)module.GetSource(import.SourceId),
                 module,
-                import.CompiledConditionId);
+                import.CompiledConditionId,
+                _evaluationContext.UseCompiledModuleEffectBatches
+                    ? import.CompiledPath
+                    : null);
         }
 
         private void EvaluateImportElement(
             string directoryOfImportingFile,
             ProjectImportElement importElement,
             EvaluationModule module,
-            int compiledConditionId)
+            int compiledConditionId,
+            CompiledImportPath compiledImportPath = null)
         {
             using (_evaluationProfiler.TrackElement(importElement))
             {
@@ -3871,7 +3875,8 @@ namespace Microsoft.Build.Evaluation
                         importElement,
                         out sdkResult,
                         module,
-                        compiledConditionId);
+                        compiledConditionId,
+                        compiledImportPath);
                 }
 
                 if (importedProjectRootElements != null)
@@ -4102,7 +4107,8 @@ namespace Microsoft.Build.Evaluation
             ProjectImportElement importElement,
             out SdkResult sdkResult,
             EvaluationModule module,
-            int compiledConditionId)
+            int compiledConditionId,
+            CompiledImportPath compiledImportPath = null)
         {
             var fallbackSearchPathMatch = _data.Toolset.GetProjectImportSearchPaths(importElement.Project);
             sdkResult = null;
@@ -4129,7 +4135,8 @@ namespace Microsoft.Build.Evaluation
                     importElement,
                     compiledConditionResult,
                     out projects,
-                    out sdkResult);
+                    out sdkResult,
+                    compiledImportPath);
                 return projects;
             }
 
@@ -4304,7 +4311,8 @@ namespace Microsoft.Build.Evaluation
             ProjectImportElement importElement,
             bool? compiledConditionResult,
             out List<ProjectRootElement> projects,
-            out SdkResult sdkResult)
+            out SdkResult sdkResult,
+            CompiledImportPath compiledImportPath = null)
         {
             projects = null;
             sdkResult = null;
@@ -4523,7 +4531,7 @@ namespace Microsoft.Build.Evaluation
             else
             {
                 ExpandAndLoadImportsFromUnescapedImportExpression(directoryOfImportingFile, importElement, project,
-                    throwOnFileNotExistsError: true, out projects);
+                    throwOnFileNotExistsError: true, out projects, compiledImportPath);
             }
         }
 
@@ -4627,11 +4635,12 @@ namespace Microsoft.Build.Evaluation
         /// requests can be satisfied without re-parsing it.
         /// </summary>
         private LoadImportsResult ExpandAndLoadImportsFromUnescapedImportExpression(string directoryOfImportingFile, ProjectImportElement importElement, string unescapedExpression,
-                                            bool throwOnFileNotExistsError, out List<ProjectRootElement> imports)
+                                            bool throwOnFileNotExistsError, out List<ProjectRootElement> imports, CompiledImportPath compiledImportPath = null)
         {
             imports = null;
 
-            string importExpressionEscaped = _expander.ExpandIntoStringLeaveEscaped(unescapedExpression, ExpanderOptions.ExpandProperties, importElement.ProjectLocation);
+            string importExpressionEscaped = compiledImportPath?.ExpandedPath ??
+                _expander.ExpandIntoStringLeaveEscaped(unescapedExpression, ExpanderOptions.ExpandProperties, importElement.ProjectLocation);
             ElementLocation importLocationInProject = importElement.Location;
 
             if (string.IsNullOrWhiteSpace(importExpressionEscaped))
@@ -4680,7 +4689,7 @@ namespace Microsoft.Build.Evaluation
                     }
 
                     // Expand the wildcards and provide an alphabetical order list of import statements.
-                    importFilesEscaped = EngineFileUtilities.GetFileListEscaped(
+                    importFilesEscaped = compiledImportPath?.FilesEscaped ?? EngineFileUtilities.GetFileListEscaped(
                         directoryOfImportingFile,
                         importExpressionEscapedItem,
                         forceEvaluate: true,
@@ -4731,7 +4740,8 @@ namespace Microsoft.Build.Evaluation
                         }
 
                         // Canonicalize to eg., eliminate "\..\"
-                        importFileUnescaped = FileUtilities.NormalizePath(importFileUnescaped);
+                        importFileUnescaped = compiledImportPath?.GetNormalizedPath() ??
+                            FileUtilities.NormalizePath(importFileUnescaped);
                     }
                     catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
                     {

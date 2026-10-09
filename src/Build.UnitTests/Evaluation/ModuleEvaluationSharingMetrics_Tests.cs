@@ -12,6 +12,7 @@ using Microsoft.Build.Definition;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Engine.UnitTests.TestComparers;
+using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Graph;
@@ -1845,6 +1846,205 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 moduleContext.GetModuleEvaluationSharingMetrics();
             metrics.ModuleLowerings.ShouldBe(2);
             metrics.ModuleCacheMisses.ShouldBe(2);
+        }
+
+        [Theory]
+        [InlineData("$(MSBuildThisFileDirectory)common.props", true)]
+        [InlineData("$(msbuildthisfiledirectory)./common.props", true)]
+        [InlineData("$(MSBuildThisFileDirectory)unused/../common.props", true)]
+        [InlineData("$(MSBuildThisFileDirectory)common%2eprops", false)]
+        [InlineData("$(MSBuildThisFileDirectory)$(ImportName).props", false)]
+        [InlineData("$(MSBuildThisFileDirectory)common.props;$(MSBuildThisFileDirectory)common.props", false)]
+        public void CompiledImportPathsPreserveExpansionAndConfigurationEffects(
+            string expression,
+            bool isCompiled)
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            _ = environment.CreateFile(
+                "common.props",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Trace>$(Trace)$(Marker);</Trace>
+                  </PropertyGroup>
+                </Project>
+                """);
+            var projectFile = environment.CreateFile(
+                "root.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Trace>before;</Trace>
+                  </PropertyGroup>
+                  <Import Project="{expression}" />
+                  <PropertyGroup>
+                    <Trace>$(Trace)after</Trace>
+                  </PropertyGroup>
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.CreateForCompiledModuleEvaluation(
+                useCompiledModuleEffectBatches: true);
+            ProjectCollection collection = environment.CreateProjectCollection().Collection;
+
+            string[] markers = ["A", "B"];
+            foreach (string marker in markers)
+            {
+                var globals = new Dictionary<string, string>
+                {
+                    ["Marker"] = marker,
+                    ["ImportName"] = "common",
+                };
+                Project optimized = EvaluateWithGlobals(projectFile.Path, collection, context, globals);
+                Project scalar = EvaluateWithGlobals(
+                    projectFile.Path,
+                    environment.CreateProjectCollection().Collection,
+                    EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared),
+                    globals);
+
+                AssertEquivalentProperties(scalar, optimized);
+                optimized.GetPropertyValue("Trace").ShouldBe($"before;{marker};after");
+                optimized.Imports.Select(import => import.ImportedProject.FullPath)
+                    .ShouldBe(scalar.Imports.Select(import => import.ImportedProject.FullPath));
+                (context.EvaluationModuleCache.GetModule(optimized.Xml).Imports[0].CompiledPath is not null)
+                    .ShouldBe(isCompiled);
+            }
+        }
+
+        [Fact]
+        public void CompiledImportPathsPreserveFalseConditionsAndMissingFileErrors()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            var projectFile = environment.CreateFile(
+                "root.proj",
+                """
+                <Project>
+                  <Import Project="$(MSBuildThisFileDirectory)missing.props"
+                          Condition="'$(Load)' == 'true'" />
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.CreateForCompiledModuleEvaluation(
+                useCompiledModuleEffectBatches: true);
+            ProjectCollection collection = environment.CreateProjectCollection().Collection;
+            Project skipped = EvaluateWithGlobals(
+                projectFile.Path, collection, context, new Dictionary<string, string>());
+            skipped.Imports.ShouldBeEmpty();
+            context.EvaluationModuleCache.GetModule(skipped.Xml).Imports[0].CompiledPath.ShouldNotBeNull();
+
+            var globals = new Dictionary<string, string> { ["Load"] = "true" };
+            InvalidProjectFileException optimizedError = Should.Throw<InvalidProjectFileException>(
+                () => EvaluateWithGlobals(projectFile.Path, collection, context, globals));
+            InvalidProjectFileException scalarError = Should.Throw<InvalidProjectFileException>(
+                () => EvaluateWithGlobals(
+                    projectFile.Path,
+                    environment.CreateProjectCollection().Collection,
+                    EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared),
+                    globals));
+            optimizedError.Message.ShouldBe(scalarError.Message);
+            optimizedError.LineNumber.ShouldBe(scalarError.LineNumber);
+            optimizedError.ErrorCode.ShouldBe(scalarError.ErrorCode);
+        }
+
+        [Fact]
+        public void CompiledImportPathsPreserveNestedAndCircularImportBookkeeping()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            _ = environment.CreateFile(
+                "first.props",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Trace>$(Trace)first;</Trace>
+                  </PropertyGroup>
+                  <Import Project="$(MSBuildThisFileDirectory)second.props" />
+                </Project>
+                """);
+            _ = environment.CreateFile(
+                "second.props",
+                """
+                <Project>
+                  <Import Project="$(MSBuildThisFileDirectory)first.props" />
+                  <PropertyGroup>
+                    <Trace>$(Trace)second;</Trace>
+                  </PropertyGroup>
+                </Project>
+                """);
+            var projectFile = environment.CreateFile(
+                "root.proj",
+                """
+                <Project>
+                  <Import Project="$(MSBuildThisFileDirectory)first.props" />
+                  <Import Project="$(MSBuildThisFileDirectory)second.props" />
+                </Project>
+                """);
+            Project optimized = EvaluateWithGlobals(
+                projectFile.Path,
+                environment.CreateProjectCollection().Collection,
+                EvaluationContext.CreateForCompiledModuleEvaluation(useCompiledModuleEffectBatches: true),
+                new Dictionary<string, string>());
+            Project scalar = EvaluateWithGlobals(
+                projectFile.Path,
+                environment.CreateProjectCollection().Collection,
+                EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared),
+                new Dictionary<string, string>());
+
+            AssertEquivalentProperties(scalar, optimized);
+            optimized.GetPropertyValue("Trace").ShouldBe("first;second;");
+            optimized.Imports.Select(import => import.ImportedProject.FullPath)
+                .ShouldBe(scalar.Imports.Select(import => import.ImportedProject.FullPath));
+        }
+
+        [Fact]
+        public void CompiledImportPathsInvalidateWhenExpressionOrFileLocationChanges()
+        {
+            using TestEnvironment environment = TestEnvironment.Create();
+            _ = environment.CreateFile(
+                "first.props",
+                """
+                <Project>
+                  <PropertyGroup><Value>first</Value></PropertyGroup>
+                </Project>
+                """);
+            _ = environment.CreateFile(
+                "second.props",
+                """
+                <Project>
+                  <PropertyGroup><Value>second</Value></PropertyGroup>
+                </Project>
+                """);
+            string relocatedDirectory = environment.CreateFolder().Path;
+            _ = environment.CreateFile(
+                Path.Combine(relocatedDirectory, "second.props"),
+                """
+                <Project>
+                  <PropertyGroup><Value>relocated</Value></PropertyGroup>
+                </Project>
+                """);
+            var relocated = environment.CreateFile(Path.Combine(relocatedDirectory, "root.proj"), "<Project />");
+            var projectFile = environment.CreateFile(
+                "root.proj",
+                """
+                <Project>
+                  <Import Project="$(MSBuildThisFileDirectory)first.props" />
+                </Project>
+                """);
+            EvaluationContext context = EvaluationContext.CreateForCompiledModuleEvaluation(
+                useCompiledModuleEffectBatches: true);
+            Project project = EvaluateWithGlobals(
+                projectFile.Path,
+                environment.CreateProjectCollection().Collection,
+                context,
+                new Dictionary<string, string>());
+            project.GetPropertyValue("Value").ShouldBe("first");
+
+            project.Xml.Imports.Single().Project = "$(MSBuildThisFileDirectory)second.props";
+            project.ReevaluateIfNecessary(context);
+            project.GetPropertyValue("Value").ShouldBe("second");
+
+            project.Xml.FullPath = relocated.Path;
+            project.ReevaluateIfNecessary(context);
+            project.GetPropertyValue("Value").ShouldBe("relocated");
+            project.Imports.Single().ImportedProject.FullPath
+                .ShouldBe(Path.Combine(relocatedDirectory, "second.props"));
         }
 
         [Fact]

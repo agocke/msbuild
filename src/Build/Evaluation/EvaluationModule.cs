@@ -941,12 +941,14 @@ namespace Microsoft.Build.Evaluation
             int conditionId,
             int compiledConditionId,
             int projectExpressionId,
-            int sourceId)
+            int sourceId,
+            CompiledImportPath compiledPath)
         {
             ConditionId = conditionId;
             CompiledConditionId = compiledConditionId;
             ProjectExpressionId = projectExpressionId;
             SourceId = sourceId;
+            CompiledPath = compiledPath;
         }
 
         internal int ConditionId { get; }
@@ -956,6 +958,71 @@ namespace Microsoft.Build.Evaluation
         internal int ProjectExpressionId { get; }
 
         internal int SourceId { get; }
+
+        internal CompiledImportPath CompiledPath { get; }
+    }
+
+    internal sealed class CompiledImportPath
+    {
+        private string _normalizedPath;
+
+        private CompiledImportPath(string expandedPath)
+        {
+            ExpandedPath = expandedPath;
+            FilesEscaped = [expandedPath];
+        }
+
+        internal string ExpandedPath { get; }
+
+        internal string[] FilesEscaped { get; }
+
+        internal string GetNormalizedPath()
+        {
+            string path = Volatile.Read(ref _normalizedPath);
+            if (path is null)
+            {
+                // Normalize only after the condition succeeds, preserving error timing.
+                path = FileUtilities.NormalizePath(ExpandedPath);
+                Interlocked.CompareExchange(ref _normalizedPath, path, null);
+            }
+
+            return path;
+        }
+
+        internal static CompiledImportPath TryCreate(ProjectImportElement import)
+        {
+            const string prefix = "$(MSBuildThisFileDirectory)";
+            string expression = import.Project;
+            string file = import.ProjectLocation.File;
+            if (import.SdkReference is not null ||
+                string.IsNullOrEmpty(file) ||
+                !expression.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                expression.Length == prefix.Length)
+            {
+                return null;
+            }
+
+            string expandedPath = string.Concat(
+                FileUtilities.EnsureTrailingSlash(Path.GetDirectoryName(file)),
+                expression.Substring(prefix.Length));
+            if (!Path.IsPathRooted(expandedPath) ||
+                (!NativeMethodsShared.IsWindows && expandedPath.IndexOf('\\') >= 0) ||
+                char.IsWhiteSpace(expandedPath[expandedPath.Length - 1]))
+            {
+                return null;
+            }
+
+            foreach (char character in expandedPath)
+            {
+                if (character is '$' or '@' or '%' or ';' or '*' or '?' ||
+                    char.IsControl(character))
+                {
+                    return null;
+                }
+            }
+
+            return new CompiledImportPath(expandedPath);
+        }
     }
 
     internal readonly struct ChooseTemplate
@@ -4008,7 +4075,8 @@ namespace Microsoft.Build.Evaluation
                         sourceId,
                         ParserOptions.AllowProperties),
                     AddExpression(import.Project, sourceId),
-                    sourceId));
+                    sourceId,
+                    CompiledImportPath.TryCreate(import)));
                 return _imports.Count - 1;
             }
 
