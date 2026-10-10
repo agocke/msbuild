@@ -110,6 +110,60 @@ second, so IL bootstrap measurements are representative once PGO is
 controlled. Engine accounting below uses PGO off and reports PGO
 separately.
 
+### Static-graph binlog and a Native AOT console
+
+`dotnet/runtime` sets `GenerateRestoreUseStaticGraphEvaluationBinlog`,
+which makes the NuGet console write a binlog (later runtime commits turn
+it off). Interleaved runs on the ReadyToRun SDK, three per cell:
+
+| Static-graph binlog | PGO | Wall | Instructions | CPU s |
+| --- | --- | ---: | ---: | ---: |
+| on | on | 33.73 ± 0.86 s | 625.6 G | 224.4 |
+| off | on | 27.75 ± 0.17 s | 825.1 G | 280.4 |
+| on | off | 22.68 ± 0.56 s | 325.6 G | 140.5 |
+| off | off | 16.64 ± 0.13 s | 289.5 G | 128.2 |
+
+The binlog costs ~6 s of wall time but only ~36 G instructions, so its
+writer is on a serial path. With PGO on, removing it *raises*
+instructions, probably from more concurrent contention on the shared
+profiling counters; PGO-on instruction counts are not a reliable unit.
+
+The console process is almost entirely MSBuild: NuGet's own frames are
+~5% of its instructions. A Native AOT build of it needs no NuGet or SDK
+changes. A host executable links `NuGet.Build.Tasks.Console`, MSBuild, the
+NuGet libraries, the restore tasks, and both SDK resolvers. It registers
+the ten tasks restore runs (`Task.RegisterTask<T>`) and the resolvers
+(`SdkResolver.Register`), and forwards to the console's `Program.Main`.
+Restore launches it with `-p:NuGetConsoleProcessFileName=<exe>`, and it
+lives in `sdk/<version>/`, where the workload resolver expects to run. It
+uses the closed-world feature switches from `src/aot-validation` with
+one exception: `RestrictPropertyFunctionReceivers` must stay `false`.
+`dotnet/runtime`'s `eng/Versions.props` calls `Match.Groups` on a regex
+match, and its coreclr `Directory.Build.targets` reads `DirectoryInfo.Name`,
+both rejected by the restricted receiver set. Keeping JIT semantics
+requires rooting the reflected framework surface (`System.IO`, regex, and
+common value types). One engine bug surfaced and is fixed:
+`ToolLocationHelper.GetDefaultSDKDiskRoots` added the empty AOT
+`FrameworkBasePath` as a disk root and then threw.
+
+All 639 assets match the JIT console except for the embedded SDK directory
+path. Interleaved, binlog and PGO off, three pairs:
+
+| Console | Wall | Instructions | Cycles | CPU s |
+| --- | ---: | ---: | ---: | ---: |
+| JIT (ReadyToRun + tiering) | 16.85 ± 0.29 s | 285.9 G | 448.2 G | 127.5 |
+| Native AOT (ILC) | 13.83 ± 0.26 s | 274.4 G | 360.6 G | 101.8 |
+
+The gain is code quality, not less work: ~4% fewer instructions but 20%
+fewer cycles (IPC 0.64 → 0.76), plus no JIT thread. Server GC must be
+linked explicitly (`ServerGarbageCollection=true`; the GC flavor is a
+link-time choice in Native AOT). The workstation GC alone took this
+restore to ~37 s through allocation-lock contention.
+
+From 33.7 s, runtime configuration and hosting alone (no binlog, no
+PGO in the console, Native AOT) reach 13.8 s on this 8-core machine with
+no evaluator changes. Engine accounting should start from that baseline.
+
 ### Where the remaining instructions go (PGO off)
 
 A call-stack classifier over the R2R-equivalent IL profile assigns each
