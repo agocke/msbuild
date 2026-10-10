@@ -127,6 +127,14 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             replayLogger.Initialize(replay);
             replay.Replay(binlog);
             ProjectStartedEventArgs started = replayLogger.ProjectStartedEvents.ShouldHaveSingleItem();
+            if (outOfProc)
+            {
+                // Remote nodes omit ProjectStarted properties unless all properties are serialized,
+                // matching evaluation without compact state.
+                (started.Properties?.Cast<DictionaryEntry>() ?? []).ShouldBeEmpty();
+                return;
+            }
+
             DictionaryEntry value = started.Properties.Cast<DictionaryEntry>()
                 .Single(entry => (string)entry.Key == "Value");
             value.Value.ShouldBe("initial;value");
