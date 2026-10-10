@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Threading;
 
 using Microsoft.Build.BackEnd.Logging;
+using Microsoft.Build.Instrumentation;
 using Microsoft.Build.Shared.FileSystem;
 using BuildEventContext = Microsoft.Build.Framework.BuildEventContext;
 using ElementLocation = Microsoft.Build.Construction.ElementLocation;
@@ -211,6 +212,35 @@ namespace Microsoft.Build.Evaluation
         /// Logging service may be null.
         /// </summary>
         internal static bool EvaluateConditionCollectingConditionedProperties<P, I>(
+            string condition,
+            ParserOptions options,
+            Expander<P, I> expander,
+            ExpanderOptions expanderOptions,
+            Dictionary<string, List<string>>? conditionedPropertiesTable,
+            string evaluationDirectory,
+            ElementLocation elementLocation,
+            IFileSystem fileSystem,
+            LoggingContext? loggingContext,
+            ProjectRootElementCacheBase? projectRootElementCache = null)
+            where P : class, IProperty
+            where I : class, IItem
+        {
+            bool result = EvaluateConditionCollectingConditionedPropertiesCore(
+                condition,
+                options,
+                expander,
+                expanderOptions,
+                conditionedPropertiesTable,
+                evaluationDirectory,
+                elementLocation,
+                fileSystem,
+                loggingContext,
+                projectRootElementCache);
+            EvaluationTrace.Condition(condition, result);
+            return result;
+        }
+
+        private static bool EvaluateConditionCollectingConditionedPropertiesCore<P, I>(
             string condition,
             ParserOptions options,
             Expander<P, I> expander,

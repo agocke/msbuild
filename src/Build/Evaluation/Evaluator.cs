@@ -23,6 +23,7 @@ using Microsoft.Build.ProjectCache;
 using Microsoft.Build.FileSystem;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Framework.Profiler;
+using Microsoft.Build.Instrumentation;
 using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
@@ -697,6 +698,7 @@ namespace Microsoft.Build.Evaluation
             {
                 Assumed.Equal(_data.EvaluationId, BuildEventContext.InvalidEvaluationId, "There is no prior evaluation ID. The evaluator data needs to be reset at this point");
                 _data.EvaluationId = _evaluationLoggingContext.BuildEventContext.EvaluationId;
+                EvaluationTrace.BeginEvaluation(projectFile);
                 _evaluationLoggingContext.LogProjectEvaluationStarted();
 
                 string configMessage = _projectRootElementCache.ParserIgnoreConfiguration?.GetLoadedConfigsMessage();
@@ -737,6 +739,7 @@ namespace Microsoft.Build.Evaluation
 
                 // Pass1: evaluate properties, load imports, and gather everything else
                 MSBuildEventSource.Log.EvaluatePass1Start(projectFile);
+                EvaluationTrace.Pass('P');
                 using (EvaluationPerformanceInstrumentation.Measure(
                            EvaluationPerformanceMetric.PropertiesAndImports))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.Properties))
@@ -764,6 +767,7 @@ namespace Microsoft.Build.Evaluation
                 // Pass2: evaluate item definitions
                 // Don't box via IEnumerator and foreach; cache count so not to evaluate via interface each iteration
                 MSBuildEventSource.Log.EvaluatePass2Start(projectFile);
+                EvaluationTrace.Pass('D');
                 using (EvaluationPerformanceInstrumentation.Measure(
                            EvaluationPerformanceMetric.ItemDefinitions))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.ItemDefinitionGroups))
@@ -803,6 +807,7 @@ namespace Microsoft.Build.Evaluation
                 }
 
                 LazyItemEvaluator<P, I, M, D> lazyEvaluator = null;
+                EvaluationTrace.Pass('I');
                 using (EvaluationPerformanceInstrumentation.Measure(
                            EvaluationPerformanceMetric.ItemOperationConstruction))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.Items))
@@ -890,6 +895,7 @@ namespace Microsoft.Build.Evaluation
 
                 // Pass4: evaluate using-tasks
                 MSBuildEventSource.Log.EvaluatePass4Start(projectFile);
+                EvaluationTrace.Pass('U');
                 using (EvaluationPerformanceInstrumentation.Measure(
                            EvaluationPerformanceMetric.UsingTasks))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.UsingTasks))
@@ -954,6 +960,8 @@ namespace Microsoft.Build.Evaluation
                             string,
                             LinkedListNode<TargetEvaluationEntry>>(
                                 StringComparer.OrdinalIgnoreCase);
+
+                EvaluationTrace.Pass('T');
 
                 using (EvaluationPerformanceInstrumentation.Measure(
                            EvaluationPerformanceMetric.Targets))
@@ -1028,6 +1036,11 @@ namespace Microsoft.Build.Evaluation
         private void FinishEvaluation()
         {
             _data.FinishEvaluation();
+            // Reading _data.Properties materializes compact property state, so touch it only while tracing.
+            if (EvaluationTrace.Active)
+            {
+                EvaluationTrace.EndEvaluation<P>(_data.Properties);
+            }
         }
 
         private IEnumerable FilterOutEnvironmentDerivedProperties(PropertyDictionary<P> dictionary)
@@ -3536,16 +3549,13 @@ namespace Microsoft.Build.Evaluation
                 propertyElement,
                 evaluatedValue,
                 _evaluationLoggingContext);
+            EvaluationTrace.PropertyElement(propertyElement.Name, propertyElement.Value, evaluatedValue);
             return true;
         }
 
-        private bool IsNonOverridableGlobalProperty(string propertyName)
-        {
-            _ = GetGlobalOverrideObservation(
-                propertyName,
-                out bool isNonOverridableGlobal);
-            return isNonOverridableGlobal;
-        }
+        private bool IsNonOverridableGlobalProperty(string propertyName) =>
+            ((IDictionary<string, ProjectPropertyInstance>)_data.GlobalPropertiesDictionary).ContainsKey(propertyName) &&
+            !_data.GlobalPropertiesToTreatAsLocal.Contains(propertyName);
 
         private string GetGlobalOverrideObservation(
             string propertyName,
