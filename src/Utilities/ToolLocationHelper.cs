@@ -2912,8 +2912,9 @@ namespace Microsoft.Build.Utilities
                     "Microsoft SDKs");
                 diskRoots.Add(defaultProgramFilesLocation);
             }
-            else
+            else if (NativeMethodsShared.FrameworkBasePath.Length > 0)
             {
+                // Empty under Native AOT, where there is no framework directory on disk.
                 diskRoots.Add(NativeMethodsShared.FrameworkBasePath);
             }
         }
