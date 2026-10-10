@@ -3939,7 +3939,9 @@ namespace Microsoft.Build.Evaluation
                         _resolvedImports ??= [];
                         _resolvedImports.Add((importedProjectRootElement, importElement, sdkResult));
 
+                        EvaluationTrace.ImportEnter(importedProjectRootElement.FullPath ?? string.Empty);
                         PerformDepthFirstPass(importedProjectRootElement);
+                        EvaluationTrace.ImportExit();
                     }
                 }
             }

@@ -12,6 +12,7 @@ using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Experimental.BuildCheck.Infrastructure;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Instrumentation;
 using Microsoft.Build.Shared;
 using SdkResult = Microsoft.Build.BackEnd.SdkResolution.SdkResult;
 
@@ -71,6 +72,11 @@ namespace Microsoft.Build.Evaluation
         {
             P prop = _wrapped.GetProperty(name);
             _moduleEvaluationReadTracker?.RecordPropertyRead(name, prop);
+            if (EvaluationTrace.Active)
+            {
+                EvaluationTrace.PropertyRead(name, EscapedValueOf(prop));
+            }
+
             if (IsPropertyReadTrackingRequested)
             {
                 this.TrackPropertyRead(name, prop);
@@ -86,6 +92,11 @@ namespace Microsoft.Build.Evaluation
         public P GetProperty(string name, int startIndex, int endIndex)
         {
             P prop = _wrapped.GetProperty(name, startIndex, endIndex);
+
+            if (EvaluationTrace.Active)
+            {
+                EvaluationTrace.PropertyRead(name.Substring(startIndex, endIndex - startIndex + 1), EscapedValueOf(prop));
+            }
 
             // Only build the name substring when something consumes it: this runs for every $(X) lookup.
             if (_moduleEvaluationReadTracker?.IsRecording == true)
@@ -103,6 +114,9 @@ namespace Microsoft.Build.Evaluation
             return prop;
         }
 
+        // A separate method so the caller's flow state for the property is unchanged by the null check.
+        private static string? EscapedValueOf(P? property) => property?.EscapedValue;
+
         public bool TryGetEscapedPropertyValue(
             string name,
             int startIndex,
@@ -118,6 +132,11 @@ namespace Microsoft.Build.Evaluation
             {
                 escapedValue = string.Empty;
                 return false;
+            }
+
+            if (EvaluationTrace.Active)
+            {
+                EvaluationTrace.PropertyRead(name.Substring(startIndex, endIndex - startIndex + 1), escapedValue);
             }
 
             bool recording = _moduleEvaluationReadTracker?.IsRecording == true;

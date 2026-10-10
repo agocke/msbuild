@@ -2,7 +2,7 @@
 # One clean, package-cached static-graph restore of dotnet/runtime with a given SDK snapshot.
 #
 # usage: run.sh <sdk-dir> <out-dir> [wrapper command...]
-#   <sdk-dir>  an SDK snapshot (see snapshot-sdk.sh)
+#   <sdk-dir>  an SDK snapshot directory or label (see snapshot-sdk.sh)
 #   <out-dir>  receives console.log and result.txt
 #   wrapper    optional prefix, e.g.: perf stat -x, -o "$OUT/perf-stat.csv" -e instructions:u,instructions:k --
 #
@@ -11,7 +11,9 @@
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-SDK=$(realpath "$1")
+SDK=$1
+[[ -d $SDK ]] || SDK=$SDKS/$SDK   # a snapshot label
+SDK=$(realpath "$SDK")
 OUT=$(realpath -m "$2")
 shift 2
 VER=$(detect_sdk_version)
