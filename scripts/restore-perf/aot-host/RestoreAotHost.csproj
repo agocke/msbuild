@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Native AOT host for NuGet's static-graph restore console (NuGet.Build.Tasks.Console). It links the
+    console, MSBuild, the NuGet libraries, and the tasks/SDK resolvers that restore uses into one image,
+    registers those tasks and resolvers with MSBuild's host-registration APIs, and forwards to the
+    console's Program.Main. Launch it from restore with -p:NuGetConsoleProcessFileName=<this exe>.
+    Build with build.sh, which passes SdkDir (the sdk/<version> directory of an SDK snapshot).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <PublishAot>true</PublishAot>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- The NuGet and SDK task assemblies are not trim-annotated; survey warnings instead of failing. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+    <NoWarn>$(NoWarn);IL2026;IL2104;IL3050;IL3053;IL2072;IL2075;IL2057;CS8012</NoWarn>
+  </PropertyGroup>
+
+  <!-- The same closed-world feature switches as src/aot-validation (an AOT dotnet CLI host). -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableSdkResolverDynamicLoading" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableAllPropertyFunctions" Value="false" Trim="true" />
+    <!-- Unlike aot-validation: dotnet/runtime's eng/Versions.props dots into Regex Match.Groups, which the
+         restricted receiver set rejects, so keep the JIT (unrestricted) semantics and root what it reflects on. -->
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.RestrictPropertyFunctionReceivers" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableConfigurationFileToolsets" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableReflectiveTaskExecution" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableReflectiveTaskParameterTypes" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableCustomPluginProbing" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableReflectiveLoggerLoading" Value="false" Trim="true" />
+  </ItemGroup>
+
+  <Target Name="RequireSdkDir" BeforeTargets="ResolveAssemblyReferences" Condition="'$(SdkDir)' == ''">
+    <Error Text="Pass -p:SdkDir=&lt;snapshot&gt;/sdk/&lt;version&gt; (see build.sh)." />
+  </Target>
+
+  <ItemGroup>
+    <SdkAssembly Include="Microsoft.Build;Microsoft.Build.Framework;Microsoft.Build.Tasks.Core;Microsoft.Build.Utilities.Core;Microsoft.NET.StringTools" />
+    <SdkAssembly Include="NuGet.Build.Tasks.Console;NuGet.Build.Tasks;NuGet.Commands;NuGet.Common;NuGet.Configuration;NuGet.Credentials;NuGet.DependencyResolver.Core;NuGet.Frameworks;NuGet.LibraryModel;NuGet.Packaging;NuGet.ProjectModel;NuGet.Protocol;NuGet.Versioning;Newtonsoft.Json" />
+    <SdkAssembly Include="Microsoft.Build.NuGetSdkResolver;Microsoft.NET.Sdk.WorkloadMSBuildSdkResolver;Microsoft.NET.Sdk.WorkloadManifestReader;Microsoft.Deployment.DotNet.Releases;Microsoft.Extensions.DependencyModel;Microsoft.Bcl.AsyncInterfaces" />
+    <Reference Include="@(SdkAssembly)" HintPath="$(SdkDir)/%(Identity).dll" />
+    <Reference Include="Microsoft.NET.Build.Tasks" HintPath="$(SdkDir)/Sdks/Microsoft.NET.Sdk/tools/net11.0/Microsoft.NET.Build.Tasks.dll" />
+    <!-- SDK-shipped dependencies that are not in the shared framework. -->
+    <SdkDependency Include="System.ClientModel;System.CodeDom;System.Configuration.ConfigurationManager;System.Diagnostics.EventLog;System.Formats.Nrbf;System.IO.Hashing;System.Memory.Data;System.Reflection.MetadataLoadContext;System.Resources.Extensions;System.Security.Cryptography.Pkcs;System.Security.Cryptography.ProtectedData;System.Security.Cryptography.Xml;System.ServiceProcess.ServiceController" />
+    <SdkDependency Include="Microsoft.Extensions.Configuration.Binder;Microsoft.Extensions.Configuration;Microsoft.Extensions.DependencyInjection;Microsoft.Extensions.FileSystemGlobbing;Microsoft.Extensions.Logging.Configuration;Microsoft.Extensions.Logging.Console;Microsoft.Extensions.Logging;Microsoft.Extensions.Options.ConfigurationExtensions" />
+    <Reference Include="@(SdkDependency)" HintPath="$(SdkDir)/%(Identity).dll" />
+
+    <!-- Not trim-annotated: keep them whole so reflection (JSON, resource lookups, task binding) still works. -->
+    <TrimmerRootAssembly Include="@(SdkAssembly)" Exclude="Microsoft.Build;Microsoft.Build.Framework;Microsoft.Build.Tasks.Core;Microsoft.NET.StringTools" />
+    <TrimmerRootAssembly Include="Microsoft.NET.Build.Tasks" />
+    <TrimmerRootAssembly Include="System.Text.RegularExpressions" />
+    <TrimmerRootDescriptor Include="PropertyFunctionRoots.xml" />
+  </ItemGroup>
+
+</Project>

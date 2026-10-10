@@ -1,0 +1,3 @@
+<Project>
+  <!-- Standalone project: do not inherit the MSBuild repository's build settings. -->
+</Project>

@@ -1,0 +1,39 @@
+<!--
+  Property functions with unrestricted receivers can return framework objects and dot into their members
+  ($([System.IO.Directory]::GetParent(...).Name)), which MSBuild resolves by reflection. Keep reflection
+  metadata for the framework surface that MSBuild projects reach this way.
+-->
+<linker>
+  <assembly fullname="System.Private.CoreLib">
+    <namespace fullname="System.IO" />
+    <type fullname="System.String" />
+    <type fullname="System.Char" />
+    <type fullname="System.Boolean" />
+    <type fullname="System.Byte" />
+    <type fullname="System.Int16" />
+    <type fullname="System.Int32" />
+    <type fullname="System.Int64" />
+    <type fullname="System.UInt16" />
+    <type fullname="System.UInt32" />
+    <type fullname="System.UInt64" />
+    <type fullname="System.Single" />
+    <type fullname="System.Double" />
+    <type fullname="System.Decimal" />
+    <type fullname="System.Version" />
+    <type fullname="System.Guid" />
+    <type fullname="System.DateTime" />
+    <type fullname="System.DateTimeOffset" />
+    <type fullname="System.TimeSpan" />
+    <type fullname="System.Math" />
+    <type fullname="System.Convert" />
+    <type fullname="System.Environment" />
+    <type fullname="System.OperatingSystem" />
+    <type fullname="System.StringComparison" />
+    <type fullname="System.StringSplitOptions" />
+    <type fullname="System.Runtime.InteropServices.RuntimeInformation" />
+    <type fullname="System.Runtime.InteropServices.OSPlatform" />
+    <type fullname="System.Runtime.InteropServices.Architecture" />
+    <type fullname="System.Globalization.CultureInfo" />
+    <type fullname="System.Text.Encoding" />
+  </assembly>
+</linker>

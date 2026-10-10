@@ -23,6 +23,9 @@ across sections.** Each section names its machine and its controls.
 
 ### Harness and tools
 
+The scripts are in [`scripts/restore-perf`](../../../scripts/restore-perf/README.md), parameterized for
+any machine; this section summarizes them.
+
 - **Machine:** 8 cores/16 threads (Zen 1), Fedora, with
   `kernel.perf_event_paranoid=1` so kernel instructions are counted.
 - **Workload:** a local clone of `dotnet/runtime` at `3b5416d` restores
