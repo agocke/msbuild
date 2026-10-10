@@ -17,6 +17,211 @@ discarded approaches are in
 [evaluation performance dead ends](evaluation-performance-dead-ends.md).
 Neither document's measurements can be added to the historical decomposition.
 
+## Status (October 2026)
+
+| Phase | Current (diagnostic follow-up epoch, 20.4 s total) | Design goal |
+| --- | --- | --- |
+| Graph/evaluation | 8.45 s elapsed, 150.8 process-CPU s (effective parallelism ~17.8) | ~1.5 s, <=48 CPU s |
+| Post-graph build session | 9.25 s elapsed, 17.7 process-CPU s, request work on one thread | ~2.5-3.0 s (execution + tasks) |
+| Everything else | ~2.7 s | ~1.0-1.5 s |
+
+The latest counter-free Release wall time (separate cohort, `8b41df437`)
+is **17.7 s** against the **5-6 s** goal. Diagnostic phase times include
+instrumentation and do not sum to it.
+
+Compiled evaluation, effect batching (which also gates the compact-state
+activation frame), and action-graph partial evaluation are opt-in through
+the three switches listed under
+[branch contents](#what-this-branch-actually-contains). Other committed
+changes are default-on: the candidate default saved 5.86 s against stock.
+Open concern: the candidate *default* path used 27.5 more paired user-CPU
+seconds than stock in the last all-up cohort. The default path is what
+ships, so this is a likely regression on machines with fewer cores, and it
+is not yet explained.
+
+No combined Release measurement exists after the metadata specialization
+and frame prototype. Run one before adding more specializers.
+
+## Where the gap comes from: per-unit accounting
+
+The ledgers below count semantic units well but do not yet say where the
+cycles go. Dividing measured pass CPU by those counts gives the *implied*
+current price per unit. Comparing that with a generous bottom-up price
+shows how much CPU is unattributed.
+
+### Evaluation
+
+At 150.8 CPU seconds over 1,654 evaluations, each evaluation costs about
+91 ms of CPU, which is at least ~250 million cycles at the nominal 2.8 GHz.
+With the opt-in pass split from the earlier cohort (properties/imports
+~66 CPU s, items ~68 CPU s), the implied prices are:
+
+| Unit | Count | Implied current price if the pass is attributed to it |
+| --- | ---: | ---: |
+| Residual property assignment | 1,942,327 | ~34 us (~96k cycles) |
+| Metadata decision | 1,746,839 | ~39 us |
+| Item-operation binding | 391,187 | ~173 us |
+
+A deliberately generous bottom-up price for the counted work:
+
+| Counted unit | Count | Generous price | CPU s |
+| --- | ---: | ---: | ---: |
+| Residual property assignments | 1.94 M | 1 us (~10x the 121 ns read/concat/write fixture) | 1.94 |
+| Metadata decisions | 1.75 M | 0.1 us | 0.17 |
+| Explicit metadata values (mean 79 chars) | 0.92 M | 1 us | 0.92 |
+| Item-spec constructions | 0.39 M | 1 us | 0.39 |
+| Path-heuristic probe requests | 2.55 M | 2 us (assumes every request is a syscall) | 5.10 |
+| UsingTask registrations | 0.21 M | 0.5 us | 0.11 |
+| Module lowering (shared, measured) | 1,087 | measured | 0.59 |
+| **Total** | | | **~9.2** |
+
+That is about 6% of measured evaluation CPU. Units outside the census are
+missing: initial and environment properties, constant replay, scalar
+fallback, import and SDK resolution, globbing, item definitions, target
+registration, evaluation-result logging, GC, and JIT. Even if they doubled
+the useful work, the total (~20 CPU s) would sit well inside the 48-second
+ceiling. **The goal is consistent with the useful work. Roughly 130-140
+CPU seconds of evaluation are not explained by any counted semantic unit
+at generous prices.** Two hypotheses, not mutually exclusive:
+
+- **A. Interpretive overhead per unit** (dispatch, re-parsing, name
+  lookup, generic expansion): a 15-30x per-unit tax. Specializing control
+  with respect to source (the first Futamura projection) removes it.
+- **B. Per-configuration work outside the counted units**: state
+  materialization and representation transitions, result snapshots and
+  logging, allocation/GC, lock contention, and SMT inflation of
+  thread-CPU time. Specializing control does not remove it. Changing the
+  state representation or the runtime does.
+
+The evidence so far leans toward B being large. Control specializations
+removed 70-90% of their local costs (fixed imports 88.9%, `Exists` 72.4%)
+without measurable macro movement. Compiled property programs and SSA
+variants reduced property work without reducing wall time. Result replay
+at a 96.7% hit rate was slower. 43% of residual property assignments are
+pure literals (841,062) and another 35% are plain `$(P)` reads (680,638).
+Their computation is trivial. What remains per configuration is the
+*write into a per-configuration, identity-bearing state* and everything
+downstream that copies or converts that state.
+
+**Accounting unit.** Process-CPU seconds are a poor unit here. The machine
+has 32 logical CPUs on 16 physical cores, and evaluation runs ~18-way
+parallel, so SMT siblings share cores and inflate thread-CPU time per unit
+of work. Spin-waiting and GC threads add CPU that is not interpretation.
+Use **instructions retired and cycles** (`perf stat`) as the primary cost
+unit, with CPU seconds secondary. Instructions per semantic unit are
+directly comparable to other interpreters, and IPC separates instruction
+overhead (hypothesis A) from memory and contention stalls (part of B).
+
+Three measurements decide between A and B and replace generous guesses
+with numbers:
+
+1. **Instructions and cycles for the graph phase, at full parallelism and
+   with one evaluator thread.** This gives instructions per evaluation and
+   per counted unit, and the parallel-inflation factor.
+2. **An executable floor.** Replay the recorded semantic-operation stream
+   (property writes with their real shapes and output lengths, metadata
+   decisions and values, probe requests) against a minimal slot-indexed
+   state. The gap between this floor and the implied current price is the
+   true per-unit overhead. The floor is the bottom-up model made
+   measurable.
+3. **A binding-time census.** For each evaluation, record where in
+   evaluation order the first read occurs of an input that varies across
+   configurations of the same project (global properties such as
+   `TargetFramework`) and across projects (project path, directory probes).
+   This says how much of the evaluation prefix is static modulo a small set
+   of inputs. The root-only prefix prototype gets zero hits because the
+   first divergent input is read at the root. The census says whether a
+   deeper, live-in-keyed prefix would hit.
+
+### Execution
+
+Without multithreaded mode the build has exactly one in-proc node
+(`NodeProviderInProc.cs`, `maxNodeCount = MultiThreaded ? MaxNodeCount : 1`).
+The 1,654 project requests are therefore a serial critical path, and every
+per-request fixed cost is multiplied by 1,654:
+
+| Per project request | Current | Bottom-up |
+| --- | ---: | ---: |
+| Elapsed on the serialized path | 5.59 ms (9.25 s total) | ~1.35 ms (~2.2 s total) |
+| Covered request-thread CPU | 4.20 ms | |
+| Request-path elapsed not covered by CPU scopes | ~1.39 ms (~2.3 s) | |
+| Tasks (9.8 per request x 61.7 us) | 1.27 ms | 0.60 ms |
+| Target traversal (17 per request x ~20 us) | 0.64 ms | 0.34 ms |
+| Intrinsic groups | 0.37 ms | ~0.19 ms |
+| Required `ProjectStarted` snapshot | 0.22 ms | 0.22 ms |
+
+Elapsed and covered CPU come from different diagnostic captures in the
+same input epoch, so the uncovered row is approximate. Current component
+rows overlap the covered-CPU row and are not additive with it.
+
+The bottom-up total fits the 2.5-3.0-second execution envelope only if the
+~2.3 seconds of uncovered request-path time almost disappears. That time
+is waiting (scheduler handoffs, blocked requests, logging back-pressure,
+GC pauses of ~0.18 s) or uncovered work. It is the largest single
+execution item and is not yet split.
+
+### Execution-model incompatibilities
+
+These are places where the current model structurally prevents the
+bottom-up budget, as opposed to an implementation being slower than it
+needs to be:
+
+1. **Serial in-proc execution.** With one in-proc node, the execution
+   budget is a per-request latency budget (~1.5 ms per request including
+   all waits), not a CPU budget. Multithreaded mode lifts the single-node
+   limit. Whether the restore's tasks can run there without task-host
+   isolation costs is unverified.
+2. **Cross-request round trips (hypothesis).** Restore targets call the
+   `MSBuild` task on the same project with per-framework global properties
+   and on references. Each call is a scheduler round trip with request
+   blocking, result caching, and handoff. The bottom-up budget has no line
+   for these. Count them and price the round trip; they are a candidate
+   explanation for the uncovered ~2.3 s.
+3. **State identity at the public boundary.** Evaluation's output is
+   ~1,390 properties and ~960 items per configuration, exposed as mutable,
+   identity-bearing objects, and snapshotted for logging. Under the current
+   representation, a literal assignment that is static across all 1,654
+   configurations still costs a per-configuration object write. Shared
+   base state with per-configuration deltas and lazy compatibility views
+   (the activation-frame direction) is the representation change that
+   removes this. Specializing control does not.
+4. **Task lifecycle shape.** 92 us of covered non-body work per task
+   against a ~35 us allowance. Reflection-based binding, generic parameter
+   and output traversal, and per-invocation host setup must leave the
+   common path. Compiled action plans cover part of this.
+
+### Assessment of the first-Futamura direction
+
+Specializing the interpreter with respect to project source is the right
+direction for the control layer. The branch already does this as a
+mixed-time specialization: source modules are static, imports are linked
+dynamically because conditions and SDK resolution select them, and the
+residual runs per configuration. Details that complicate a "first
+projection alone" thesis:
+
+- **Removing control overhead has not moved wall time.** Phase-local
+  savings of 70-90% did not show up at macro scale, so the residual is
+  dominated by something specialization of control leaves in place.
+- **The residual's output is the expensive part.** Most residual
+  assignments are literals or plain reads. Static values written into
+  per-configuration state are dynamic only because the state is
+  per-configuration. Partial evaluation handles this through partially
+  static data structures, meaning the state representation has to become
+  shared-base-plus-delta. That needs a compatibility view for the public
+  object model and logging. This is the main engineering cost.
+- **Polyvariance matters.** Configurations of one project differ in a
+  handful of global properties. Specializing on (source, those values) is
+  the polyvariant step, and the binding-time census decides whether it pays.
+- **Observations, GC, contention, and scheduling are outside the
+  projection.** The 2.55 M probe requests, ~9 GiB of evaluation
+  allocation, SMT/contention inflation, and serialized execution need
+  separate treatment.
+
+In short: the first projection is necessary for the expression and
+control layer but not sufficient. The evidence points at state
+representation (evaluation) and the serial request path (execution) as
+where the remaining factor has to come from.
+
 ## Work backward from useful work
 
 Top-down profiles tell us where the *current implementation* spends time and
@@ -330,7 +535,10 @@ unpriced, not labelled interpreter overhead. Build GC pause totals about
 0.176 seconds; this does not attribute GC CPU or establish an additive
 critical-path account. All ten valid activation/demand captures match
 the existing fresh 760-asset reference. Observer variation precludes
-inferring throughput gains; no production engine change was made.
+inferring throughput gains. These captures used diagnostic builds without
+a frame implementation. A first frame prototype was committed afterward in
+`c39c6b90e` (opt-in through compiled module effect batching; see the branch
+table below). It has not yet been priced or macro-measured.
 
 ### Historical design inputs
 
@@ -520,6 +728,7 @@ must similarly fall back before emitting events or changing lookup state.
 | Source-bound fixed imports and `Exists` arguments | Committed, opt-in; results and filesystem observations remain dynamic | `3221e3cdb`, `80b4865ef`, [measurements](evaluation-perf.md) |
 | Separator-free path-adjustment fast exit | Committed, default-on; filesystem-dependent paths retain the existing heuristic | `f524becbc`, [measurements](evaluation-perf.md#avoid-copying-nonpath-metadata-expansions-on-unix) |
 | Operation-local metadata-expression specialization | Working implementation, existing effect-batching opt-in; folds invariant regions while retaining dynamic metadata and read effects | [phase measurements](evaluation-perf.md#specialize-repeated-item-metadata-expressions); macro impact not established |
+| Compact-state request activation frame | Committed prototype, active only with compiled module effect batching: the base `Lookup` reads compact properties and supersedes them on merge; the `ProjectStarted` snapshot is built without converting compact properties to objects. Compact properties come only from module property templates, so environment filtering and enumeration order match the old materialize-then-filter path. | `c39c6b90e` (committed under a "docs" message), `Lookup.cs`, `ProjectLoggingContext.cs`, `ProjectInstance.GetPropertiesForLogging`; not yet priced or macro-measured |
 | Prefix property-state attachment | **Uncommitted prototype**, with zero hits on the measured restore workload; not part of a proven branch gain | [partial evaluation](partial-evaluation.md); the local `prefix-state-attachment.md` draft is not committed |
 
 The existing opt-ins include
@@ -545,6 +754,23 @@ but its stock control and experimental setup differ from the August
 Do not sum local phase savings or project them onto restore wall time.
 
 ## Next boundaries under classic semantics
+
+Order of work, from the [per-unit accounting](#where-the-gap-comes-from-per-unit-accounting):
+
+1. **Run a combined Release macro comparison** (default and opt-in against
+   `1eecb3d38`) and explain the default path's extra CPU.
+2. **Decide hypothesis A versus B for evaluation** with instruction/cycle
+   counts at full and single-thread parallelism, the executable floor,
+   and the binding-time census. The results choose between more control
+   specialization and a shared-base state representation, and say
+   whether polyvariant prefix sharing can hit.
+3. **Split the uncovered ~2.3 s on the serialized request path.** Count
+   and price `MSBuild`-task round trips and scheduler waits, then decide
+   whether to cut per-request latency or leave the single in-proc node.
+4. **Price the activation-frame prototype** against its useful-work model.
+
+The specialization boundaries below remain valid but come after those
+decisions:
 
 1. **Reduce item-application metadata work.** The opt-in item pass consumes
    roughly 67-69 aggregate CPU seconds and 4 GiB of allocations across the
