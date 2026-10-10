@@ -1426,6 +1426,7 @@ namespace Microsoft.Build.Evaluation
 
                 _propertyGroupRecorder = recorder;
                 _trackingData.ReadObserver = recorder;
+                _expander.PropertiesUseTracker.PropertyGroupRecorder = recorder;
                 try
                 {
                     if (EvaluatePropertyGroupCondition(propertyGroupElement))
@@ -1440,6 +1441,7 @@ namespace Microsoft.Build.Evaluation
                 {
                     _propertyGroupRecorder = null;
                     _trackingData.ReadObserver = null;
+                    _expander.PropertiesUseTracker.PropertyGroupRecorder = null;
                 }
 
                 // Only a group that completed without an exception is recorded.
@@ -1469,6 +1471,8 @@ namespace Microsoft.Build.Evaluation
             _evaluationProfiler.ProfiledResult is null &&
             !_trackingData.TracksPropertyReads &&
             !_expander.PropertiesUseTracker.WarnsForUninitializedProperties &&
+            !Traits.Instance.LogPropertyFunctionsRequiringReflection &&
+            !BuildParameters.DebugExpansion &&
             !EvaluationTrace.Active &&
             _evaluationLoggingContext.LoggingService is Microsoft.Build.BackEnd.Logging.LoggingService { RoutesBuildEngineData: false };
 

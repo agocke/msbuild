@@ -321,6 +321,122 @@ eligibility for property functions (pure functions as part of the key, and
 filesystem-dependent ones with their observations as inputs) and for
 backslash paths (the heuristic's directory probes as inputs).
 
+### Widened property-group reuse: local implementation and economics
+
+The property-group prototype now permits a bounded set of pure property
+functions in values, including string, regex-match/group, version, arithmetic,
+lexical path, and selected platform functions. Unsupported or nondeterministic
+functions invalidate the recorded variant. Conditions remain conservative.
+One-argument `File.ReadAllText`, `File.Exists`, `Directory.Exists`, and Unix
+path-adjustment results are observed again before replay; changed observations
+miss and normal evaluation replaces the variant. Read-only culture identity
+is part of the key, and observation-bearing variants also require the same
+effective working directory. Mutable cultures and active read-side diagnostics
+fall back. The feature remains off by default and still calls `SetProperty`
+for every recorded operation: this is interpretation reuse, not shared-state
+attachment or item reuse.
+
+The local controls use the same 639-asset runtime commit and Xeon/WSL2 as the
+configuration ladder. The original prototype was built separately from
+`2b126d82f`; the widened engine was frozen from the working tree. Only
+`Microsoft.Build.dll` differs between matching Release/ReadyToRun snapshots.
+Console PGO and binlogs are off. Snapshot hashes and source-file hashes are
+recorded in the session's `property-group-reuse-validation/sdk-manifest.json`.
+The original and widened smoke captures attach 569,311 and 697,388 groups,
+respectively, replaying 805,276 and 1,095,836 operations. Widened verification
+finds **zero mismatches in 697,358 hits** against ordinary evaluation.
+
+Four balanced, unprobed repetitions per cell:
+
+| Engine and attachment | Mean restore wall s | Mean process-tree CPU s |
+| --- | ---: | ---: |
+| Original, off | 15.375 | 141.093 |
+| Original, on | 15.766 | 141.240 |
+| Widened, on | 15.859 | 139.848 |
+| Widened, off | 15.871 | 144.423 |
+
+There is **no demonstrated macro win**. Original-on to widened-on paired
+wall savings are -0.149, -0.211, -0.208, and +0.197 s; mean -0.093 s.
+The widened-off cell includes a 17.095 s / 158.42 CPU s run, so its mean
+must not be used to claim an attachment win. All captures match 639 assets.
+
+Two balanced pairs of separate level-1 task-clock ledgers measure
+properties/imports at **38.170 -> 35.150 CPU s**, saving 1.400 and 4.640 s
+in the pairs (mean 7.9%). Total evaluation is 79.566 -> 76.073 CPU s.
+Selected console ledgers have equal scope counts, 1,643 evaluations, and
+zero migration, abandonment, multiplexing, or depth overflow. Invalid outer
+Arcade frames are excluded. However, separate phase-hook captures do **not**
+replicate the properties-pass result in both pairs: their same-capture
+properties CPU changes are 40.597 -> 36.917 and 39.990 -> 43.404 s.
+The slower widened run also increases the other evaluation phases.
+Graph elapsed in those captures averages 5.751 -> 6.201 s, and extraction
+6.996 -> 7.033 s. The two-pair ledger result is evidence of a local benefit,
+not a stable prediction of graph elapsed or proof of its cause.
+
+To separate the reuse economics from graph parallelism, two more balanced
+pairs run the **same widened engine off/on** with the child process pinned
+to one logical CPU and `DOTNET_PROCESSOR_COUNT=1`. This changes graph and
+runtime/GC concurrency and is a diagnostic control, not a production timing:
+
+| Single-CPU diagnostic | Attachment off | On |
+| --- | ---: | ---: |
+| Properties/imports thread CPU s | 22.606 | 20.580 |
+| Total evaluation thread CPU s | 47.770 | 46.430 |
+| Graph elapsed s | 53.323 | 51.900 |
+| Graph allocated bytes, decimal GB | 9.002 | 8.580 |
+| Graph GC pause s | 5.349 | 5.329 |
+
+The properties pass improves in both pairs by 2.100 and 1.952 CPU s
+(9.0% mean), but total evaluation improves only 2.8%. One pair's graph
+elapsed is slightly worse, the other substantially better. Item-pass CPU
+increases in both pairs; the cause has not been established. Allocation
+reduction does not buy a corresponding GC-pause reduction. Thus parallelism
+alone does not explain the small saving: the current implementation removes
+only a modest part of evaluation, even in the serial control.
+
+Three diagnostic user-CPU profiles, one each for widened-off, original-on,
+and widened-on, use software `cpu-clock` sampling at 999 Hz with ReadyToRun
+off, console PGO off, and JIT symbols. They are attribution captures, **not**
+additional macro timings. Visible stacks give this disjoint decomposition
+inside `EvaluatePropertyGroupElement`:
+
+| Approximate sampled CPU s | Widened off | Original on | Widened on |
+| --- | ---: | ---: | ---: |
+| Remaining ordinary property-element evaluation | 25.45 | 19.69 | 16.23 |
+| Live-in lookup and observation validation | 0 | 0.89 | 1.62 |
+| Cache publication | 0 | 0.76 | 1.19 |
+| Entry lookup and global-override mask | 0 | 0.70 | 0.87 |
+| Recorded-operation replay | 0 | 1.13 | 1.41 |
+| Other group work | 2.56 | 1.78 | 1.61 |
+| Total group subtree | 28.02 | 24.95 | 22.93 |
+
+These are statistical stack attributions, not exact or matched per-block
+timers; inlining, unresolved frames, JIT, and scheduling limit comparison.
+Nested inclusive method totals must not be added to this table. Nevertheless,
+they reject the explanation that replay alone consumes all the potential:
+replay is only about 6% of the widened group subtree. Lookup, publication,
+and entry/global checks cost more together. Ordinary evaluation still
+accounts for about **71%** of that subtree, despite the high group hit count.
+The roughly 1.6 recorded operations per hit are not a large import-subtree
+attachment. The entire item pass remains outside this cache.
+
+Untouched costs also fluctuate: the profiled item pass is 38.480 CPU s off
+versus 45.607 s widened-on; sampled globbing grows from about 5.6 to 10.9
+user CPU s, and GC-thread samples from 17.8 to 20.0 s. These differences
+explain why a reduction in property work need not reduce whole-process CPU,
+but do not prove an optimization-induced slowdown. The remaining gap needs
+cost-weighted hit/fallback accounting by source block and a same-capture
+graph timeline, including item/glob cache activity, GC, JIT, and scheduling.
+The census's 86% is still a potential for cheap file/block effect attachment,
+not the coverage or predicted saving of the current property-group cache.
+
+Raw local evidence is in the session's `configuration-ladder-xeon/results/`
+under `reuse-smoke-v1`, `reuse-matrix-v1`, `reuse-service-v1`,
+`reuse-economics-serial-v1`, and `reuse-economics-profiles-v1`;
+`cost-attribution.json` retains the sampled decomposition and top leaves.
+Hardware instruction/cycle counters are unsupported. Do not convert these
+CPU seconds to instruction counts or add them to the historical AOT results.
+
 ### Default-path read-tracker fixes
 
 Two allocations this branch had added to every property element and every

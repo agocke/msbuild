@@ -23,6 +23,8 @@ internal sealed class PropertiesUseTracker
 {
     internal LoggingContext? LoggingContext { get; init; }
 
+    internal PropertyGroupEffectCache.Recorder? PropertyGroupRecorder { get; set; }
+
     public PropertiesUseTracker(LoggingContext? loggingContext) => LoggingContext = loggingContext;
 
     /// <summary>

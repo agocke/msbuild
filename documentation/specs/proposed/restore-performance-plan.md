@@ -220,22 +220,28 @@ evaluator, and caching evaluated projects or task results.
 | Compact-state request activation frame (logging snapshot and lookups without object conversion) | Opt-in through effect batching; repeatable Xeon execution-throughput saving, residual operations not yet priced |
 | Compiled target plans and direct task actions | Opt-in (`MSBUILDENABLEACTIONGRAPHPARTIALEVALUATION`) |
 | Async logging notification coalescing, separator-free path fast exit | Default-on |
-| Property-group effect attachment (`MSBUILDATTACHPROPERTYGROUPS`, verify with `MSBUILDATTACHPROPERTYGROUPSVERIFY`) | Experimental opt-in |
+| Property-group effect attachment (`MSBUILDATTACHPROPERTYGROUPS`, verify with `MSBUILDATTACHPROPERTYGROUPSVERIFY`) | Experimental opt-in; widened pure-function/observation support, local CPU benefit but no demonstrated macro win |
 | Cost ledger (`MSBUILDCOSTLEDGER`) and evaluation trace (`MSBUILDEVALUATIONTRACE`) | Diagnostic, inactive by default |
 | Fixes: empty AOT framework root in `ToolLocationHelper`, default-path read-tracker allocations | Default-on |
 
 ## Next steps
 
-1. **Widen property-group attachment.** The prototype (`MSBUILDATTACHPROPERTYGROUPS`)
-   replays 569 k groups per restore with zero mismatches against normal
-   evaluation, but it saves only 7.9% of the properties pass, because eligible
-   groups are the cheap ones
-   ([details](evaluation-perf.md#property-group-effect-attachment-prototype)).
-   The expensive groups call property functions or contain backslash paths.
-   Making them eligible means classifying pure functions, and taking filesystem
-   observations (function results, path-heuristic probes) as key inputs. Then
-   extend attachment to item operations (an O(1) identity for the list they
-   apply to) and to item operation construction (not yet censused).
+1. **Explain and improve property-group reuse economics before widening again.**
+   Pure functions and revalidated filesystem/path observations now increase
+   reuse from 569 k to 697 k groups; verification finds zero mismatches.
+   Local phase ledgers suggest a 7.9% incremental properties-pass CPU saving,
+   but separate phase-hook pairs do not consistently replicate it, and four
+   macro pairs show no wall win. A same-engine single-CPU off/on control saves
+   9.0% of properties CPU but only 2.8% of total evaluation. CPU profiles show
+   remaining ordinary interpretation is about 71% of the widened group
+   subtree; key lookup/publication costs more than write replay. Price hits
+   and fallbacks by actual block cost, not count or census-average weights,
+   and reconcile graph CPU/elapsed with item/glob work, GC, JIT, and scheduling
+   in the same capture
+   ([details](evaluation-perf.md#widened-property-group-reuse-local-implementation-and-economics)).
+   Then decide between cheaper keys, eligibility for specific expensive
+   blocks, and larger shared-state attachment. Item reuse and construction
+   remain unimplemented; the census's 86% is not this cache's coverage.
 2. **Fast paths for the late-bound property functions** (`File.ReadAllText`,
    `Regex.Match`/`IsMatch`, `Match.Groups`, `Version.*`,
    `RuntimeInformation.*`, `File.Exists`, `ToolLocationHelper.GetPlatformSDK*`)
@@ -252,13 +258,14 @@ evaluator, and caching evaluated projects or task results.
 6. **Hand off to NuGet and runtime owners:** `TieredPGO=false` for the static
    graph console, the binlog's serial path, and the Native AOT console. File
    globbing through the regex interpreter belongs here too.
-7. **Reproduce the new census/prototype on the Xeon.** Validate the keys,
-   ordered effects, inconsistent-group exclusions, and observations before
-   widening eligibility. Keep item-operation construction separate from
+7. **Reproduce the cost-weighted census on the Xeon.** Prototype verification
+   and local timing controls are complete, but an independent item/block
+   census remains pending. Keep item-operation construction separate from
    the measured application pass and avoid nested file/block double
-   counting. Measure attachment costs against the census prediction;
-   shared-base-plus-delta state remains a possible lever rather than
-   republishing every property as an object.
+   counting. Measure lookup, required observations, and state application
+   against the cost of the specific work skipped; shared-base-plus-delta
+   state remains a possible lever, not an established solution to the
+   current macro gap.
 
 ## Measurement rules
 
