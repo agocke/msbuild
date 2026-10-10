@@ -209,6 +209,109 @@ These floors are estimates, not yet measurements. The executable-floor
 benchmark should replace them, starting with conditions and property
 elements, then item operations.
 
+### Where condition and property-element instructions go (AOT profile)
+
+Top-down over the AOT profile (42.4 G under condition evaluation,
+43.9 G under property elements excluding nested conditions):
+
+| Condition evaluation | Share |
+| --- | ---: |
+| General expansion machinery (scan for `$(`, find closing parentheses, build strings) | 35% |
+| Expression-node logic | 15% |
+| Property lookup itself | 7% (+5% other hashing) |
+| Unix path heuristic on operands (`MaybeAdjustFilePath`) | 6% |
+| Kernel (mostly `Exists`) | 5% |
+| Numeric parse attempts on equality operands | 5% |
+| Cast/dispatch, write barriers, allocation | 9% |
+| Parse-cache lookup (full string hash), pool lock, `Type.Name` reflection | 7% |
+
+Property elements spend 16% in AOT reflection. 90% of that is
+`Type.InvokeMember` from late-bound property functions. The
+`MSBuildLogPropertyFunctionsRequiringReflection` log (made thread-safe for
+parallel evaluation) lists 37,895 late-bound calls per restore, about 23
+per evaluation. They come from `dotnet/runtime`'s `eng/Versions.props`
+(`File.ReadAllText`, `Regex.Match`/`IsMatch`, `Match.Groups[..].Value`,
+`Version.Build`) and SDK targets (`RuntimeInformation.*`, `File.Exists`,
+`ToolLocationHelper.GetPlatformSDK*`). Each costs ~137 k instructions
+under AOT. Adding them to `WellKnownFunctions` is a semantics-preserving
+fix.
+
+This branch had also added a default-path cost to every property element.
+`fba1a007a` built two observation strings and repeated global-property
+lookups for the module read tracker, even when it was not recording. The
+default path is restored to stock's allocation-free check unless the
+tracker records.
+
+### Executable floor for conditions and property elements
+
+`MSBUILDEVALUATIONTRACE=<dir>` records each evaluation's condition
+evaluations (text and result), applied property elements (name,
+unevaluated and evaluated value), pass markers, and final property table.
+A restore produces 3.99 M condition evaluations over **2,752 distinct
+condition strings**, and 2.41 M property elements over **1,926 distinct
+unevaluated values** (54% literal, 32% plain `$(P)`, 13% with functions).
+
+A reference implementation, compiled with ILC like the AOT console,
+replays the trace. Each distinct condition and value is parsed once into
+a tree or literal/reference segments, with names resolved to integer ids.
+That costs 112 M instructions in total, ~17 per operation amortized. Each
+evaluation starts from its initial properties and applies property
+elements in order. Each condition is evaluated against that state and
+checked against the recorded result: 65 of 2.59 M checked conditions
+disagree, all from engine-set properties the trace does not reconstruct.
+It covers literal, property, metadata, and `and`/`or` shapes (86% of
+conditions and 86% of property elements). Elements with functions or item
+references are applied with their recorded value. Metadata references read
+a synthetic per-item table.
+
+| Instructions per unit | MSBuild (AOT, all shapes) | Floor, dictionary state | Floor, slot state |
+| --- | ---: | ---: | ---: |
+| Condition | ~10.6 k | 782 | 500 |
+| `'$(P)' op 'literal'` | | 714 | 391 |
+| `and`/`or` of property comparisons | | 1,514 | 921 |
+| Property element | ~18.2 k (excluding its condition) | 929 | 231 |
+| Initial state per evaluation | | 54 k | 5.9 k |
+
+The dictionary variant is a case-insensitive `Dictionary<string, string>`,
+comparable to MSBuild's `PropertyDictionary`. The slot variant indexes
+values by statically resolved name id. Against the dictionary floor,
+MSBuild spends ~14x per condition and ~20x per property element. That gap
+is interpretation and machinery: re-expanding operands, re-hashing
+condition text, per-call reflection and casts, and object-model writes.
+The slot representation adds a further 1.6x for conditions, 4x for
+property elements, and 9x for initial state. That is the data-structure
+share. MSBuild's averages include the function and `Exists` shapes the
+floor does not replay, so per-shape ratios for simple conditions are
+somewhat lower. The floor is a straightforward implementation, not a tuned
+one (it classifies boolean and numeric operands at run time even when the
+literal side is static), so it bounds the achievable cost from above.
+
+### Amplification and invariance
+
+Reducing per-unit cost is one lever. The other is that most units are the
+same work repeated: the same props/targets files are imported into
+hundreds of projects under several target frameworks. Across the 1,646
+traced evaluations:
+
+| | Executions per distinct text | Same outcome in every evaluation |
+| --- | ---: | ---: |
+| Conditions (text and pass) | 1,393 | 61.8% of executions |
+| Property elements | 1,251 | 88.5% |
+| Property elements with `$(...)` or `@(...)` references | 917 | 74.9% (82.7% at most three values) |
+
+An identical outcome does not prove independence from incoming state. A
+value can depend on inputs that happen to be equal across this workload.
+The next measurement keys on the reads themselves: record each element's
+import file and the properties an import reads before writing them (its
+live-ins). Then count, per import, the distinct live-in vectors across
+evaluations and the evaluation cost behind them. An import whose effect is
+determined by a few live-in vectors can be partially evaluated once per
+vector, with filesystem observations and other required effects still
+replayed. This is the coarse-grained, live-in-keyed reuse the dead-ends
+document points to. Per-batch replay failed on lookup overhead, and
+root-keyed prefix attachment never matched because global properties differ
+at the root.
+
 ### Where the remaining instructions go (PGO off, JIT console)
 
 A call-stack classifier over the R2R-equivalent IL profile assigns each
