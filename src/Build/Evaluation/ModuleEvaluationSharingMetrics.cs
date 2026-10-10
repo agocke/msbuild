@@ -362,6 +362,11 @@ namespace Microsoft.Build.Evaluation
             _trackReplayInputs = trackReplayInputs;
         }
 
+        /// <summary>
+        /// Whether reads are being recorded, so callers can skip building observation strings otherwise.
+        /// </summary>
+        internal bool IsRecording => _currentScope is not null;
+
         internal Scope Track(
             ProjectElement element,
             string kind,

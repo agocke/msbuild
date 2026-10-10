@@ -3479,12 +3479,20 @@ namespace Microsoft.Build.Evaluation
             out string evaluatedValue)
         {
             evaluatedValue = null;
-            string globalOverrideObservation = GetGlobalOverrideObservation(
-                propertyElement.Name,
-                out bool isNonOverridableGlobal);
-            _moduleEvaluationReadTracker.RecordPropertyRead(
-                $"$GlobalOverride:{propertyElement.Name}",
-                globalOverrideObservation);
+            bool isNonOverridableGlobal;
+            if (_moduleEvaluationReadTracker.IsRecording)
+            {
+                string globalOverrideObservation = GetGlobalOverrideObservation(
+                    propertyElement.Name,
+                    out isNonOverridableGlobal);
+                _moduleEvaluationReadTracker.RecordPropertyRead(
+                    $"$GlobalOverride:{propertyElement.Name}",
+                    globalOverrideObservation);
+            }
+            else
+            {
+                isNonOverridableGlobal = IsNonOverridableGlobalProperty(propertyElement.Name);
+            }
 
             // Global properties cannot be overridden unless explicitly treated as local.
             if (isNonOverridableGlobal)
