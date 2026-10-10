@@ -32,13 +32,24 @@ for stat in sorted(glob.glob(os.path.join(sys.argv[1], "*", "perf-stat.csv"))):
     task_ms = next((v for k, v in values.items() if k.startswith("task-clock")), 0)
     rows[label].append((wall, instructions, cycles, task_ms / 1000))
 
+hardware = any(x[1] > 0 for r in rows.values() for x in r)
+
+
 def sd(xs):
     return st.stdev(xs) if len(xs) > 1 else 0.0
 
-print(f"{'configuration':24} {'wall s':>15} {'instructions':>13} {'cycles':>9} {'CPU s':>8} {'IPC':>5}  runs")
+if hardware:
+    print(f"{'configuration':24} {'wall s':>15} {'instructions':>13} {'cycles':>9} {'CPU s':>8} {'IPC':>5}  runs")
+else:
+    print("no hardware counters: reporting wall and CPU time only")
+    print(f"{'configuration':24} {'wall s':>15} {'CPU s':>15}  runs")
 for label, r in rows.items():
     w = [x[0] for x in r]
-    i, c, t = (st.mean(x[k] for x in r) for k in (1, 2, 3))
-    print(f"{label:24} {st.mean(w):7.2f} ± {sd(w):5.2f} {i:11.1f} G {c:7.1f} G {t:8.1f} {i / c if c else 0:5.2f}  {len(r)}")
-if kernel_missing:
+    t = [x[3] for x in r]
+    if hardware:
+        i, c = (st.mean(x[k] for x in r) for k in (1, 2))
+        print(f"{label:24} {st.mean(w):7.2f} ± {sd(w):5.2f} {i:11.1f} G {c:7.1f} G {st.mean(t):8.1f} {i / c if c else 0:5.2f}  {len(r)}")
+    else:
+        print(f"{label:24} {st.mean(w):7.2f} ± {sd(w):5.2f} {st.mean(t):7.1f} ± {sd(t):5.1f}  {len(r)}")
+if hardware and kernel_missing:
     print("WARNING: kernel instructions were not counted (kernel.perf_event_paranoid > 1); totals are user mode only")

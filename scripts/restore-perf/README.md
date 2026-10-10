@@ -41,6 +41,14 @@ arguments. Runs with the default workload produce 639 assets; check equivalence 
 Keep Dynamic PGO off for accounting (`DOTNET_TieredPGO=0`): its instrumentation is ~30% of instructions in
 the short-lived NuGet console and its counters make instruction counts unstable.
 
+### Machines without hardware counters
+
+On a VM without a virtual PMU everything still runs, measuring time instead of instructions:
+`matrix.sh` reports wall and CPU time, the cost ledger records per-scope task clock, `perf-record.sh`
+samples `cpu-clock` (analysis totals then read as CPU seconds), and the floor reports CPU nanoseconds.
+Use such machines for wall time, parallel scaling, and the serial execution path; do per-unit
+instruction accounting where hardware counters exist.
+
 ## Engine diagnostics
 
 - `MSBUILDCOSTLEDGER=<prefix>` (and `MSBUILDCOSTLEDGERLEVEL=2`): per-scope instruction/cycle/CPU/allocation ledger

@@ -78,7 +78,7 @@ for line in sys.stdin:
     frames.append(parts[1] if len(parts) > 1 else parts[0])
 flush()
 
-print(f"# root total {total / 1e9:.2f}G instructions; excluded {excluded / 1e9:.2f}G")
+print(f"# root total {total / 1e9:.2f}G e9 (instructions, or CPU seconds for cpu-clock); excluded {excluded / 1e9:.2f}G")
 
 
 def show(prefix, level):

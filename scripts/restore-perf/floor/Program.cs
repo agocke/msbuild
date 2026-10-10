@@ -31,7 +31,7 @@ internal static class Program
         w.Prepare();
         Snapshot prep = counters.Read() - before;
         w.Summarize();
-        Console.WriteLine($"# static preparation: {w.Conditions.Count} distinct conditions ({w.SupportedConditions} supported), {w.Templates.Count} distinct values ({w.SupportedTemplates} supported), {w.Names.Count} names: {prep.Instructions / 1e6:F1}M instructions");
+        Console.WriteLine($"# static preparation: {w.Conditions.Count} distinct conditions ({w.SupportedConditions} supported), {w.Templates.Count} distinct values ({w.SupportedTemplates} supported), {w.Names.Count} names: {prep.Instructions / 1e6:F1}M {Counters.Unit}");
         Console.WriteLine($"# coverage: {w.CoveredConditionOps * 100.0 / w.ConditionOps:F1}% of condition evaluations, {w.CoveredPropertyOps * 100.0 / w.PropertyOps:F1}% of property elements");
         foreach ((string shape, long count) in w.ShapeCounts.OrderByDescending(p => p.Value).Select(p => (p.Key, p.Value)))
         {
@@ -87,15 +87,17 @@ internal static class Program
         Snapshot propCost = props - seed;
         Console.WriteLine();
         Console.WriteLine($"[{label}] mismatches {mismatches} of {checkedCount} checked conditions ({evaluated} evaluated)");
-        Console.WriteLine($"[{label}] seed state       {seed.Instructions / 1e9,7:F3}G instr  {seed.Instructions / (double)w.Evaluations.Count,9:F0} per evaluation");
-        Console.WriteLine($"[{label}] property element {propCost.Instructions / 1e9,7:F3}G instr  {propCost.Instructions / (double)w.CoveredPropertyOps,9:F1} per element   IPC {propCost.Instructions / (double)propCost.Cycles:F2}");
-        Console.WriteLine($"[{label}] condition        {condCost.Instructions / 1e9,7:F3}G instr  {condCost.Instructions / (double)w.CoveredConditionOps,9:F1} per condition IPC {condCost.Instructions / (double)condCost.Cycles:F2}");
+        string unit = Counters.Unit;
+        static string Ipc(Snapshot s) => Counters.HasCycles ? $"  IPC {s.Instructions / (double)s.Cycles:F2}" : "";
+        Console.WriteLine($"[{label}] seed state       {seed.Instructions / 1e9,7:F3}G {unit}  {seed.Instructions / (double)w.Evaluations.Count,9:F0} per evaluation");
+        Console.WriteLine($"[{label}] property element {propCost.Instructions / 1e9,7:F3}G {unit}  {propCost.Instructions / (double)w.CoveredPropertyOps,9:F1} per element{Ipc(propCost)}");
+        Console.WriteLine($"[{label}] condition        {condCost.Instructions / 1e9,7:F3}G {unit}  {condCost.Instructions / (double)w.CoveredConditionOps,9:F1} per condition{Ipc(condCost)}");
         Snapshot none = Best(Replay.All, "<none>");
         foreach (string shape in w.ShapeCounts.Keys.Where(s => w.ShapeSupported[s] && w.ShapeCounts[s] >= 100_000).OrderByDescending(s => w.ShapeCounts[s]))
         {
             Snapshot withShape = Best(Replay.All, shape);
             Snapshot cost = withShape - none;
-            Console.WriteLine($"[{label}]   shape {shape,-6} {cost.Instructions / (double)w.ShapeCounts[shape],9:F1} per condition");
+            Console.WriteLine($"[{label}]   shape {shape,-6} {cost.Instructions / (double)w.ShapeCounts[shape],9:F1} {Counters.Unit} per condition");
         }
     }
 }
@@ -1013,44 +1015,71 @@ internal struct Snapshot
     public static Snapshot operator -(Snapshot a, Snapshot b) => new() { Instructions = a.Instructions - b.Instructions, Cycles = a.Cycles - b.Cycles };
 }
 
-/// <summary>Instructions and cycles (user and kernel) for the calling thread via perf_event_open.</summary>
+/// <summary>
+/// Per-thread cost counters via perf_event_open: instructions and cycles (user and kernel) when the CPU
+/// exposes hardware counters, otherwise the kernel's task clock (CPU nanoseconds). In task-clock mode
+/// <see cref="Snapshot.Instructions"/> holds CPU nanoseconds and cycles are zero. FLOOR_COUNTER=task-clock
+/// forces the software counter.
+/// </summary>
 internal sealed unsafe class Counters : IDisposable
 {
+    private const uint TypeHardware = 0, TypeSoftware = 1;
     private readonly int _leader;
+    private readonly bool _hardware;
+
+    public static string Unit { get; private set; } = "instructions";
+
+    public static bool HasCycles { get; private set; } = true;
 
     public Counters()
     {
-        _leader = Open(1, -1, _excludeKernel);  // PERF_COUNT_HW_INSTRUCTIONS
-        if (_leader < 0 && Marshal.GetLastPInvokeError() == 13)
+        bool excludeKernel = false;
+        bool forceSoftware = Environment.GetEnvironmentVariable("FLOOR_COUNTER") == "task-clock";
+        _leader = forceSoftware ? -1 : Open(TypeHardware, 1, -1, excludeKernel);  // PERF_COUNT_HW_INSTRUCTIONS
+        if (_leader < 0 && !forceSoftware && Marshal.GetLastPInvokeError() == 13)
         {
             // kernel.perf_event_paranoid > 1 forbids counting kernel work; fall back to user mode.
-            _excludeKernel = true;
-            _leader = Open(1, -1, _excludeKernel);
+            excludeKernel = true;
+            _leader = Open(TypeHardware, 1, -1, excludeKernel);
         }
 
-        if (_leader < 0) throw new InvalidOperationException($"perf_event_open failed: {Marshal.GetLastPInvokeError()}");
-        if (Open(0, _leader, _excludeKernel) < 0) throw new InvalidOperationException("cycles counter unavailable"); // PERF_COUNT_HW_CPU_CYCLES
-        Console.WriteLine(_excludeKernel
-            ? "# counters: user mode only (set kernel.perf_event_paranoid=1 to include kernel work)"
-            : "# counters: user and kernel");
-    }
+        if (_leader >= 0 && Open(TypeHardware, 0, _leader, excludeKernel) >= 0) // PERF_COUNT_HW_CPU_CYCLES
+        {
+            _hardware = true;
+            Console.WriteLine(excludeKernel
+                ? "# counters: instructions, user mode only (set kernel.perf_event_paranoid=1 to include kernel work)"
+                : "# counters: instructions, user and kernel");
+            return;
+        }
 
-    private readonly bool _excludeKernel;
+        if (_leader >= 0)
+        {
+            close(_leader);
+        }
+
+        // No hardware counters (for example, a VM without a virtual PMU): measure CPU time instead.
+        _leader = Open(TypeSoftware, 1, -1, excludeKernel: true); // PERF_COUNT_SW_TASK_CLOCK
+        if (_leader < 0) throw new InvalidOperationException($"perf_event_open failed: {Marshal.GetLastPInvokeError()}");
+        Unit = "CPU ns";
+        HasCycles = false;
+        Console.WriteLine("# counters: no hardware counters; reporting thread CPU time in nanoseconds (noisier than instructions)");
+    }
 
     public Snapshot Read()
     {
         ulong* buffer = stackalloc ulong[3];
-        if (read(_leader, buffer, 3 * sizeof(ulong)) != 3 * sizeof(ulong)) throw new InvalidOperationException("read failed");
-        return new Snapshot { Instructions = (long)buffer[1], Cycles = (long)buffer[2] };
+        nint size = (_hardware ? 3 : 2) * sizeof(ulong);
+        if (read(_leader, buffer, size) != size) throw new InvalidOperationException("read failed");
+        return new Snapshot { Instructions = (long)buffer[1], Cycles = _hardware ? (long)buffer[2] : 0 };
     }
 
     public void Dispose() => close(_leader);
 
-    private static int Open(ulong config, int group, bool excludeKernel)
+    private static int Open(uint type, ulong config, int group, bool excludeKernel)
     {
         ulong* attr = stackalloc ulong[16];
         new Span<ulong>(attr, 16).Clear();
-        ((uint*)attr)[0] = 0;          // PERF_TYPE_HARDWARE
+        ((uint*)attr)[0] = type;
         ((uint*)attr)[1] = 128;        // size
         attr[1] = config;
         attr[4] = 8;                   // read_format = PERF_FORMAT_GROUP

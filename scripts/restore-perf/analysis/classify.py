@@ -3,6 +3,9 @@
 
 usage: perf script -i perf.data -F comm,tid,period,ip,sym,dso | classify.py
 
+Totals are sample weights in units of 1e9: billions of instructions for an instructions profile, CPU
+seconds for a cpu-clock profile (see perf-record.sh).
+
 Subsystem comes from the thread (GC/JIT threads) or the innermost recognizable stack frame; operation kind comes from the leaf frames (innermost recognizable frame).
 """
 import re
@@ -123,7 +126,7 @@ def main():
     grand = sum(totals.values())
     subsystems = sorted({s for s, _ in totals}, key=lambda s: -sum(v for (t, _), v in totals.items() if t == s))
     kinds = sorted({k for _, k in totals}, key=lambda k: -sum(v for (_, t), v in totals.items() if t == k))
-    print("subsystem\ttotal_G\tshare\t" + "\t".join(kinds))
+    print("subsystem\ttotal_e9\tshare\t" + "\t".join(kinds))
     for s in subsystems:
         row = [totals.get((s, k), 0) for k in kinds]
         total = sum(row)
