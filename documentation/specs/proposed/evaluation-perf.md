@@ -15,6 +15,8 @@ across sections.** Each section names its machine and its controls.
   2026, 8-core Ryzen 7 1800X): the current baseline.
 - [Cost-model accounting](#cost-model-accounting) (16-core Xeon Platinum
   8370C, Release engine).
+- [16-core configuration ladder](#16-core-configuration-ladder): independent
+  hosting controls and supplemental CPU-service accounting.
 - [Earlier profiling](#earlier-profiling).
 - [Specialization experiments](#specialization-experiments): opt-in
   specializations, measured with Debug engine assemblies.
@@ -572,6 +574,148 @@ not separately priced by this coarse candidate cohort. In particular,
 object fallback can repeat scope-table searches. Those residuals and the
 remaining target/task/runtime account still need bottom-up specification;
 the result does not by itself bring restore close to the 5-6-second goal.
+
+## 16-core configuration ladder
+
+This is a new **639-asset** workload on the Xeon, not the historical
+760-asset compact-execution comparison. It independently checks the hosting
+ladder measured on the Ryzen; it is not a before/after engine comparison.
+
+### Controls and output equivalence
+
+- **Machine:** Intel Xeon Platinum 8370C, 2.80 GHz, 16 cores/32 logical CPUs,
+  Linux WSL2 `6.6.87.2-microsoft-standard-WSL2`. Hardware instruction/cycle
+  counters are unsupported. `PERF_EVENTS=task-clock` works; instructions,
+  cycles, and IPC are unavailable, not zero.
+- **Workload:** isolated `dotnet/runtime` at
+  `3b5416d32b67c2cb63f69a91975620de8ea0c13d`, SDK
+  `11.0.100-rc.1.26420.103`, Arcade toolset `11.0.0-beta.26458.117`.
+  Each restore starts with fresh `artifacts/obj` and a retained package
+  cache. The workload's `Configuration=Debug` does not select Debug engine
+  assemblies.
+- **Engine:** optimized Release/ReadyToRun snapshots of source
+  `687ceca344aa4bdedee0e1b56cbabafa0239eefd`. The six managed assembly hashes
+  match across controls. Engine opt-ins, startup hooks, and ledger probes
+  are unset for the macro ladder; server, node reuse, CLI telemetry logger,
+  and outer binlog are off.
+- **PGO:** explicitly on/off only in
+  `NuGet.Build.Tasks.Console.runtimeconfig.json`; outer-process tiering is
+  unchanged. The console binlog is controlled separately by
+  `GenerateRestoreUseStaticGraphEvaluationBinlog`, and actual file presence
+  is checked after each run.
+- **AOT:** linked from the same engine, with server GC, static task/resolver
+  registrations, and `RestrictPropertyFunctionReceivers=false`. Its
+  closed-world switches make this an experimental host for this workload,
+  not evidence of general-purpose AOT compatibility.
+
+The upstream scripts run five compatibility/warmup captures, excluded from
+the summary, then four repetitions per cell, reversing configuration order
+on alternate repetitions. Wall time covers the outer restore command;
+CPU is process-tree user plus system time from `/usr/bin/time`. MSBuild
+output stays on the terminal.
+
+All **25 captures** succeed and produce the same 639 assets after replacing
+only the benchmark SDK snapshot directory prefix in their content. Raw and
+normalized hashes are retained; unexplained differences fail comparison.
+Original SDK/workload contents and frozen snapshot hashes are preserved.
+
+### Macro results
+
+Means +/- sample standard deviation, four runs per cell:
+
+| Console binlog | Console PGO | Console | Wall s | Process-tree CPU s |
+| --- | --- | --- | ---: | ---: |
+| on | on | JIT/R2R | 43.622 +/- 0.473 | 174.960 +/- 2.940 |
+| off | on | JIT/R2R | 22.688 +/- 0.206 | 283.618 +/- 4.808 |
+| on | off | JIT/R2R | 40.568 +/- 0.716 | 141.110 +/- 1.864 |
+| off | off | JIT/R2R | 15.643 +/- 0.474 | 146.520 +/- 8.430 |
+| off | off | Native AOT | 13.953 +/- 0.305 | 104.630 +/- 1.967 |
+
+Paired wall savings, pairing within repetition:
+
+| Change | Saving s |
+| --- | ---: |
+| Binlog off, PGO on | 20.934 +/- 0.459 |
+| PGO off, binlog on | 3.054 +/- 0.786 |
+| Binlog off, PGO off | 24.925 +/- 1.162 |
+| PGO off, binlog off | 7.045 +/- 0.658 |
+| AOT versus JIT, both off | 1.690 +/- 0.681 |
+
+The PGO and AOT directions replicate, **not the Ryzen's ~10 s and ~3 s
+magnitudes**. With binlogs off, PGO removal also saves 137.098 CPU s;
+AOT saves another 41.890 CPU s. AOT wall savings are positive in every
+pair: 0.676, 1.933, 2.019, and 2.132 s.
+
+The configuration effects are not additive. Removing the binlog with PGO
+on saves 20.934 wall s but **adds 108.658 CPU s**. Even with PGO off,
+binlog removal saves 24.925 wall s with no mean CPU saving. This shows a
+large elapsed-time dependency on logging configuration, but these timings
+do not prove a contention, throttling, or writer mechanism. Do not convert
+the CPU interaction into an instruction/IPC claim or extrapolate the
+binlog saving to other machines.
+
+### Supplemental service account
+
+Six separate diagnostic captures follow the macro ladder: two JIT coarse
+phase captures and two level-1 console ledgers per host, in JIT/AOT/AOT/JIT
+order. All six succeed, match the same 639 normalized assets, and omit the
+console binlog. These probes are **not** present in the macro timings.
+
+JIT phase means, two runs:
+
+| Phase | Elapsed s | Process CPU s |
+| --- | ---: | ---: |
+| Graph construction/evaluation | 5.504 | 105.664 |
+| Extraction build | 6.394 | 10.628 |
+
+Graph elapsed samples are 5.639 and 5.369 s; extraction samples are 6.034
+and 6.753 s. Each graph is complete with 1,643 evaluations and balanced
+boundaries. These are diagnostic observations, not a new paired engine
+saving.
+
+Console ledger CPU-service means, two captures per host:
+
+| Scope | Count | JIT CPU s | AOT CPU s |
+| --- | ---: | ---: | ---: |
+| Total evaluation, inclusive | 1,643 | 80.478 | 57.837 |
+| Properties/imports | 1,643 | 39.915 | 28.711 |
+| Item-operation construction | 1,643 | 15.137 | 10.569 |
+| Lazy item application | 1,643 | 20.728 | 14.847 |
+| Project build, inclusive | 1,643 | 5.359 | 3.866 |
+| Project-build framework, exclusive | 1,643 | 0.416 | 0.332 |
+| Target builder, exclusive | 1,643 | 0.587 | 0.437 |
+| Target, exclusive | 27,959 | 0.464 | 0.359 |
+| Task builder, exclusive | 68,489 | 1.202 | 0.953 |
+| Task, exclusive | 16,058 | 0.613 | 0.378 |
+| Task resolution | 16,058 | 0.285 | 0.026 |
+| Task initialization | 16,058 | 0.137 | 0.043 |
+| Task parameters | 16,058 | 0.764 | 0.592 |
+| Task outputs | 16,058 | 0.214 | 0.148 |
+| Intrinsic task | 29,343 | 0.676 | 0.597 |
+
+The exclusive execution rows reconcile to inclusive project-build service.
+Do not add the inclusive parents to their children. No `TaskBody` row is
+reported: the task-exclusive row is not a separately measured body price,
+and the absent scope does not mean bodies cost zero. Build-session CPU
+belongs to orchestration and is not the parent of request-thread service.
+The request ledger is not complete extraction process accounting; phase
+process CPU also includes runtime/background and other uncovered work.
+
+All four console ledgers have the same counts and no migrated/abandoned
+frames, multiplexed reads, or depth overflows. Each records one
+request-builder thread. Companion outer Arcade ledgers contain
+migrated/abandoned frames and are retained with explicit exclusions, not
+included in the console totals. Task-clock-only headers cannot calibrate
+instruction/cycle probe cost. JIT ledger wall times are 15.966 and 16.170 s;
+AOT ledger times are 15.224 and 15.057 s, above their unprobed macro means.
+Use the ledgers to locate service, not to replace macro results.
+
+Evidence is session-only under `configuration-ladder-xeon/results/`:
+`ladder-smoke/runs.json`, `ladder-v1/analysis.json`, and
+`ladder-service-v1/{runs,analysis}.json`, with raw per-run reports and
+frozen SDKs. The drivers are `configuration-ladder-driver.py` and
+`configuration-ladder-service.py`. Completed captures were read on resume,
+not rerun or overwritten.
 
 ## Earlier profiling
 

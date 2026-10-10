@@ -13,7 +13,7 @@ SRC=$1; DEST=$2
 VER=$(detect_sdk_version)
 HOST=$SCRIPTS_DIR/aot-host
 printf '{ "sdk": { "version": "%s", "rollForward": "disable" } }\n' "$VER" > "$HOST/global.json"
-NUGET_PACKAGES=$PACKAGES/ DOTNET_CLI_TELEMETRY_OPTOUT=1 "$RT/.dotnet/dotnet" publish "$HOST/RestoreAotHost.csproj" \
+NUGET_PACKAGES=$PACKAGES/ DOTNET_CLI_TELEMETRY_OPTOUT=1 "$SRC/dotnet" publish "$HOST/RestoreAotHost.csproj" \
   -c Release -v:q -nologo -p:SdkDir="$(realpath "$SRC")/sdk/$VER"
 rm -rf "$DEST"
 cp -a "$SRC" "$DEST"

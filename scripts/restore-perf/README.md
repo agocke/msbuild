@@ -26,9 +26,15 @@ NOBL=-p:GenerateRestoreUseStaticGraphEvaluationBinlog=false
 scripts/restore-perf/matrix.sh pgo 3 "on|base-r2r||$NOBL" "off|base-r2r|DOTNET_TieredPGO=0|$NOBL"
 ```
 
-`run.sh <sdk> <out>` runs one restore and writes `console.log`, `result.txt`, and `assets.sha256`. Pass a
+`run.sh <sdk> <out>` runs one restore and writes `result.txt`, `cpu.txt`, and `assets.sha256`; build output
+stays on the terminal. CPU time includes user and system time for the process tree. Pass a
 wrapper such as `perf stat ... --` after the arguments. Environment passes through; `BENCH_ARGS` adds MSBuild
 arguments. Runs with the default workload produce 639 assets; check equivalence with `compare-assets.sh`.
+Each run also records `assets.normalized.sha256`, replacing only benchmark SDK snapshot directory paths,
+so equivalence can be checked after later runs overwrite the assets. Unexplained differences fail comparison.
+`matrix.sh` reverses configuration order on alternate repetitions and stops on a failed restore.
+Set `PERF_EVENTS=task-clock` on machines without hardware counters; instructions and cycles report `N/A`,
+not zero. CPU time remains available from `/usr/bin/time`.
 
 ## Which configuration to measure
 

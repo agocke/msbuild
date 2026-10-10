@@ -32,8 +32,29 @@ counters and are not comparable.
 
 The NuGet console process (`NuGet.Build.Tasks.Console`) hosts MSBuild's static
 graph; NuGet's own code is ~5% of its instructions. On the 16-core
-Xeon used for earlier work, the same restore took 17.7 s with the branch's
-opt-ins enabled.
+Xeon used for earlier work, a separate 760-asset workload took 17.7 s
+with the branch's opt-ins enabled; that is not this 639-asset epoch.
+
+The independent **16-core Xeon/WSL2 ladder is complete**
+([methods and results](evaluation-perf.md#16-core-configuration-ladder)).
+Four interleaved runs per cell, ordinary engine semantics with opt-ins
+unset:
+
+| Configuration | Wall s | Process-tree CPU s |
+| --- | ---: | ---: |
+| Console binlog on, PGO on | 43.622 | 174.960 |
+| Console binlog off | 22.688 | 283.618 |
+| Console PGO off | 40.568 | 141.110 |
+| Both off, JIT/R2R | 15.643 | 146.520 |
+| Both off, Native AOT | 13.953 | 104.630 |
+
+All 25 macro/warmup captures match 639 assets after normalizing only SDK
+snapshot paths. Hardware instruction/cycle counters are unavailable on
+this machine. With binlogs off, PGO removal saves **7.045 s** and AOT
+saves another **1.690 s**, not the Ryzen's ~10 s and ~3 s. Binlog removal
+saves 20.934-24.925 s depending on PGO; with PGO on it also raises CPU by
+108.658 s. The configuration effects are not additive, and these timings
+do not establish the contention mechanism.
 
 Design budget for the 5-6 seconds:
 
@@ -47,6 +68,10 @@ Design budget for the 5-6 seconds:
 ## Where the cost comes from
 
 ### Runtime and hosting
+
+The instruction-level explanations and ~10/~6/~3-second figures below
+are from the Ryzen cohort, not universal prices. The Xeon ladder above
+independently confirms the directions with different magnitudes.
 
 - **Dynamic PGO in the NuGet console costs ~10 s.** The console starts
   fresh for every restore, and with 16 evaluation threads it spends much of
@@ -138,6 +163,16 @@ lookup, object-demand, write/merge, and compatibility-barrier costs remain
 unpriced
 ([methods and limits](evaluation-perf.md#compact-properties-through-execution-implementation-and-paired-results)).
 
+The newer 639-asset Xeon account, with engine opt-ins unset and console
+PGO/binlog off, observes **5.504 s graph elapsed and 6.394 s extraction
+elapsed** in two JIT phase captures. Separate valid console ledgers cover
+5.359 CPU s of request service under JIT and 3.866 s under AOT. Their
+exclusive scopes reconcile, but no task-body scope is reported and outer
+Arcade migrated frames are excluded. This is not complete process
+accounting or an engine before/after comparison. It reinforces that
+execution remains a separate part of the 5-6-second goal; evaluation
+reuse alone cannot meet it.
+
 ## Direction
 
 **Partially evaluate the existing interpreter** (the first Futamura
@@ -210,21 +245,32 @@ evaluator, and caching evaluated projects or task results.
    against the floor's per-shape costs.
 4. **Property state representation** with slot-indexed compact state and
    compatibility views, measured against the floor's slot variant.
-5. **Execution:** split the uncovered ~2.3 s of the serial path (scheduler
-   waits, `MSBuild`-task round trips), then price the activation-frame residuals.
+5. **Execution:** reconcile extraction process CPU and elapsed with covered
+   request service, separate task bodies, then price activation-frame
+   residuals. Keep the historical uncovered ~2.3 s separate from the new
+   639-asset account.
 6. **Hand off to NuGet and runtime owners:** `TieredPGO=false` for the static
    graph console, the binlog's serial path, and the Native AOT console. File
    globbing through the regex interpreter belongs here too.
-7. **Confirm on the 16-core machine**, where the parallel evaluation phase is
-   a larger share.
+7. **Reproduce the new census/prototype on the Xeon.** Validate the keys,
+   ordered effects, inconsistent-group exclusions, and observations before
+   widening eligibility. Keep item-operation construction separate from
+   the measured application pass and avoid nested file/block double
+   counting. Measure attachment costs against the census prediction;
+   shared-base-plus-delta state remains a possible lever rather than
+   republishing every property as an object.
 
 ## Measurement rules
 
 - Use **instructions retired** (user and kernel) as the primary cost unit
   for per-scope and per-unit accounting, and wall time for macro results.
   Whole-restore instruction totals vary by about 3% between runs (GC and
-  spin-waiting), so small macro differences need wall-time pairs. Keep Dynamic PGO off for accounting, and report
-  spin-waits separately: their instruction counts depend on the CPU.
+  spin-waiting), so small macro differences need wall-time pairs. Keep
+  Dynamic PGO off for accounting, and report spin-waits separately: their
+  instruction counts depend on the CPU. Where
+  hardware counters are unsupported, report that explicitly and use
+  process-tree CPU plus validated scope task clock; do not infer
+  instructions, cycles, or IPC.
 - Interleave control and candidate runs in balanced pairs, with the same SDK,
   workload, package cache, and switches. Every run must produce identical
   restore assets.

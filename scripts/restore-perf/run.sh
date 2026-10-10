@@ -3,7 +3,7 @@
 #
 # usage: run.sh <sdk-dir> <out-dir> [wrapper command...]
 #   <sdk-dir>  an SDK snapshot directory or label (see snapshot-sdk.sh)
-#   <out-dir>  receives console.log and result.txt
+#   <out-dir>  receives result.txt, cpu.txt, and assets.sha256
 #   wrapper    optional prefix, e.g.: perf stat -x, -o "$OUT/perf-stat.csv" -e instructions:u,instructions:k --
 #
 # Environment passes through (MSBUILDCOSTLEDGER, MSBUILDEVALUATIONTRACE, DOTNET_TieredPGO, ...).
@@ -38,7 +38,7 @@ cd "$RT"
 start=$(date +%s.%N)
 set +e
 # The arguments runtime's build.sh -restore passes, minus the CLI logger and the outer binlog.
-"$@" "$SDK/dotnet" "$SDK/sdk/$VER/MSBuild.dll" \
+"$@" /usr/bin/time -f '%U %S' -o "$OUT/cpu.txt" "$SDK/dotnet" "$SDK/sdk/$VER/MSBuild.dll" \
   -maxcpucount -nr:false --verbosity:minimal --nologo -clp:Summary -tl:false \
   --property:AdditionalWarningsNotAsErrors=NU1901%3BNU1902%3BNU1903%3BNU1904 \
   --property:TreatWarningsAsErrors=true --property:ContinuousIntegrationBuild=false \
@@ -51,7 +51,7 @@ set +e
   --property:FeatureDynamicCodeCompiled=true --property:Ninja=true \
   --property:TargetArchitecture=x64 --property:BuildArchitecture=x64 --property:CMakeArgs= \
   -warnaserror -warnnotaserror:NU1901\;NU1902\;NU1903\;NU1904 \
-  ${BENCH_ARGS:-} "$TOOLSET_PROJ" > "$OUT/console.log" 2>&1
+  ${BENCH_ARGS:-} "$TOOLSET_PROJ"
 status=$?
 set -e
 end=$(date +%s.%N)
@@ -59,6 +59,21 @@ end=$(date +%s.%N)
 assets=$(find "$RT/artifacts/obj" -name project.assets.json | wc -l)
 binlog=$([[ -f "$RT/artifacts/log/Debug/Restore-Build.proj.binlog" ]] && echo yes || echo no)
 wall=$(echo "$end - $start" | bc)
-printf 'exit=%s wall=%s assets=%s restore_binlog=%s\n' "$status" "$wall" "$assets" "$binlog" | tee "$OUT/result.txt"
+read -r user system < <(tail -1 "$OUT/cpu.txt")
+printf 'exit=%s wall=%s user=%s system=%s assets=%s restore_binlog=%s\n' \
+  "$status" "$wall" "$user" "$system" "$assets" "$binlog" | tee "$OUT/result.txt"
 (cd "$RT/artifacts/obj" && find . -name project.assets.json -print0 | sort -z | xargs -0 sha256sum) > "$OUT/assets.sha256"
+python3 - "$RT/artifacts/obj" "$SDKS" "$OUT/assets.normalized.sha256" <<'PY'
+import hashlib
+from pathlib import Path
+import re
+import sys
+
+root, sdks, output = map(Path, sys.argv[1:])
+sdk_path = re.compile(re.escape(str(sdks.resolve())) + r"/[^/]+/")
+with output.open("w") as stream:
+    for path in sorted(root.rglob("project.assets.json")):
+        content = sdk_path.sub("/SDK-SNAPSHOT/", path.read_text())
+        stream.write(f"{hashlib.sha256(content.encode()).hexdigest()}  ./{path.relative_to(root)}\n")
+PY
 [[ $status -eq 0 ]]
