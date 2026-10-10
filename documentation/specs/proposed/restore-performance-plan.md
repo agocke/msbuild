@@ -42,6 +42,102 @@ is not yet explained.
 No combined Release measurement exists after the metadata specialization
 and frame prototype. Run one before adding more specializers.
 
+## Instruction-level accounting (October 2026)
+
+### Harness
+
+Measurements below come from an 8-core/16-thread Ryzen 7 1800X (Zen 1),
+Fedora, `kernel.perf_event_paranoid=1` so kernel instructions count. A
+local clone of `dotnet/runtime` at `3b5416d` runs a clean, package-cached
+static-graph restore through Arcade's `Build.proj`: `artifacts/obj` is
+deleted, the isolated package cache is kept, MSBuild Server and node reuse
+are off, and the CLI's telemetry logger and the outer binlog are dropped.
+Every run must produce 639 `project.assets.json` files. The runtime's own
+build still asks the NuGet console for a binlog
+(`GenerateRestoreUseStaticGraphEvaluationBinlog`), so that cost is part of
+the workload. Each candidate engine is a frozen copy of
+`artifacts/bin/bootstrap/core` (both repos pin SDK
+`11.0.100-rc.1.26420.103`, so there is no version float).
+
+Use instructions retired (user + kernel) as the primary unit and wall time
+for macro results. Instructions are comparable across the 8- and 16-core
+machines, except for spin-waits, whose instruction counts depend on the
+CPU's `pause` latency.
+
+### Tools
+
+- `MSBUILDCOSTLEDGER=<prefix>` writes `<prefix>.<pid>.tsv` from every
+  process using the engine: per-scope counts, inclusive and exclusive
+  instructions, cycles, task-clock, wall, and allocated bytes, plus
+  per-thread totals and unscoped work. `MSBUILDCOSTLEDGERLEVEL=2` adds the
+  fine-grained evaluation and fast-task scopes. Each thread reads a
+  perf_event group with one syscall per scope boundary. The file header
+  reports the measured probe cost per scope (~3-4k instructions charged to
+  the parent and ~3k to the scope itself), so fine-grained levels perturb
+  execution scopes. Request continuations that resume on another
+  request-builder thread carry their open frames across the two
+  `await handles.ToTask()` points; any other thread hop is reported as
+  `migrated`, not mixed in.
+- Method attribution: `perf record -e instructions -c 1000003 --call-graph fp`
+  with `DOTNET_PerfMapEnabled=1` **and** `DOTNET_EnableWriteXorExecute=0`.
+  With W^X on, JIT code is mapped from a memfd and perf never consults the
+  perf map. `libcoreclr.so` is stripped. Its debug file can be fetched
+  from the symbol server by build ID and placed as `debug` in the perf
+  build-id cache. Do not resolve LTO'd runtime addresses with `nm` or
+  binutils `addr2line`; both misattributed the hottest range.
+
+### Runtime configuration dominates the first-order gap
+
+Three interleaved runs per cell (mean ± standard deviation):
+
+| Engine assemblies | Dynamic PGO | Wall | Instructions | CPU s |
+| --- | --- | ---: | ---: | ---: |
+| IL (bootstrap as built) | on (default) | 32.86 ± 0.58 s | 577.9 G | 213.2 |
+| IL | off | 24.25 ± 0.16 s | 337.1 G | 144.9 |
+| ReadyToRun (crossgen2, as shipped) | on (default) | 33.41 ± 0.44 s | 642.3 G | 225.3 |
+| ReadyToRun | off | 23.21 ± 0.27 s | 327.1 G | 142.3 |
+| ReadyToRun | off in `NuGet.Build.Tasks.Console` only | 23.06 s (22.7-23.4) | ~300 G user | 140.9 |
+
+The stock SDK measured 34.5 s with PGO on. With PGO on, ~23% of all
+instructions were in `JIT_CountProfile32`/`JIT_ClassProfile32`, plus
+~6% in `__tls_get_addr` from the same instrumentation path. **The entire
+~10-second PGO cost is in the NuGet static-graph console process**, which
+starts fresh for every restore and never benefits from the profile.
+Setting `TieredPGO=false` in that project's runtime config is a NuGet
+change, not an engine change, and must be confirmed on the 16-core
+machine. ReadyToRun-compiling the bootstrap changes results by about one
+second, so IL bootstrap measurements are representative once PGO is
+controlled. Engine accounting below uses PGO off and reports PGO
+separately.
+
+### Where the remaining instructions go (PGO off)
+
+A call-stack classifier over the R2R-equivalent IL profile assigns each
+sample to the innermost recognizable subsystem and to an operation kind
+from its leaf frames (338 G instructions):
+
+| Subsystem | Instructions | Share | Notable leaf kinds |
+| --- | ---: | ---: | --- |
+| Item evaluation | 65.5 G | 19.4% | hash/lookup 22%, string scan 9%, regex 7% |
+| Property evaluation | 38.5 G | 11.4% | hash/lookup 15%, kernel 14%, cast/dispatch 10% |
+| Server/background GC threads | 37.8 G | 11.2% | |
+| Condition evaluation | 34.1 G | 10.1% | hash/lookup 26% |
+| Unattributed | 34.3 G | 10.2% | regex 20%, kernel 16% |
+| NuGet console binlog | 29.9 G | 8.8% | hash/lookup 39% |
+| Tiered JIT thread | 16.6 G | 4.9% | |
+| Imports, other evaluation, NuGet, execution, graph | ~81 G | ~24% | |
+
+Across everything, hash/lookup is the largest identifiable kind (16.6%),
+followed by GC, allocation, and write barriers together (12.7%),
+JIT/type loading (8.8%), kernel (8.5%), and cast/dispatch (6.3%). Leaf code
+outside these categories is 22.5%. Evaluation alone is ~176 G
+instructions, ~107 M per evaluation before GC and JIT threads. The flat
+profile has no hotspot above 2.6%. That shape fits the hypothesis that the
+cost is spread across data-structure operations (keyed lookups,
+allocation, dispatch) rather than concentrated in an algorithm. Leaf-frame
+classification undercounts that overhead; the next step is pricing it per
+semantic unit.
+
 ## Where the gap comes from: per-unit accounting
 
 The ledgers below count semantic units well but do not yet say where the
