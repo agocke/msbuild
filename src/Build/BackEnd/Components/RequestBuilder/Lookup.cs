@@ -55,7 +55,7 @@ namespace Microsoft.Build.BackEnd
     ///
     /// For sensible semantics, only the current primary scope can be modified at any point.
     /// </summary>
-    internal class Lookup : IPropertyProvider<ProjectPropertyInstance>, IItemProvider<ProjectItemInstance>
+    internal class Lookup : IPropertyProvider<ProjectPropertyInstance>, IPropertyValueProvider, IItemProvider<ProjectItemInstance>
     {
         #region Fields
 
@@ -67,6 +67,7 @@ namespace Microsoft.Build.BackEnd
         /// over the incoming implementation dictionary, while Scope uses a simplified item dictionary for perf.
         /// </remarks>
         private readonly IItemDictionary<ProjectItemInstance> _baseItems;
+        private readonly ProjectInstance _baseProject;
 
         /// <summary>
         /// Ordered stack of scopes used for lookup, where each scope references its parent.
@@ -108,6 +109,12 @@ namespace Microsoft.Build.BackEnd
             _lookupScopes = new Lookup.Scope(this, "Lookup()", properties);
         }
 
+        internal Lookup(ProjectInstance project)
+            : this(project.ItemsToBuildWith, project.ObjectPropertiesToBuildWith)
+        {
+            _baseProject = project;
+        }
+
         /// <summary>
         /// Copy constructor (called via Clone() - clearer semantics)
         /// </summary>
@@ -115,6 +122,7 @@ namespace Microsoft.Build.BackEnd
         {
             // Add the same tables from the original.
             _baseItems = that._baseItems;
+            _baseProject = that._baseProject;
             _lookupScopes = that._lookupScopes;
 
             // Clones need to share an (item)clone table; the batching engine asks for items from the lookup,
@@ -401,8 +409,15 @@ namespace Microsoft.Build.BackEnd
 
             if (PrimaryPropertySets != null)
             {
-                SecondaryProperties ??= new PropertyDictionary<ProjectPropertyInstance>(PrimaryPropertySets.Count);
-                SecondaryProperties.ImportProperties(PrimaryPropertySets);
+                if (_baseProject is not null)
+                {
+                    _baseProject.MergeLookupProperties(PrimaryPropertySets);
+                }
+                else
+                {
+                    SecondaryProperties ??= new PropertyDictionary<ProjectPropertyInstance>(PrimaryPropertySets.Count);
+                    SecondaryProperties.ImportProperties(PrimaryPropertySets);
+                }
             }
         }
 
@@ -440,7 +455,35 @@ namespace Microsoft.Build.BackEnd
                 scope = scope.Parent;
             }
 
-            return null;
+            return _baseProject is null || _baseProject.CompactPropertyCount == 0
+                ? null
+                : ((IPropertyProvider<ProjectPropertyInstance>)_baseProject).GetProperty(name, startIndex, endIndex);
+        }
+
+        bool IPropertyValueProvider.TryGetEscapedPropertyValue(
+            string name,
+            int startIndex,
+            int endIndex,
+            out string escapedValue)
+        {
+            escapedValue = null;
+            if (_baseProject is null || _baseProject.CompactPropertyCount == 0)
+            {
+                return false;
+            }
+
+            for (Scope scope = _lookupScopes; scope is not null; scope = scope.Parent)
+            {
+                if (scope.PropertySets?.GetProperty(name, startIndex, endIndex) is not null ||
+                    scope.Properties?.GetProperty(name, startIndex, endIndex) is not null)
+                {
+                    // Object reads retain environment observations and property locations.
+                    return false;
+                }
+            }
+
+            return ((IPropertyValueProvider)_baseProject).TryGetEscapedPropertyValue(
+                name, startIndex, endIndex, out escapedValue);
         }
 
         /// <summary>

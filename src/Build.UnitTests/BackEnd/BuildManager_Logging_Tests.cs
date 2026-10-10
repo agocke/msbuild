@@ -2,14 +2,18 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using Microsoft.Build.BackEnd.Logging;
+using Microsoft.Build.Definition;
 using Microsoft.Build.Evaluation;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Logging;
 using Microsoft.Build.Shared;
 using Microsoft.Build.UnitTests;
 using Shouldly;
@@ -58,12 +62,14 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         private readonly ProjectCollection _projectCollection;
 
         private readonly TestEnvironment _env;
+        private readonly ITestOutputHelper _output;
 
         /// <summary>
         /// SetUp
         /// </summary>
         public BuildManager_Logging_Tests(ITestOutputHelper output)
         {
+            _output = output;
             // Ensure that any previous tests which may have been using the default BuildManager do not conflict with us.
             BuildManager.DefaultBuildManager.Dispose();
 
@@ -72,6 +78,60 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             _projectCollection = new ProjectCollection();
 
             _env = TestEnvironment.Create(output);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void CompactExecutionPreservesProjectStartedPropertiesInBinaryLog(bool outOfProc)
+        {
+            _env.SetEnvironmentVariable("MSBUILDLOGPROPERTIESANDITEMSAFTEREVALUATION", "0");
+            var file = _env.CreateFile(
+                "compact-execution.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Value>initial%3bvalue</Value>
+                    <Unused>untouched</Unused>
+                  </PropertyGroup>
+                  <Target Name="Build">
+                    <PropertyGroup>
+                      <Value>$(Value)-changed</Value>
+                    </PropertyGroup>
+                    <Message Text="result:$(Value)" Importance="high" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance project = ProjectInstance.FromFile(file.Path, new ProjectOptions
+            {
+                EvaluationContext = EvaluationContext.CreateForCompiledModuleEvaluation(useCompiledModuleEffectBatches: true),
+                ProjectCollection = _projectCollection,
+            });
+            project.CompactPropertyCount.ShouldBe(2);
+            string binlog = Path.Combine(_env.CreateFolder().Path, "compact.binlog");
+            MockLogger logger = new(_output);
+            BuildResult result = _buildManager.Build(
+                new BuildParameters(_projectCollection)
+                {
+                    DisableInProcNode = outOfProc,
+                    EnableNodeReuse = false,
+                    Loggers = [logger, new BinaryLogger { Parameters = $"{binlog};ProjectImports=None" }],
+                },
+                new BuildRequestData(project, ["Build"], null, BuildRequestDataFlags.ProvideProjectStateAfterBuild));
+
+            result.ShouldHaveSucceeded();
+            result.ProjectStateAfterBuild.GetPropertyValue("Value").ShouldBe("initial;value-changed");
+            logger.AssertLogContains("result:initial;value-changed");
+            BinaryLogReplayEventSource replay = new();
+            MockLogger replayLogger = new(_output);
+            replayLogger.Initialize(replay);
+            replay.Replay(binlog);
+            ProjectStartedEventArgs started = replayLogger.ProjectStartedEvents.ShouldHaveSingleItem();
+            DictionaryEntry value = started.Properties.Cast<DictionaryEntry>()
+                .Single(entry => (string)entry.Key == "Value");
+            value.Value.ShouldBe("initial;value");
+            started.Properties.Cast<DictionaryEntry>()
+                .Single(entry => (string)entry.Key == "Unused").Value.ShouldBe("untouched");
         }
 
         [DotNetOnlyFact]

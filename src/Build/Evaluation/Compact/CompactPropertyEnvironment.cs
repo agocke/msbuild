@@ -2,10 +2,12 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Threading;
+using Microsoft.Build.Shared;
 
 #nullable disable
 
@@ -214,6 +216,16 @@ namespace Microsoft.Build.Evaluation
         {
             return _identities.TryGetId(name, out PropertyId id) &&
                    Remove(id);
+        }
+
+        internal void AppendLoggingProperties(List<DictionaryEntry> properties)
+        {
+            foreach (KeyValuePair<PropertyId, PropertyValueRef> pair in _values)
+            {
+                properties.Add(new DictionaryEntry(
+                    _names[pair.Key],
+                    EscapingUtilities.UnescapeAll(pair.Value.EscapedValue)));
+            }
         }
 
         internal PropertyDeltaEntry[] Drain()

@@ -2,10 +2,14 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Build.BackEnd;
 using Microsoft.Build.Collections;
+using Microsoft.Build.Definition;
+using Microsoft.Build.Evaluation;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Shouldly;
@@ -17,6 +21,110 @@ namespace Microsoft.Build.UnitTests.BackEnd
 {
     public class Lookup_Tests
     {
+        private readonly ITestOutputHelper _output;
+
+        public Lookup_Tests(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Fact]
+        public void CompactLookupPreservesBatchOverridesAndMergedWrites()
+        {
+            using TestEnvironment environment = TestEnvironment.Create(_output);
+            ProjectInstance project = CreateCompactProject(environment);
+            Lookup lookup = new(project);
+            IPropertyValueProvider values = lookup;
+            project.CompactPropertyCount.ShouldBe(2);
+            values.TryGetEscapedPropertyValue("Value", 0, 4, out string value).ShouldBeTrue();
+            value.ShouldBe("initial%3bvalue");
+            project.CompactPropertyCount.ShouldBe(2);
+
+            Lookup untouchedBatch = lookup.Clone();
+            Lookup.Scope target = lookup.EnterScope("target");
+            Lookup.Scope task = lookup.EnterScope("task");
+            ProjectPropertyInstance replacement = ProjectPropertyInstance.Create("vAlUe", "changed%3bvalue");
+            lookup.SetProperty(replacement);
+            values.TryGetEscapedPropertyValue("Value", 0, 4, out _).ShouldBeFalse();
+            lookup.GetProperty("VALUE").ShouldBeSameAs(replacement);
+            ((IPropertyValueProvider)untouchedBatch)
+                .TryGetEscapedPropertyValue("$(Value)", 2, 6, out value).ShouldBeTrue();
+            value.ShouldBe("initial%3bvalue");
+            project.GetPropertyValue("Value").ShouldBe("initial;value");
+
+            task.LeaveScope();
+            project.GetPropertyValue("Value").ShouldBe("initial;value");
+            target.LeaveScope();
+            project.GetPropertyValue("Value").ShouldBe("changed;value");
+            project.CompactPropertyCount.ShouldBe(1);
+            untouchedBatch.GetProperty("value").ShouldBeSameAs(replacement);
+            replacement.EvaluatedValue = "mutated";
+            project.GetPropertyValue("VALUE").ShouldBe("mutated");
+            project.RemoveProperty("Value").ShouldBeTrue();
+            lookup.GetProperty("Value").ShouldBeNull();
+        }
+
+        [Fact]
+        public void CompactLookupMaterializesOnlyObjectDemandAndRetainsSnapshotValues()
+        {
+            using TestEnvironment environment = TestEnvironment.Create(_output);
+            const string environmentName = "CompactExecutionEnvironment";
+            environment.SetEnvironmentVariable(environmentName, "environment-value");
+            ProjectInstance project = CreateCompactProject(environment);
+            IEnumerable<DictionaryEntry> snapshot = project.GetPropertiesForLogging(includeAllEnvironmentProperties: false);
+            snapshot.ShouldNotContain(entry => (string)entry.Key == environmentName);
+            project.CompactPropertyCount.ShouldBe(2);
+
+            Lookup lookup = new(project);
+            IPropertyValueProvider values = lookup;
+            values.TryGetEscapedPropertyValue("Empty", 0, 4, out string empty).ShouldBeTrue();
+            empty.ShouldBeEmpty();
+            values.TryGetEscapedPropertyValue("Missing", 0, 6, out _).ShouldBeFalse();
+            values.TryGetEscapedPropertyValue(environmentName, 0, environmentName.Length - 1, out _).ShouldBeFalse();
+            lookup.GetProperty(environmentName)
+                .ShouldBeOfType<ProjectPropertyInstance.EnvironmentDerivedProjectPropertyInstance>();
+            project.CompactPropertyCount.ShouldBe(2);
+
+            ProjectPropertyInstance property = lookup.GetProperty("value");
+            property.ShouldBeSameAs(project.GetProperty("Value"));
+            project.CompactPropertyCount.ShouldBe(1);
+            property.EvaluatedValue = "later";
+            project.GetPropertyValue("Value").ShouldBe("later");
+            project.RemoveProperty("Empty").ShouldBeTrue();
+            snapshot.Single(entry => (string)entry.Key == "Value").Value.ShouldBe("initial;value");
+            snapshot.Single(entry => (string)entry.Key == "Empty").Value.ShouldBe(string.Empty);
+        }
+
+        [Fact]
+        public void CompactLoggingAllEnvironmentViewRetainsDeferredObjectReads()
+        {
+            using TestEnvironment environment = TestEnvironment.Create(_output);
+            ProjectInstance project = CreateCompactProject(environment);
+            IEnumerable<DictionaryEntry> properties = project.GetPropertiesForLogging(includeAllEnvironmentProperties: true);
+            project.CompactPropertyCount.ShouldBe(0);
+            project.GetProperty("Value").EvaluatedValue = "later";
+            properties.Single(entry => (string)entry.Key == "Value").Value.ShouldBe("later");
+        }
+
+        private static ProjectInstance CreateCompactProject(TestEnvironment environment)
+        {
+            var file = environment.CreateFile(
+                "compact-lookup.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Value>initial%3bvalue</Value>
+                    <Empty />
+                  </PropertyGroup>
+                </Project>
+                """);
+            return ProjectInstance.FromFile(file.Path, new ProjectOptions
+            {
+                EvaluationContext = EvaluationContext.CreateForCompiledModuleEvaluation(useCompiledModuleEffectBatches: true),
+                ProjectCollection = environment.CreateProjectCollection().Collection,
+            });
+        }
+
         /// <summary>
         /// Primary group contains an item for a type and secondary does;
         /// primary item should be returned instead of the secondary item.

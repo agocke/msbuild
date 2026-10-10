@@ -1720,6 +1720,51 @@ namespace Microsoft.Build.Execution
             }
         }
 
+        internal PropertyDictionary<ProjectPropertyInstance> ObjectPropertiesToBuildWith => _properties;
+
+        internal IEnumerable<DictionaryEntry> GetPropertiesForLogging(bool includeAllEnvironmentProperties)
+        {
+            if (includeAllEnvironmentProperties)
+            {
+                return PropertiesToBuildWith.GetCopyOnReadEnumerable(
+                    property => new DictionaryEntry(property.Name, property.EvaluatedValue));
+            }
+
+            if (CompactPropertyCount == 0)
+            {
+                return _properties.Filter(
+                    property => property is not ProjectPropertyInstance.EnvironmentDerivedProjectPropertyInstance ||
+                        EnvironmentUtilities.IsWellKnownEnvironmentDerivedProperty(property.Name),
+                    property => new DictionaryEntry(property.Name, property.EvaluatedValue));
+            }
+
+            List<DictionaryEntry> properties = new(_properties.Count + CompactPropertyCount);
+            foreach (ProjectPropertyInstance property in _properties)
+            {
+                if (property is not ProjectPropertyInstance.EnvironmentDerivedProjectPropertyInstance ||
+                    EnvironmentUtilities.IsWellKnownEnvironmentDerivedProperty(property.Name))
+                {
+                    properties.Add(new DictionaryEntry(property.Name, property.EvaluatedValue));
+                }
+            }
+
+            _compactProperties.AppendLoggingProperties(properties);
+            return properties;
+        }
+
+        internal void MergeLookupProperties(PropertyDictionary<ProjectPropertyInstance> properties)
+        {
+            if (CompactPropertyCount > 0)
+            {
+                foreach (ProjectPropertyInstance property in properties)
+                {
+                    _compactProperties.Remove(property.Name);
+                }
+            }
+
+            _properties.ImportProperties(properties);
+        }
+
         internal ICollection<ProjectPropertyInstance> TestEnvironmentalProperties => new ReadOnlyCollection<ProjectPropertyInstance>(_environmentVariableProperties);
 
         /// <summary>
@@ -2195,9 +2240,9 @@ namespace Microsoft.Build.Execution
         {
             if (_compactProperties is not null &&
                 _compactProperties.TryGet(
-                    name.Substring(
-                        startIndex,
-                        endIndex - startIndex + 1),
+                    startIndex == 0 && endIndex == name.Length - 1
+                        ? name
+                        : name.Substring(startIndex, endIndex - startIndex + 1),
                     out PropertyValueRef compactValue))
             {
                 escapedValue = compactValue.EscapedValue;

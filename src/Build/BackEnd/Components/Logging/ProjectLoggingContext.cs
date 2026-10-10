@@ -7,7 +7,6 @@ using System.Linq;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
-using static Microsoft.Build.Execution.ProjectPropertyInstance;
 using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 
 #nullable disable
@@ -41,8 +40,7 @@ namespace Microsoft.Build.BackEnd.Logging
             requestEntry.RequestConfiguration.ProjectFullPath,
             requestEntry.Request.Targets,
             requestEntry.RequestConfiguration.ToolsVersion,
-            requestEntry.RequestConfiguration.Project.PropertiesToBuildWith,
-            requestEntry.RequestConfiguration.Project.ItemsToBuildWith,
+            requestEntry.RequestConfiguration.Project,
             requestEntry.Request.ParentBuildEventContext,
             requestEntry.RequestConfiguration.Project.EvaluationId,
             requestEntry.Request.ProjectContextId)
@@ -66,8 +64,7 @@ namespace Microsoft.Build.BackEnd.Logging
             projectFullPath,
             request.Targets,
             toolsVersion,
-            projectProperties: null,
-            projectItems: null,
+            project: null,
             request.ParentBuildEventContext,
             evaluationId,
             request.ProjectContextId)
@@ -88,8 +85,7 @@ namespace Microsoft.Build.BackEnd.Logging
                 requestEntry.RequestConfiguration.ProjectFullPath,
                 requestEntry.Request.Targets,
                 requestEntry.RequestConfiguration.ToolsVersion,
-                requestEntry.RequestConfiguration.Project.PropertiesToBuildWith,
-                requestEntry.RequestConfiguration.Project.ItemsToBuildWith,
+                requestEntry.RequestConfiguration.Project,
                 requestEntry.Request.ParentBuildEventContext,
                 requestEntry.RequestConfiguration.Project.EvaluationId,
                 requestEntry.Request.ProjectContextId);
@@ -123,8 +119,7 @@ namespace Microsoft.Build.BackEnd.Logging
             string projectFullPath,
             List<string> targets,
             string toolsVersion,
-            PropertyDictionary<ProjectPropertyInstance> projectProperties,
-            IItemDictionary<ProjectItemInstance> projectItems,
+            ProjectInstance project,
             BuildEventContext parentBuildEventContext,
             int evaluationId,
             int projectContextId)
@@ -135,8 +130,7 @@ namespace Microsoft.Build.BackEnd.Logging
                     projectFullPath,
                     targets,
                     toolsVersion,
-                    projectProperties,
-                    projectItems,
+                    project,
                     parentBuildEventContext,
                     evaluationId,
                     projectContextId))
@@ -159,8 +153,7 @@ namespace Microsoft.Build.BackEnd.Logging
             string projectFullPath,
             List<string> targets,
             string toolsVersion,
-            PropertyDictionary<ProjectPropertyInstance> projectProperties,
-            IItemDictionary<ProjectItemInstance> projectItems,
+            ProjectInstance project,
             BuildEventContext parentBuildEventContext,
             int evaluationId,
             int projectContextId)
@@ -172,8 +165,7 @@ namespace Microsoft.Build.BackEnd.Logging
                 projectFullPath,
                 targets,
                 toolsVersion,
-                projectProperties,
-                projectItems,
+                project,
                 parentBuildEventContext,
                 evaluationId,
                 projectContextId);
@@ -190,8 +182,7 @@ namespace Microsoft.Build.BackEnd.Logging
             string projectFullPath,
             List<string> targets,
             string toolsVersion,
-            PropertyDictionary<ProjectPropertyInstance> projectProperties,
-            IItemDictionary<ProjectItemInstance> projectItems,
+            ProjectInstance project,
             BuildEventContext parentBuildEventContext,
             int evaluationId,
             int projectContextId)
@@ -208,23 +199,12 @@ namespace Microsoft.Build.BackEnd.Logging
                 loggingService.IncludeEvaluationPropertiesAndItemsInProjectStartedEvent &&
                 (!loggingService.RunningOnRemoteNode || loggingService.SerializeAllProperties))
             {
-                if (projectProperties is null)
-                {
-                    properties = [];
-                }
-                else if (Traits.LogAllEnvironmentVariables)
-                {
-                    properties = projectProperties.GetCopyOnReadEnumerable(property => new DictionaryEntry(property.Name, property.EvaluatedValue));
-                }
-                else
-                {
-                    properties = projectProperties.Filter(p => p is not EnvironmentDerivedProjectPropertyInstance || EnvironmentUtilities.IsWellKnownEnvironmentDerivedProperty(p.Name), p => new DictionaryEntry(p.Name, p.EvaluatedValue));
-                }
-
-                items = projectItems?.GetCopyOnReadEnumerable(item => new DictionaryEntry(item.ItemType, new TaskItem(item))) ?? [];
+                properties = project?.GetPropertiesForLogging(Traits.LogAllEnvironmentVariables) ?? [];
+                items = project?.ItemsToBuildWith.GetCopyOnReadEnumerable(
+                    item => new DictionaryEntry(item.ItemType, new TaskItem(item))) ?? [];
             }
 
-            if (projectProperties != null &&
+            if (project is not null &&
                 loggingService.IncludeEvaluationPropertiesAndItemsInProjectStartedEvent &&
                 propertiesToSerialize?.Length > 0 &&
                 !loggingService.SerializeAllProperties)
@@ -232,7 +212,7 @@ namespace Microsoft.Build.BackEnd.Logging
                 PropertyDictionary<ProjectPropertyInstance> projectPropertiesToSerialize = new PropertyDictionary<ProjectPropertyInstance>();
                 foreach (string propertyToGet in propertiesToSerialize)
                 {
-                    ProjectPropertyInstance instance = projectProperties[propertyToGet];
+                    ProjectPropertyInstance instance = project.GetProperty(propertyToGet);
                     {
                         if (instance != null)
                         {

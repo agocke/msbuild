@@ -8,9 +8,10 @@ The optimization specializes repeated interpretation; it does not require a
 new evaluation mode, declared-I/O contract, result cache, hardened graph, or
 output-oriented build query.
 
-The cost model and historical measurements below were adapted from the
-separate `build-exp` restore investigation (August 2026). They are not
-measurements of this branch at its current tip. Current branch experiments
+The historical measurements below were adapted from the separate
+`build-exp` restore investigation (August 2026). They are not measurements
+of this branch at its current tip. The current bottom-up model below uses
+new Release counts and CPU accounting. Current branch experiments
 are recorded in [evaluation performance investigations](evaluation-perf.md);
 discarded approaches are in
 [evaluation performance dead ends](evaluation-performance-dead-ends.md).
@@ -24,6 +25,314 @@ cost: optimizing the biggest existing method may preserve an expensive
 architecture. Start with the work the restore actually needs, set a
 bottom-up budget, then use profiles and paired measurements to find and
 validate changes that close the gap.
+
+### Current bottom-up model and component contracts
+
+The engineering decision is **budget compliance**, not profiler rank.
+Before adding a specializer or changing a representation, specify its
+useful work, valid binding scope, required effects, and cost units. A
+profile explains why a component exceeds its contract; a large sample
+share or allocation total does not establish a violation.
+
+The initial refreshed `8b41df437` Release workload has 637 physical project files,
+1,655 configured evaluations/builds, 28,178 executed targets, and 16,204
+executable tasks. Two census captures agree exactly on these counts and
+on 2,301,180 logged final property entries and 1,586,466 final item entries.
+Final-state entries are **not** counts of reads, writes, intermediate
+items, or expression executions. Standard meter counts additionally
+recorded 388,152 item-spec constructions, 382,334 metadata-analysis scopes,
+384,632 lazy item-operation scopes, 27,464 Update-decoration scopes,
+212,086 UsingTask registrations, and 29,614 intrinsic-task scopes.
+These are instrumentation units, not mutually exclusive semantic
+categories. For example, decoration is an operation over multiple items,
+not one metadata read/concatenation/write.
+
+The measurement machine exposes 32 logical CPUs on 16 physical cores
+(Xeon Platinum 8370C, 2.8 GHz, one NUMA node). CPU here means thread or
+process CPU time, including kernel time where the clock includes it;
+native user-only samples are a different measure. Hardware concurrency
+is an upper bound, not a guarantee of useful parallelism.
+
+For each component, the service-cost model is:
+
+```text
+C(component) =
+    source/version preparations * preparation cost
+  + valid-scope bindings * binding cost
+  + sum(residual executions by shape and size * execution cost)
+  + required observations and user lifecycle work
+  + coordination cost
+```
+
+Source preparations are keyed by source version, not physical project
+alone. Bindings are configuration-, operation-, item-, or request-owned
+as appropriate. Current property values cannot be frozen just because
+their names can be bound. Expression sizes, output-string lengths,
+item-vector cardinalities, metadata access kinds, and effects are cost
+units: a single average "expression" or "item" price is insufficient.
+Only exclusive costs at a given ledger level are added. Each shared
+preparation is billed once and amortized over actual reuse, not omitted.
+
+| Component | Useful-work contract | Current pricing status |
+| --- | --- | --- |
+| Source preparation | Lower source structure and dependency/effect summaries per source version; retain source/diagnostic identity. | Module lowering measured; follow-up observes 1,087 compiled source/version identities. XML/import preparation remains incomplete. |
+| Configuration/operation binding | Bind stable inputs in their valid scope; retain ordered observations and changing-value reads. | Item construction and metadata analysis measured as boundaries, but binding and required effects are not separately priced. |
+| Residual scalar/condition | Direct bound reads, supported operations, and short-circuit decisions; no repeated discovery of invariant source structure. | Small metadata primitives calibrated; follow-up supplies bounded source-shape, output-size, and observation-request counts, but access-kind/effect prices remain missing. |
+| Ordered item operation | Required selection, ordered metadata decisions/writes, and snapshot/identity preservation; shared preparation is outside the per-item loop. | Exclusive selection/decoration costs measured; their full useful-work mixture is not yet priced. |
+| Task lifecycle | Resolution/binding, construction, parameters, execution, outputs, cleanup, and required callbacks; source programs contain no request/assembly-context state. | Covered task-service costs and task bodies measured against a provisional aggregate CPU envelope. |
+| Target/request orchestration | Required dependencies, conditions, batching, intrinsic mutations, and scheduling. | Follow-up prices whole project/target/intrinsic/logging boundaries on one execution thread; request preparation, runtime residuals, and critical-path allocation remain incomplete. |
+| External observations/runtime | Filesystem, environment, arbitrary functions, logging, GC, and JIT retain their required semantics. | Explicit residual accounts; allocation/sample shares are not substituted for service prices. |
+
+Elapsed phase budgets remain the 5-6-second design goal below, but the
+service constraints are now explicit:
+
+| Boundary | Quantitative contract | Current Release observation |
+| --- | --- | --- |
+| Graph/evaluation | ~1.5 s elapsed; at most 48 process-CPU seconds even at perfect utilization of all 32 CPUs. At 16 effective CPUs the envelope would instead be 24 CPU seconds. | Coarse diagnostic mean: 7.953 s elapsed and 145.847 process-CPU seconds. |
+| Complete executable-task service | Provisional <=1.0 aggregate CPU second including bodies and all lifecycle work; elapsed/critical-path performance remains a separate requirement. | Covered task scopes plus resolution: 1.934 CPU seconds, including 0.436 seconds of bodies. |
+| Other execution and non-engine work | Retain the ~1.5-2.0 s and ~1.0-1.5 s elapsed envelopes below; do not infer a CPU allocation without a concurrency/path model. | Complete current additive decomposition is not yet available. |
+
+The graph ceiling is a necessary condition, not a sufficient specification.
+At its current measured service cost, perfect 32-CPU utilization still
+requires about 4.56 seconds. Reaching 1.5 seconds requires a different
+cost structure, not just more scheduling parallelism on this machine.
+The 16-CPU example is a planning sensitivity, not a measured concurrency
+promise. Coarse phase diagnostics include instrumentation; they are not
+counter-free macro samples.
+
+For 16,204 tasks, the one-second service envelope gives **61.71 us per
+invocation**. Measured bodies use 26.92 us, leaving at most **34.80 us**
+for all non-body lifecycle work. The covered non-body subtotal is
+**92.45 us**, about 1.498 CPU seconds versus a 0.564-second allowance.
+This is a concrete provisional budget mismatch, not evidence that all
+non-body work is interpreter overhead: constructors, setters/getters,
+parameter conversion, outputs, and logging can be required useful work.
+Preparation outside the selected scopes is not included, so 1.934 seconds
+is not a measurement of the entire pipeline. Probe costs also remain in
+the diagnostic measurements; no observer-cost subtraction is asserted.
+The complete-task CPU contract deliberately does not equate aggregate
+CPU time with elapsed time or promise a 0.934-second wall-time saving.
+
+Seven-round Release reference fixtures on 512 two-entry `TaskItem`
+instances price small residual operations using the existing metadata
+implementation:
+
+| Reference fixture | Median thread CPU per operation |
+| --- | ---: |
+| Direct named metadata read | 18.13 ns |
+| Metadata read and nonempty predicate | 17.95 ns |
+| Metadata read and three-part concatenation | 44.23 ns |
+| Changed existing metadata write | 99.47 ns |
+| Metadata read, concatenation, and changed write | 121.15 ns |
+
+These are warm, small-state primitive calibrations, not complete MSBuild
+expression costs or universal nanosecond limits. Reads/predicates overlap
+and compound fixtures must not be added to their constituent operations.
+The fixtures include the public metadata APIs and their ordinary
+small-map/escaping work, but exclude binding, inherited/built-in metadata,
+property-read observers, filesystem path heuristics, arbitrary functions,
+and the workload's server-GC/concurrency context. They use short,
+unescaped strings; string-length and access-kind mixtures remain unpriced.
+For example, one million operations *of exactly the combined fixture's
+shape* imply about 0.121 CPU seconds of primitive work, not a price for a
+million arbitrary decorations. Neither final item counts nor the 27,464
+decoration scopes establish that shape count.
+
+The exclusive evaluation ledger and observer controls are in
+[the accounting measurements](evaluation-perf.md#bottom-up-cost-model-accounting).
+The clean coarse ledger reconciles 125.530 evaluation-thread CPU seconds
+and 20.317 other graph-process CPU seconds to the 145.847-second graph
+total. The latter is explicitly unassigned, not labelled "overhead" or
+added again to GC/JIT sample families. Finer diagnostic scopes also
+reconcile, but their evaluation mean is 135.001 CPU seconds; the extra
+instrumentation changes the cost structure and cannot supply exact
+counter-free per-component prices.
+
+This revision therefore supplies current counts, phase/service envelopes,
+an exclusive diagnostic ledger, and calibrated primitives. **It does not
+yet supply a fully priced semantics-equivalent restore implementation.**
+The follow-up below adds bounded source-site/shape/effect counts,
+output-string distributions, and whole execution boundaries. Remaining
+inputs include binding and required-observation prices, metadata access
+kinds, vector-size distributions, uncovered execution/runtime work, and
+a critical-path model.
+Until those are priced, an item/metadata component can be a candidate for
+investigation but cannot honestly receive a numeric pass/fail verdict.
+
+The first reusable foundation must close a specified gap. Task-site
+binding and parameter/output execution should be assessed against the
+non-body service allowance, preserving user callbacks and lifecycle.
+Shared scalar/condition residual programs should be assessed against a
+shape-weighted primitive-plus-binding-plus-effects price. Neither is
+justified solely by a hot stack. Accept modest, repeatable component
+savings with bounded preparation/memory costs, then measure accumulated
+macro throughput in optimized, counter-free comparisons.
+
+### Fine-grained follow-up and next priced boundary
+
+The [binding and execution follow-up](evaluation-perf.md#fine-grained-binding-and-execution-accounting)
+uses a **new input epoch**, not a throughput comparison with the initial
+cohort above. Although runtime source and clean engine hashes were
+unchanged, 641 of the historical 760 asset hashes differed; their cause
+cannot be established from historical hashes alone. A fresh clean
+reference retains actual asset contents, and all twelve follow-up
+captures match it exactly. This epoch has 1,654 evaluations and 16,189
+task bodies. No optimization gain is inferred from cross-epoch times.
+
+The clean coarse mean is 20.400 seconds outer elapsed, with:
+
+| Boundary | Elapsed s | Process CPU s |
+| --- | ---: | ---: |
+| Graph/evaluation | 8.447 | 150.773 |
+| Post-graph extraction build session | 9.250 | 17.698 |
+| Build stop to child exit | 0.881 | 9.643 |
+
+At 32 perfectly utilized logical CPUs, the graph CPU alone requires
+about 4.71 seconds; the 1.5-second envelope permits at most 48 CPU
+seconds. The build-session span independently exceeds the complete
+5-6-second goal. A new evaluation cost structure and a new execution
+cost structure are both necessary. These are measured phase gaps, not
+proof that all their current CPU is removable interpreter work.
+
+The source/binding census supplies concrete amortization units:
+1,087 observed source/version modules, 1,688,008 module lookup calls,
+and 391,187 item-operation bindings at 9,146 sites (42.8/site).
+Shared module lowering takes about 0.593 diagnostic CPU seconds;
+lookup calls must not be mistaken for repeated source compilation.
+Residual property execution covers 1,942,327 assignments at 4,336 sites,
+with lexical shapes and output-size distributions recorded separately.
+Constant replay and scalar fallback are outside that property census.
+
+Metadata has 441,966 template bindings, 1,746,839 decisions (935,198
+conditional), and 922,341 successful explicit values. Of these values,
+99.26% originate at compiled-supported source sites, and 80.10% already
+complete through operation-local specialized reuse; generic fallback
+completions account for 0.744%. Seventeen property/metadata sites supply
+82.92% of explicit values. Their cost must include decisions, current
+reads, and ordered writes, not just string expansion. Bulk constant
+metadata is excluded from explicit-value denominators. The 72,702,931
+metadata output characters and measured size histogram price a
+different mixture from the tiny reference fixture.
+
+Actual Unix heuristic probe requests total about 2.551 million; 296,569
+permission checks reach an environment-read branch. Counts distinguish
+binding, value, condition, property-program, and other regions. They
+neither price effects nor permit their deletion or process-wide caching.
+Required observations and their ordering remain part of each contract.
+
+Whole-region timing conserves exclusive CPU exactly. A bounded execution
+follow-up finds 6.947 CPU seconds inside 1,654 project-build roots, all on
+one thread, split without double counting as:
+
+| Covered execution service | CPU s |
+| --- | ---: |
+| Project work outside selected children | 0.177 |
+| Target traversal outside bodies | 1.058 |
+| Target-body work outside selected children | 1.541 |
+| Intrinsic groups | 0.619 |
+| Project logging/state-view creation | 1.458 |
+| Task service and resolution, including 0.475 s of bodies | 2.094 |
+
+The same diagnostic build session uses 17.249 process-CPU seconds.
+Its 10.302-second CPU complement includes unpriced preparation,
+runtime/workers, scheduling, and other work; it is not all target
+overhead. All forests have zero incomplete scopes. Two repeats per mode
+and variation in off controls prevent an exact observer-overhead
+estimate. The preceding timing pair's 1.983 task CPU seconds belongs to
+that pair, not an additional charge to this execution ledger.
+
+**Price a request-owned activation frame next.** A source-prepared
+target/task plan should bind to current state in its request/configuration
+scope; logging and public object APIs should receive explicit compatible
+views. The measured logging factory includes a getter that calls compact
+property materialization before deciding what the logger needs. That is
+a representation transition to price, not proof that materialization
+explains the entire 1.458 seconds. Separate required snapshot/serialization
+work from frame activation and avoid forcing object views unnecessarily.
+Retain copy-on-read snapshots, mutable public APIs, ordering, lifecycle
+callbacks, target batching, and all existing outputs.
+
+Use the provisional one-second task CPU allowance and separately price
+the other serialized execution work against its 1.5-2.0-second elapsed
+envelope. A complete operation-owned metadata program/frame is the
+evaluation counterpart: source preparation, scope-valid binding, then
+current-item conditions/reads/ordered writes with effects preserved.
+Neither frame has a complete workload-weighted useful-work price yet.
+The next prototype must measure those units and remaining effects, not
+claim success from lower allocations or a narrower value-expansion
+hotspot. Source preparation is already shared; evaluated-project and
+task-result caches are not part of this plan.
+
+### Activation-frame investigation: compact state and compatible views
+
+The [activation/property-view investigation](evaluation-perf.md#request-activation-and-property-view-investigation)
+narrows the frame contract. All 1,654 project requests arrive already
+loaded, and each configuration creates one base lookup. Logging first
+converts **2,034,153 compact properties** into objects, producing
+2,384,682 base entries. Lookup construction then sees no compact entries.
+Both paths currently require the object dictionary, so deferring the
+logging conversion alone would only relocate it.
+
+The diagnostic prices separate useful snapshot work from representation
+conversion:
+
+| Activation/view boundary | CPU seconds |
+| --- | ---: |
+| Project activation outside the project-build scope | 0.011 |
+| Separate operating-environment initialization | 0.133 |
+| Base lookup construction, including empty drain | 0.0047 |
+| Nonempty compact conversion inside logging | **1.035** |
+| Required eager filtered logging property snapshot | **0.361** |
+| Logging factory including conversion, snapshot, event/context | 1.441 |
+
+These rows contain nesting and are not an additive ledger. Conversion
+averages 509 ns/entry, including validation, draining, object creation,
+dictionary insertion, and probes. It allocates 276.660 MB, but serialized
+CPU is the primary motivation. Full CPU/current-thread-allocation forests
+reconcile exactly. Basic frame entry is already small; a cheaper request
+object is not the foundation that addresses this measured charge.
+
+A separate named-demand census covers registered base-dictionary reads
+through both execution lookup and direct project APIs. Both captures
+agree on 178,956 hits, 279,749 misses, **72,705 distinct successful
+names summed per configuration**, 38,887 base writes, and 26,333 distinct
+written names. At most 75 distinct successful names occur per
+configuration. The distinct read total is 3.049% of initial base entries
+and an upper bound of **3.574% of initial compact entries**. It includes
+object-backed and newly written names; bulk logging/public enumeration
+and translation are outside that denominator. Per-configuration
+distributions are not identical, so use aggregate counts, not inferred
+exact per-site demand. A stale first diagnostic capture was rejected,
+preserved, and replaced with verified probe-containing assemblies.
+
+The bounded prototype should therefore carry **configuration-owned
+compact base state, request/batch overlays, and explicit compatibility
+views**. Preserve batch shadowing/merge order and ensure writes remove
+or supersede old compact values. Produce the required logging snapshot
+without converting every property to a public object, while keeping
+its existing capture timing, environment filtering, escaping, global
+properties, deferred item views, and event ordering. Materialize stable
+mutable property objects on actual demand, retaining full barriers for
+bulk object APIs and unsupported translation/other boundaries.
+
+This replaces a representation charge; it is not a cache of evaluated
+results. The model must price activation/environment work, snapshot size
+and escaping, named hit/miss/scope-depth costs, actual object demand,
+writes/merges, and fallback barriers. The 1.035 CPU seconds is not a
+guaranteed wall saving, and the 0.361-second required snapshot is not
+free. Remaining target/task service and process residuals still need
+separate work.
+
+In this timing pair, request-thread roots cover 7.106 CPU seconds and
+separate environment roots 0.133 out of 17.062 build-process CPU
+seconds. The **9.824-second unassigned CPU complement** remains
+unpriced, not labelled interpreter overhead. Build GC pause totals about
+0.176 seconds; this does not attribute GC CPU or establish an additive
+critical-path account. All ten valid activation/demand captures match
+the existing fresh 760-asset reference. Observer variation precludes
+inferring throughput gains; no production engine change was made.
+
+### Historical design inputs
 
 The historical restore extraction corpus had about 636 physical projects,
 1,642 configured project evaluations/builds, and 16,045 non-intrinsic task
@@ -68,6 +377,22 @@ branch's recent ~22-25-second restores. They locate work but do not establish
 current progress toward the goal or a current per-layer budget gap.
 
 ## Current restore baseline (October 2026)
+
+The initial comparisons in this section used local Debug assemblies.
+A later configuration check confirmed that those assemblies disable JIT
+optimization. Their paired results describe that configuration, not
+Release throughput. The latest same-commit configuration comparison at
+`8b41df437` measured **17.738 seconds in Release versus 19.460 seconds in
+Debug**, with a paired wall saving of 1.722 seconds (95% CI
+[1.357, 2.086]) across six balanced pairs. Release used more aggregate
+user CPU in that cohort. This is a configuration comparison, not a new
+ancestor-versus-candidate attribution. Published MSBuild already uses
+Release assets: switching the local measurements to Release corrects a
+measurement mistake and delivers no product throughput improvement.
+Use optimized assemblies for
+subsequent throughput decisions; see
+[throughput profiling and optimized baseline](evaluation-perf.md#throughput-profiling-and-optimized-baseline)
+for the evidence and attribution limits.
 
 The control is the clean common ancestor with this branch, `1eecb3d38`, not
 current upstream `main`. The candidate is the clean committed `27a86bf`

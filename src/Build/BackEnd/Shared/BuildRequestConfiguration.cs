@@ -682,7 +682,7 @@ namespace Microsoft.Build.BackEnd
 
                 if (_baseLookup == null)
                 {
-                    _baseLookup = new Lookup(Project.ItemsToBuildWith, Project.PropertiesToBuildWith);
+                    _baseLookup = new Lookup(Project);
                 }
 
                 return _baseLookup;
