@@ -33,6 +33,11 @@ internal sealed class PropertiesUseTracker
     private bool _warnForUninitializedProperties = BuildParameters.WarnOnUninitializedProperty || Traits.Instance.EscapeHatches.WarnOnUninitializedProperty;
 
     /// <summary>
+    /// Whether reads are inspected for uninitialized-property warnings.
+    /// </summary>
+    internal bool WarnsForUninitializedProperties => _warnForUninitializedProperties;
+
+    /// <summary>
     /// Lazily allocated collection of properties and the element which used them.
     /// </summary>
     private Dictionary<string, IElementLocation>? _properties;

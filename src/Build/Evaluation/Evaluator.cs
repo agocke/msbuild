@@ -186,6 +186,22 @@ namespace Microsoft.Build.Evaluation
         private readonly ModuleEvaluationReadTracker _moduleEvaluationReadTracker;
 
         /// <summary>
+        /// The tracking wrapper around the evaluation data, for recording property-group live-ins.
+        /// </summary>
+        private readonly PropertyTrackingEvaluatorDataWrapper<P, I, M, D> _trackingData;
+
+        /// <summary>
+        /// Whether property-group effects may be attached in this evaluation; decided when the properties
+        /// pass starts. See <see cref="PropertyGroupEffectCache"/>.
+        /// </summary>
+        private bool _attachPropertyGroups;
+
+        /// <summary>
+        /// Records the property group currently being evaluated for <see cref="PropertyGroupEffectCache"/>.
+        /// </summary>
+        private PropertyGroupEffectCache.Recorder _propertyGroupRecorder;
+
+        /// <summary>
         /// The environment properties with which evaluation should take place.
         /// </summary>
         private readonly PropertyDictionary<ProjectPropertyInstance> _environmentProperties;
@@ -278,11 +294,12 @@ namespace Microsoft.Build.Evaluation
                 _evaluationContext.ConditionReplayCache is not null);
 
             // Wrap the IEvaluatorData<> object passed in.
-            data = new PropertyTrackingEvaluatorDataWrapper<P, I, M, D>(
+            _trackingData = new PropertyTrackingEvaluatorDataWrapper<P, I, M, D>(
                 data,
                 _evaluationLoggingContext,
                 Traits.Instance.LogPropertyTracking,
                 _moduleEvaluationReadTracker);
+            data = _trackingData;
 
             // Create containers for the evaluation results
             data.InitializeForEvaluation(toolsetProvider, _evaluationContext, _evaluationLoggingContext);
@@ -740,6 +757,7 @@ namespace Microsoft.Build.Evaluation
                 // Pass1: evaluate properties, load imports, and gather everything else
                 MSBuildEventSource.Log.EvaluatePass1Start(projectFile);
                 EvaluationTrace.Pass('P');
+                _attachPropertyGroups = CanAttachPropertyGroups();
                 using (EvaluationPerformanceInstrumentation.Measure(
                            EvaluationPerformanceMetric.PropertiesAndImports))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.Properties))
@@ -1367,16 +1385,122 @@ namespace Microsoft.Build.Evaluation
             using (_evaluationProfiler.TrackElement(propertyGroupElement))
             {
                 EvaluationTrace.BlockEnter(propertyGroupElement.Location);
-                if (EvaluatePropertyGroupCondition(propertyGroupElement))
+                PropertyGroupEffectCache.Entry entry = null;
+                PropertyGroupEffectCache.Recorder recorder = null;
+                PropertyGroupEffectCache.Operation[] verifyAgainst = null;
+                ulong globalMask = 0;
+                if (_attachPropertyGroups)
                 {
-                    foreach (ProjectPropertyElement propertyElement in propertyGroupElement.Properties)
+                    entry = PropertyGroupEffectCache.GetEntry(propertyGroupElement);
+                    ProjectPropertyElement[] elements = entry.Elements;
+                    if (elements is null)
                     {
-                        EvaluatePropertyElement(propertyElement);
+                        PropertyGroupEffectCache.CountIneligible();
+                        entry = null;
                     }
+                    else
+                    {
+                        globalMask = GetNonOverridableGlobalMask(elements);
+                        switch (entry.Find(_trackingData.GetEscapedValueUntracked, globalMask, out PropertyGroupEffectCache.Variant variant))
+                        {
+                            case PropertyGroupEffectCache.LookupResult.Hit when PropertyGroupEffectCache.Verify:
+                                // Evaluate normally and compare instead of attaching.
+                                verifyAgainst = variant.Operations;
+                                recorder = new PropertyGroupEffectCache.Recorder();
+                                break;
+                            case PropertyGroupEffectCache.LookupResult.Hit:
+                                ApplyPropertyGroupEffect(variant.Operations);
+                                EvaluationTrace.BlockExit();
+                                return;
+                            case PropertyGroupEffectCache.LookupResult.Uncacheable:
+                                PropertyGroupEffectCache.CountUncacheable();
+                                entry = null;
+                                break;
+                            default:
+                                PropertyGroupEffectCache.CountMiss();
+                                recorder = new PropertyGroupEffectCache.Recorder();
+                                break;
+                        }
+                    }
+                }
+
+                _propertyGroupRecorder = recorder;
+                _trackingData.ReadObserver = recorder;
+                try
+                {
+                    if (EvaluatePropertyGroupCondition(propertyGroupElement))
+                    {
+                        foreach (ProjectPropertyElement propertyElement in propertyGroupElement.Properties)
+                        {
+                            EvaluatePropertyElement(propertyElement);
+                        }
+                    }
+                }
+                finally
+                {
+                    _propertyGroupRecorder = null;
+                    _trackingData.ReadObserver = null;
+                }
+
+                // Only a group that completed without an exception is recorded.
+                if (verifyAgainst is not null)
+                {
+                    PropertyGroupEffectCache.CheckVerification(verifyAgainst, recorder);
+                }
+                else if (recorder is not null)
+                {
+                    entry.Add(recorder, globalMask);
                 }
 
                 EvaluationTrace.BlockExit();
             }
+        }
+
+        /// <summary>
+        /// Whether replaying a recorded property-group effect is indistinguishable from evaluating it: no
+        /// observer of property reads, conditions, or element timing is active, and the default (not
+        /// compiled-module) evaluation path is in use.
+        /// </summary>
+        private bool CanAttachPropertyGroups() =>
+            Traits.Instance.EnablePropertyGroupAttachment &&
+            _evaluationContext.EvaluationModuleCache is null &&
+            _evaluationContext.PropertyAssignmentReplayCache is null &&
+            !_data.ShouldEvaluateForDesignTime &&
+            _evaluationProfiler.ProfiledResult is null &&
+            !_trackingData.TracksPropertyReads &&
+            !_expander.PropertiesUseTracker.WarnsForUninitializedProperties &&
+            !EvaluationTrace.Active &&
+            _evaluationLoggingContext.LoggingService is Microsoft.Build.BackEnd.Logging.LoggingService { RoutesBuildEngineData: false };
+
+        private ulong GetNonOverridableGlobalMask(ProjectPropertyElement[] elements)
+        {
+            ulong mask = 0;
+            for (int i = 0; i < elements.Length; i++)
+            {
+                if (IsNonOverridableGlobalProperty(elements[i].Name))
+                {
+                    mask |= 1UL << i;
+                }
+            }
+
+            return mask;
+        }
+
+        private void ApplyPropertyGroupEffect(PropertyGroupEffectCache.Operation[] operations)
+        {
+            foreach (PropertyGroupEffectCache.Operation operation in operations)
+            {
+                if (operation.Value is null)
+                {
+                    _evaluationLoggingContext.LogComment(MessageImportance.Low, "OM_GlobalProperty", operation.Element.Name);
+                }
+                else
+                {
+                    _data.SetProperty(operation.Element, operation.Value, _evaluationLoggingContext);
+                }
+            }
+
+            PropertyGroupEffectCache.CountHit(operations.Length);
         }
 
         private void EvaluatePropertyGroupElement(
@@ -3517,6 +3641,7 @@ namespace Microsoft.Build.Evaluation
                     MessageImportance.Low,
                     "OM_GlobalProperty",
                     propertyElement.Name);
+                _propertyGroupRecorder?.OnSkippedGlobal(propertyElement);
                 return false;
             }
 
@@ -3553,6 +3678,7 @@ namespace Microsoft.Build.Evaluation
                 evaluatedValue,
                 _evaluationLoggingContext);
             EvaluationTrace.PropertyElement(propertyElement.Name, propertyElement.Value, evaluatedValue);
+            _propertyGroupRecorder?.OnWrite(propertyElement, evaluatedValue);
             return true;
         }
 

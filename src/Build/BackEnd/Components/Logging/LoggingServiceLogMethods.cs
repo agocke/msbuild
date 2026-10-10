@@ -897,6 +897,11 @@ namespace Microsoft.Build.BackEnd.Logging
 #nullable enable
         private IBuildEngineDataRouter? _buildEngineDataRouter;
 
+        /// <summary>
+        /// Whether property reads and writes are forwarded to BuildCheck.
+        /// </summary>
+        internal bool RoutesBuildEngineData => _buildEngineDataRouter is not null;
+
         public void ProcessPropertyRead(PropertyReadInfo propertyReadInfo, CheckLoggingContext checkContext)
             => _buildEngineDataRouter?.ProcessPropertyRead(propertyReadInfo, checkContext);
 

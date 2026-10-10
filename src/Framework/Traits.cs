@@ -103,6 +103,15 @@ namespace Microsoft.Build.Framework
             "MSBUILDENABLECOMPILEDMODULEEFFECTBATCHING";
 
         /// <summary>
+        /// Experimental: replays recorded property-group effects when a group's live-in property values repeat.
+        /// </summary>
+        public readonly bool EnablePropertyGroupAttachment =
+            Environment.GetEnvironmentVariable(EnablePropertyGroupAttachmentEnvVarName) == "1";
+
+        public const string EnablePropertyGroupAttachmentEnvVarName =
+            "MSBUILDATTACHPROPERTYGROUPS";
+
+        /// <summary>
         /// Enable restore first functionality in MSBuild.exe
         /// </summary>
         public readonly bool EnableRestoreFirst = Environment.GetEnvironmentVariable("MSBUILDENABLERESTOREFIRST") == "1";

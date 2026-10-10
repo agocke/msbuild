@@ -71,6 +71,7 @@ namespace Microsoft.Build.Evaluation
         public P GetProperty(string name)
         {
             P prop = _wrapped.GetProperty(name);
+            ReadObserver?.OnRead(name, EscapedValueOf(prop));
             _moduleEvaluationReadTracker?.RecordPropertyRead(name, prop);
             if (EvaluationTrace.Active)
             {
@@ -92,6 +93,7 @@ namespace Microsoft.Build.Evaluation
         public P GetProperty(string name, int startIndex, int endIndex)
         {
             P prop = _wrapped.GetProperty(name, startIndex, endIndex);
+            ReadObserver?.OnRead(name.Substring(startIndex, endIndex - startIndex + 1), EscapedValueOf(prop));
 
             if (EvaluationTrace.Active)
             {
@@ -113,6 +115,23 @@ namespace Microsoft.Build.Evaluation
 
             return prop;
         }
+
+        /// <summary>
+        /// Receives every property read made through this wrapper while set; used to record a property
+        /// group's live-ins.
+        /// </summary>
+        internal PropertyGroupEffectCache.Recorder? ReadObserver { get; set; }
+
+        /// <summary>
+        /// Whether reads are tracked (environment-variable or uninitialized-property reads), which a replayed
+        /// effect would not reproduce.
+        /// </summary>
+        internal bool TracksPropertyReads => IsPropertyReadTrackingRequested;
+
+        /// <summary>
+        /// A property's escaped value without notifying read observers or trackers.
+        /// </summary>
+        internal string? GetEscapedValueUntracked(string name) => EscapedValueOf(_wrapped.GetProperty(name));
 
         // A separate method so the caller's flow state for the property is unchanged by the null check.
         private static string? EscapedValueOf(P? property) => property?.EscapedValue;
@@ -138,6 +157,8 @@ namespace Microsoft.Build.Evaluation
             {
                 EvaluationTrace.PropertyRead(name.Substring(startIndex, endIndex - startIndex + 1), escapedValue);
             }
+
+            ReadObserver?.OnRead(name.Substring(startIndex, endIndex - startIndex + 1), escapedValue);
 
             bool recording = _moduleEvaluationReadTracker?.IsRecording == true;
             if (recording || IsPropertyReadTrackingRequested)

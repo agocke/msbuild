@@ -278,6 +278,47 @@ The census assumes attaching an effect and checking a key are cheap. Item keys
 need an O(1) identity for the list an operation applies to, not the census's
 O(n) hash. Item operation construction (~30 G) is not covered.
 
+### Property-group effect attachment prototype
+
+`MSBUILDATTACHPROPERTYGROUPS=1` (experimental, off by default) records each
+eligible property group's effect once per distinct key: its element, the
+global-property status of its properties, and its live-in values. Later
+evaluations with an equal key replay the recorded writes through the same
+`SetProperty` calls, so property objects, reassignment logging, and write
+notifications are unchanged. A group is eligible when it uses only `$(Name)`
+references and simple conditions, contains no backslash, and reads no value
+containing a backslash. Backslashes make the Unix path heuristic consult the
+filesystem; without them the heuristic cannot change a value. The evaluator
+falls back whenever BuildCheck, property-read tracking, uninitialized-property
+warnings, design-time evaluation, the profiler, compiled modules, or tracing
+is active.
+
+| Per restore (1,643 configurations) | Count |
+| --- | ---: |
+| Property groups attached | ~569,000 |
+| Writes replayed | ~804,000 |
+| Misses (first evaluation of a key) | ~26,700 |
+| Ineligible groups | 348,726 (37%) |
+
+`MSBUILDATTACHPROPERTYGROUPSVERIFY=1` evaluates every hit normally and compares:
+**0 mismatches in 569,111 hits**. Assets are identical to attachment off.
+
+| Attachment | Properties and imports pass | Evaluation total | Restore wall (3 pairs) |
+| --- | ---: | ---: | ---: |
+| Off | 69.9 G | 166.5 G | 17.18 ± 0.18 s |
+| On | 64.4 G (-7.9%) | 162.6 G | 17.13 ± 0.23 s |
+
+Instructions are user mode (ledger, one run each). Attachment works and saves
+~9.7 k instructions per attached group, but the eligible groups are the
+pass's cheap ones. Classifying the trace's group work with the same rules
+(census weights): eligible 53%, property functions 24%, backslashes 11.5%,
+instance functions and other `$()` forms 9%, condition functions 1%. Census
+weights use average per-element costs, which the function-calling elements
+dominate, so they overstate the eligible share. The remaining saving needs
+eligibility for property functions (pure functions as part of the key, and
+filesystem-dependent ones with their observations as inputs) and for
+backslash paths (the heuristic's directory probes as inputs).
+
 ### Default-path read-tracker fixes
 
 Two allocations this branch had added to every property element and every

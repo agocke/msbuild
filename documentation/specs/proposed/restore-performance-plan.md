@@ -172,17 +172,22 @@ evaluator, and caching evaluated projects or task results.
 | Compact-state request activation frame (logging snapshot and lookups without object conversion) | Opt-in through effect batching; not yet priced |
 | Compiled target plans and direct task actions | Opt-in (`MSBUILDENABLEACTIONGRAPHPARTIALEVALUATION`) |
 | Async logging notification coalescing, separator-free path fast exit | Default-on |
+| Property-group effect attachment (`MSBUILDATTACHPROPERTYGROUPS`, verify with `MSBUILDATTACHPROPERTYGROUPSVERIFY`) | Experimental opt-in |
 | Cost ledger (`MSBUILDCOSTLEDGER`) and evaluation trace (`MSBUILDEVALUATIONTRACE`) | Diagnostic, inactive by default |
 | Fixes: empty AOT framework root in `ToolLocationHelper`, default-path read-tracker allocations | Default-on |
 
 ## Next steps
 
-1. **Prototype effect attachment** for property groups and choose blocks on the
-   `ProjectInstance` path, keyed on exact live-in values, with filesystem and
-   environment observations as inputs. Measure the attached share and the key
-   and attach cost against the census. Then extend it to item operations, which
-   need an O(1) identity for the list they apply to, and to item operation
-   construction (not yet censused).
+1. **Widen property-group attachment.** The prototype (`MSBUILDATTACHPROPERTYGROUPS`)
+   replays 569 k groups per restore with zero mismatches against normal
+   evaluation, but it saves only 7.9% of the properties pass, because eligible
+   groups are the cheap ones
+   ([details](evaluation-perf.md#property-group-effect-attachment-prototype)).
+   The expensive groups call property functions or contain backslash paths.
+   Making them eligible means classifying pure functions, and taking filesystem
+   observations (function results, path-heuristic probes) as key inputs. Then
+   extend attachment to item operations (an O(1) identity for the list they
+   apply to) and to item operation construction (not yet censused).
 2. **Fast paths for the late-bound property functions** (`File.ReadAllText`,
    `Regex.Match`/`IsMatch`, `Match.Groups`, `Version.*`,
    `RuntimeInformation.*`, `File.Exists`, `ToolLocationHelper.GetPlatformSDK*`)
