@@ -164,7 +164,52 @@ From 33.7 s, runtime configuration and hosting alone (no binlog, no
 PGO in the console, Native AOT) reach 13.8 s on this 8-core machine with
 no evaluator changes. Engine accounting should start from that baseline.
 
-### Where the remaining instructions go (PGO off)
+### Accounting on the Native AOT console
+
+With no JIT, tiering, or PGO, the AOT console process retires 264 G
+instructions (perf, process-filtered, binlog off):
+
+| Subsystem | Instructions | Share | Largest leaf kinds |
+| --- | ---: | ---: | --- |
+| Item evaluation | 56.9 G | 21.6% | hash/lookup 17%, path/fs 11%, string scan 10% |
+| Property evaluation | 40.0 G | 15.1% | hash/lookup 17%, kernel 13%, path/fs 9% |
+| Server/background GC threads | 40.0 G | 15.1% | |
+| Condition evaluation | 36.2 G | 13.7% | hash/lookup 20%, string scan 9% |
+| NuGet's own code | 27.1 G | 10.3% | LINQ 12%, kernel 10% |
+| File globbing (`FileMatcher`) | 16.3 G | 6.2% | regex interpreter 83% |
+| Other evaluation | 13.7 G | 5.2% | cast/dispatch 17%, XML 11% |
+| Imports, graph, execution, logging | ~34 G | ~13% | |
+
+Evaluation is ~179 G, ~109 M instructions per evaluation, the same as
+under the JIT. AOT reduces cycles, not work.
+
+The level-2 ledger supplies unit counts in the same image. Its probes
+inflate evaluation from 170.8 to 266.1 G (~13.5 M scopes at ~6.4 k
+instructions). The per-unit prices below subtract the calibrated probe
+cost (3.0 k inside each scope, 3.4 k charged to its parent per child) and
+are cross-checked against the level-1 run:
+
+| Unit | Count | Instructions per unit (approximate) |
+| --- | ---: | ---: |
+| Condition evaluation | 3.78 M | ~11-12 k |
+| Property element in the properties/imports pass, excluding its condition | ~1.9 M (census count, not this run) | ~29 k |
+| Item operation application, excluding nested scopes | 841 k | ~27-30 k |
+| Item spec construction | 844 k | ~11 k |
+| `UsingTask` registration | 208 k | ~21 k |
+| Metadata analysis | 839 k | ~5.4 k |
+| Task parameter binding, per task | 16 k | ~123 k |
+| Intrinsic task | 29 k | ~76 k |
+
+A typical condition (`'$(Foo)' == 'true'`) needs one or two keyed reads
+and a short comparison. A typical property element needs one ~50-character
+expansion and one keyed write. Either should cost a few hundred
+instructions even with generous hashing, so both run ~25-100x above a
+plausible floor. Conditions alone are ~43 G (a quarter of evaluation).
+These floors are estimates, not yet measurements. The executable-floor
+benchmark should replace them, starting with conditions and property
+elements, then item operations.
+
+### Where the remaining instructions go (PGO off, JIT console)
 
 A call-stack classifier over the R2R-equivalent IL profile assigns each
 sample to the innermost recognizable subsystem and to an operation kind
