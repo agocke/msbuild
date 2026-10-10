@@ -3,7 +3,8 @@
 
 usage: census.py <trace-dir> [top-n]
 
-For every import subtree (a file plus everything it imports) in the properties and imports pass, the
+For every import subtree (a file plus everything it imports) and, when the trace has them, every property
+group and choose block in the properties and imports pass, the
 live-ins are the properties it reads before writing them, with the read value's hash. Two executions of
 the same file with the same live-in vector should produce the same effect: the same sequence of applied
 property elements and condition results. The census reports how often that holds, and how much of the
@@ -17,6 +18,8 @@ import hashlib
 import os
 import sys
 from collections import defaultdict
+
+BLOCK = "<block> "   # property group or choose block, keyed like an import subtree
 
 CONDITION_COST = 10_600
 PROPERTY_COST = 18_200
@@ -94,7 +97,9 @@ def load(trace_dir):
                 continue
             elif kind == "I":
                 stack.append(Scope(unescape(line.rstrip("\n").split("\t", 1)[1]), stack[-1]))
-            elif kind == "J":
+            elif kind == "B":
+                stack.append(Scope(BLOCK + unescape(line.rstrip("\n").split("\t", 1)[1]), stack[-1]))
+            elif kind in "JK":
                 if len(stack) > 1:
                     close(stack.pop())
             elif kind == "R":
@@ -163,11 +168,14 @@ def main():
     once = sum(groups[k][0].cost for k in chosen)            # one evaluation per distinct group
     attached = sum(groups[k][0].cost * (n - 1) for k, n in chosen.items())
 
-    print(f"# {len(roots)} evaluations, {sum(len(ss) for ss in by_path.values()) - len(roots)} import executions "
-          f"of {len(by_path) - len({r.path for r in roots})} files")
+    files = [p for p in by_path if not p.startswith(BLOCK) and not p.startswith("<project>")]
+    print(f"# {len(roots)} evaluations, {sum(len(by_path[p]) for p in files)} import executions of {len(files)} files")
     print(f"# properties-and-imports work: {total / 1e9:.1f} G instructions (weighted: {CONDITION_COST} per condition, "
           f"{PROPERTY_COST} per property element)")
-    print(f"# (file, live-in) groups: {len(groups)}; with inconsistent effects: {len(inconsistent)} "
+    block_execs = sum(len(ss) for p, ss in by_path.items() if p.startswith(BLOCK))
+    block_groups = sum(1 for k in groups if k[0].startswith(BLOCK))
+    print(f"# blocks: {block_execs} executions in {block_groups} (block, live-in) groups")
+    print(f"# (file or block, live-in) groups: {len(groups)}; with inconsistent effects: {len(inconsistent)} "
           f"({inconsistent_cost / total * 100:.1f}% of work)")
     print(f"# reuse model (outermost repeating subtree): residual {residual / total * 100:.1f}%, "
           f"evaluated once per group {once / total * 100:.1f}%, attached instead of evaluated {attached / total * 100:.1f}%")
@@ -187,7 +195,7 @@ def main():
     print(f"{'file':70} {'execs':>6} {'vectors':>7} {'live-ins':>8} {'incons':>6} {'work %':>7}")
     rows = []
     for path, ss in by_path.items():
-        if path.startswith("<project>"):
+        if path.startswith("<project>") or path.startswith(BLOCK):
             continue
         keys = {s.key for s in ss}
         rows.append((sum(s.cost for s in ss), path, len(ss), len(keys),

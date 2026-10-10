@@ -7,6 +7,7 @@ using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Instrumentation;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
 
@@ -194,6 +195,24 @@ namespace Microsoft.Build.Evaluation
             }
         }
 
+        /// <summary>
+        /// Hashes an item list's includes, condition results, and metadata for the evaluation trace.
+        /// </summary>
+        private static string HashItems(IEnumerable<ItemData> items)
+        {
+            var hasher = default(EvaluationTrace.Hasher);
+            foreach (ItemData data in items)
+            {
+                hasher = hasher.Add(data.Item.EvaluatedIncludeEscaped).Add(data.ConditionResult ? "1" : "0");
+                foreach (M metadatum in data.Item.Metadata)
+                {
+                    hasher = hasher.Add(metadatum.Key).Add(metadatum.EscapedValue);
+                }
+            }
+
+            return hasher.ToString();
+        }
+
         private class MemoizedOperation : IItemOperation
         {
             public LazyItemOperation Operation { get; }
@@ -215,7 +234,23 @@ namespace Microsoft.Build.Evaluation
                 CheckInvariant();
 #endif
 
+                bool trace = EvaluationTrace.Active;
+                if (trace)
+                {
+                    EvaluationTrace.OperationEnter(
+                        Operation.ItemElement.Location,
+                        Operation.GetType().Name,
+                        Operation.ItemType,
+                        HashItems(listBuilder),
+                        Operation.EvaluationDirectory);
+                }
+
                 Operation.Apply(listBuilder, globsToIgnore);
+
+                if (trace)
+                {
+                    EvaluationTrace.OperationExit(HashItems(listBuilder));
+                }
 
                 // cache results if somebody is referencing this operation
                 if (_isReferenced)
@@ -319,6 +354,18 @@ namespace Microsoft.Build.Evaluation
             }
 
             public OrderedItemDataCollection.Builder GetItemData(ImmutableHashSet<string> globsToIgnore)
+            {
+                OrderedItemDataCollection.Builder result = GetItemDataCore(globsToIgnore);
+                if (EvaluationTrace.InOperation)
+                {
+                    // Another item list read by the operation being traced: one of its inputs.
+                    EvaluationTrace.ItemsRead(_memoizedOperation.Operation.ItemType, HashItems(result));
+                }
+
+                return result;
+            }
+
+            private OrderedItemDataCollection.Builder GetItemDataCore(ImmutableHashSet<string> globsToIgnore)
             {
                 // Cache results only on the LazyItemOperations whose results are required by an external caller (via GetItems). This means:
                 //   - Callers of GetItems who have announced ahead of time that they would reference an operation (via MarkAsReferenced())

@@ -117,6 +117,12 @@ namespace Microsoft.Build.Evaluation
                     destinationItem);
             }
 
+            internal ProjectItemElement ItemElement => _itemElement;
+
+            internal string ItemType => _itemType;
+
+            internal string EvaluationDirectory => _lazyEvaluator._outerEvaluatorData.Directory;
+
             public void Apply(OrderedItemDataCollection.Builder listBuilder, ImmutableHashSet<string> globsToIgnore)
             {
                 MSBuildEventSource.Log.ApplyLazyItemOperationsStart(_itemElement.ItemType);

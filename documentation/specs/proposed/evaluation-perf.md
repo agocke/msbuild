@@ -248,10 +248,50 @@ Across the 1,646 traced configurations:
 | Property elements | 1,251 | 88.5% |
 | Property elements with `$(...)` or `@(...)` references | 917 | 74.9%; 82.7% at most three values |
 
-An identical outcome does not prove independence from incoming state. The
-next measurement records each import's live-ins (properties read before
-written) and counts distinct live-in vectors per import across
-configurations.
+An identical outcome does not prove independence from incoming state, so the
+live-in census keys on reads. In the properties and imports pass, each import
+subtree, property group, and choose block is keyed by its source and its
+live-ins: the properties it reads before writing them, with value hashes. Each
+item operation is keyed by site, kind, item type, the list it is applied to,
+the properties and other item lists it reads, and the evaluation directory.
+Groups with equal keys must produce equal effects, which validates the key.
+Work is weighted at the AOT per-unit costs (`analysis/census.py`,
+`analysis/census_items.py`).
+
+| | Groups | Inconsistent groups | Attachable work |
+| --- | ---: | ---: | ---: |
+| Import subtrees only (248,247 executions of 475 files) | 51,512 | 9 (1.9% of work) | 55% greedy, 59% nested bound |
+| Import subtrees and blocks (+968,667 block executions) | 115,489 | 10 (2.7%) | 79% greedy, **86%** nested bound |
+| Item operations (842,193 applications at 20,478 sites) | 326,392 | 3,642 (1.5%) | **60%** |
+
+"Greedy" attaches the outermost repeating subtree; the nested bound keys every
+level. At file granularity, files split three ways. Some are invariant across
+the workload: Arcade's `DefaultVersions.props` and `eng/Versions.props` each
+have one live-in vector. The props chain (`Sdk.props`, `Microsoft.Common.props`,
+`Directory.Build.props`) has about one vector per project file, independent of
+target framework. The SDK `.targets` chain is unique per configuration as a whole
+(`Sdk.targets`: 1,637 vectors for 1,646 executions, 747 live-ins), but most of its
+blocks repeat. One item site, the `ProjectToBuild` `Update` in `eng/Subsets.props`
+with six metadata conditions per item, is 18.8% of item-operation work.
+
+The census assumes attaching an effect and checking a key are cheap. Item keys
+need an O(1) identity for the list an operation applies to, not the census's
+O(n) hash. Item operation construction (~30 G) is not covered.
+
+### Default-path read-tracker fixes
+
+Two allocations this branch had added to every property element and every
+property lookup were removed. Same snapshot with only `Microsoft.Build.dll`
+swapped, binlog and PGO off, three interleaved pairs:
+
+| Engine | Wall | Instructions | CPU s |
+| --- | ---: | ---: | ---: |
+| Before the fixes (`28d5b400f`) | 17.20 ± 0.01 s | 297.4 G | 125.4 |
+| After (`5d9fdf2bb`, also with the inactive trace hooks) | 16.91 ± 0.13 s | 300.8 G | 124.0 |
+
+The instruction difference is noise: user-mode instructions varied by up to
+10 G (~3.5%) between runs of one configuration, from GC and spin-waiting that
+depend on scheduling. The fixes do not explain the default path's extra CPU.
 
 ### JIT console profile
 

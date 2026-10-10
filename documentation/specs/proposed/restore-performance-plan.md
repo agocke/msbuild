@@ -101,10 +101,14 @@ data-structure share.
 
 **Most of this work is the same work repeated.** A restore evaluates
 3.99 M conditions over 2,752 distinct texts and 2.41 M property elements over
-1,926 distinct values. 88.5% of property elements produce the same value in
-every configuration (75% of those with references), and 62% of conditions
-give the same result every time
-([details](evaluation-perf.md#amplification-and-invariance)).
+1,926 distinct values. A live-in census groups every import subtree, property
+group, choose block, and item operation by its inputs. Equal inputs produced
+equal effects in all but 2-3% of the work. On that basis, **86% of the
+properties-and-imports work and 60% of item-operation work repeat with
+identical inputs**, about half of evaluation
+([details](evaluation-perf.md#amplification-and-invariance)). The props chain
+varies per project file but not per target framework. The SDK `.targets`
+files are unique per configuration as wholes, but most of their blocks repeat.
 
 ### Execution
 
@@ -142,13 +146,14 @@ because the remaining cost is in two places:
    gap measures this share. The target is configuration-owned compact state
    indexed by statically resolved names, with request and batch overlays and
    compatibility views that materialize public objects only on demand.
-2. **Amplification.** The same imports run in hundreds of configurations, and
-   most of their effects are invariant. Evaluating an import once per
-   distinct *live-in vector* (the properties it reads before writing) and
-   attaching its effect is polyvariant partial evaluation at module
-   granularity. Filesystem observations and other required effects are still
-   replayed. This is the coarse reuse the dead ends point to: per-batch replay
-   lost to lookup overhead, and root-keyed prefix attachment never matched.
+2. **Amplification.** The same imports run in hundreds of configurations.
+   Evaluating each block or item operation once per distinct *live-in vector*
+   (the inputs it reads before writing) and attaching its effect is polyvariant
+   partial evaluation at block granularity. Filesystem observations and other
+   required effects are still replayed. This differs from the dead ends:
+   per-batch replay lost to lookup overhead on small units, and root-keyed
+   prefix attachment never matched. Here the keys are the block's actual
+   reads, and the census shows 86% and 60% of the work repeating.
 
 Execution needs its own change, a **request-owned activation frame**: prepared
 target and task plans that bind to compact state, explicit logging views, and
@@ -172,10 +177,12 @@ evaluator, and caching evaluated projects or task results.
 
 ## Next steps
 
-1. **Per-import live-in census.** Extend the trace with import boundaries and
-   the properties each import reads before writing. Count distinct live-in
-   vectors per import across configurations, weighted by cost. This decides
-   whether module-level polyvariant reuse is the main lever.
+1. **Prototype effect attachment** for property groups and choose blocks on the
+   `ProjectInstance` path, keyed on exact live-in values, with filesystem and
+   environment observations as inputs. Measure the attached share and the key
+   and attach cost against the census. Then extend it to item operations, which
+   need an O(1) identity for the list they apply to, and to item operation
+   construction (not yet censused).
 2. **Fast paths for the late-bound property functions** (`File.ReadAllText`,
    `Regex.Match`/`IsMatch`, `Match.Groups`, `Version.*`,
    `RuntimeInformation.*`, `File.Exists`, `ToolLocationHelper.GetPlatformSDK*`)
@@ -195,8 +202,10 @@ evaluator, and caching evaluated projects or task results.
 
 ## Measurement rules
 
-- Use **instructions retired** (user and kernel) as the primary cost unit and
-  wall time for macro results. Keep Dynamic PGO off for accounting, and report
+- Use **instructions retired** (user and kernel) as the primary cost unit
+  for per-scope and per-unit accounting, and wall time for macro results.
+  Whole-restore instruction totals vary by about 3% between runs (GC and
+  spin-waiting), so small macro differences need wall-time pairs. Keep Dynamic PGO off for accounting, and report
   spin-waits separately: their instruction counts depend on the CPU.
 - Interleave control and candidate runs in balanced pairs, with the same SDK,
   workload, package cache, and switches. Every run must produce identical

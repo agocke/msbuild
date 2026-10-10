@@ -1366,6 +1366,7 @@ namespace Microsoft.Build.Evaluation
         {
             using (_evaluationProfiler.TrackElement(propertyGroupElement))
             {
+                EvaluationTrace.BlockEnter(propertyGroupElement.Location);
                 if (EvaluatePropertyGroupCondition(propertyGroupElement))
                 {
                     foreach (ProjectPropertyElement propertyElement in propertyGroupElement.Properties)
@@ -1373,6 +1374,8 @@ namespace Microsoft.Build.Evaluation
                         EvaluatePropertyElement(propertyElement);
                     }
                 }
+
+                EvaluationTrace.BlockExit();
             }
         }
 
@@ -4029,6 +4032,21 @@ namespace Microsoft.Build.Evaluation
         private void EvaluateChooseElement(ProjectChooseElement chooseElement)
         {
             using (_evaluationProfiler.TrackElement(chooseElement))
+            {
+                EvaluationTrace.BlockEnter(chooseElement.Location);
+                try
+                {
+                    EvaluateChooseElementCore(chooseElement);
+                }
+                finally
+                {
+                    EvaluationTrace.BlockExit();
+                }
+            }
+        }
+
+        private void EvaluateChooseElementCore(ProjectChooseElement chooseElement)
+        {
             {
                 foreach (ProjectWhenElement whenElement in chooseElement.WhenElements)
                 {
