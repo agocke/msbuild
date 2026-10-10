@@ -86,9 +86,15 @@ namespace Microsoft.Build.Evaluation
         public P GetProperty(string name, int startIndex, int endIndex)
         {
             P prop = _wrapped.GetProperty(name, startIndex, endIndex);
-            _moduleEvaluationReadTracker?.RecordPropertyRead(
-                name.Substring(startIndex, endIndex - startIndex + 1),
-                prop);
+
+            // Only build the name substring when something consumes it: this runs for every $(X) lookup.
+            if (_moduleEvaluationReadTracker?.IsRecording == true)
+            {
+                _moduleEvaluationReadTracker.RecordPropertyRead(
+                    name.Substring(startIndex, endIndex - startIndex + 1),
+                    prop);
+            }
+
             if (IsPropertyReadTrackingRequested)
             {
                 this.TrackPropertyRead(name.Substring(startIndex, endIndex - startIndex + 1), prop);
@@ -114,17 +120,25 @@ namespace Microsoft.Build.Evaluation
                 return false;
             }
 
-            string propertyName = name.Substring(
-                startIndex,
-                endIndex - startIndex + 1);
-            _moduleEvaluationReadTracker?.RecordPropertyRead(
-                propertyName,
-                escapedValue);
-            if (IsPropertyReadTrackingRequested)
+            bool recording = _moduleEvaluationReadTracker?.IsRecording == true;
+            if (recording || IsPropertyReadTrackingRequested)
             {
-                TrackPropertyRead(
-                    propertyName,
-                    propertyFound: true);
+                string propertyName = name.Substring(
+                    startIndex,
+                    endIndex - startIndex + 1);
+                if (recording)
+                {
+                    _moduleEvaluationReadTracker!.RecordPropertyRead(
+                        propertyName,
+                        escapedValue);
+                }
+
+                if (IsPropertyReadTrackingRequested)
+                {
+                    TrackPropertyRead(
+                        propertyName,
+                        propertyFound: true);
+                }
             }
 
             return true;
