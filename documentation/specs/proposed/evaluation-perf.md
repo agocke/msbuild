@@ -444,7 +444,134 @@ configuration, with request and batch overlays that preserve `Lookup`
 shadowing and merge order. It builds the logging snapshot directly from
 compact state at the existing capture point, and materializes public
 property objects only on demand. A prototype is committed behind effect
-batching, unpriced.
+batching. The following cohort prices its macro and execution throughput,
+but not its individual residual operations.
+
+### Compact properties through execution: implementation and paired results
+
+This is a separate 760-asset cohort on the 16-core Xeon Platinum 8370C,
+not the 639-asset Ryzen/Native AOT workload above.
+
+The bounded implementation extends the existing compiled-module opt-in;
+it does not add evaluated-project caching or another interpreter. The
+configuration's `BaseLookup` retains its `ProjectInstance` and uses the
+existing `IPropertyValueProvider` path for compact scalar reads. Scope
+objects still shadow base values, clones share the same outer state, and
+only final scope merges publish writes. A merged write removes the old
+compact entry before importing the property object, retaining object
+identity and subsequent mutation behavior.
+
+Default initial-property logging now eagerly snapshots unescaped values
+from both object and compact state without first converting every compact
+entry to a `ProjectPropertyInstance`. Environment-derived object entries
+retain the existing filter. The all-environment path still fully
+materializes properties and uses deferred object reads; selected forwarding
+materializes only the requested objects and retains its existing deferred
+enumeration. Item views, global properties, event capture points, and the
+binary-log format are unchanged. Public object demand and bulk
+properties/deep-copy/translation boundaries still materialize as required.
+Ordinary object-only projects retain their existing lookup and snapshot
+behavior.
+
+#### Same-input optimized comparison
+
+Both bundles are optimized Release builds: their `DebuggableAttribute`
+contains `IgnoreSymbolStoreSequencePoints`, not `DisableOptimizations`.
+This is a product-change comparison, not a Debug-to-Release improvement.
+The preserved ancestor was built from `8b41df437`; the candidate from
+`c39c6b90e`. That commit includes the five production-file changes as well
+as the preceding documentation and regression tests. Informational-version
+and daily build stamps changed in the other assemblies; their production
+source did not change.
+
+The runtime checkout remains clean at
+`ed3bc08392c14faed28bbe367681b0c1bc698c43`, using the same SDK, command,
+opt-ins, package cache, and fresh 760-asset reference as the activation
+investigation. Each invocation uses a fresh process with `/nr:false`.
+The macro cohort has one warmup per bundle followed by four pairs with
+alternating order. It has no startup hook, fine probes, or child binlogs;
+the same outer binlog is enabled on both sides. Warmups are excluded:
+
+| Pair | Order | Ancestor elapsed | Candidate elapsed | Saving |
+|---|---|---:|---:|---:|
+| 1 | ancestor, candidate | 18.21 s | 17.42 s | 0.79 s |
+| 2 | candidate, ancestor | 18.59 s | 17.36 s | 1.23 s |
+| 3 | ancestor, candidate | 17.78 s | 17.17 s | 0.61 s |
+| 4 | candidate, ancestor | 17.49 s | 16.92 s | 0.57 s |
+
+Mean outer restore time falls from **18.018 to 17.218 seconds**, a
+**0.800-second / 4.44%** saving, positive in every pair. The paired
+savings' sample standard deviation is 0.302 seconds. Total process-tree
+CPU falls from 173.288 to 167.638 seconds on average, but its paired
+savings' standard deviation is 7.489 seconds; this does not establish a
+precise CPU price for the new bridge.
+
+A separate two-pair cohort enables only the existing coarse phase hook
+to distinguish graph evaluation from restore extraction execution:
+
+| Extraction build-session metric | Ancestor mean | Candidate mean | Difference |
+|---|---:|---:|---:|
+| Elapsed | 8.215 s | 7.772 s | **0.443 s / 5.40% less** |
+| Process CPU | 16.210 s | 13.883 s | 2.327 s / 14.36% less |
+| Allocated bytes | 977.862 MB | 710.588 MB | 267.274 MB / 27.33% less |
+| GC pause | 0.157 s | 0.081 s | 0.076 s less |
+
+The execution elapsed savings repeat at **0.452 and 0.434 seconds**
+(sample standard deviation 0.013 seconds). Execution CPU savings are
+less stable, at 3.250 and 1.405 seconds. Allocation savings are similarly
+repeatable at 266.865 and 267.683 MB; these are a secondary benefit, not
+the throughput acceptance criterion. Process CPU includes runtime/GC
+work and cannot be equated to the previously measured 1.035-second
+request-thread conversion charge. GC pause is not an additive explanation
+of the elapsed saving.
+
+Graph elapsed savings are 0.964 and **-0.011** seconds; the mean
+0.477-second change is not repeatable enough to credit as a graph
+improvement. Graph allocations increase by 5.187 MB on average (0.083%).
+Do not add the macro and phase-cohort savings or compare these absolute
+times with the earlier 20.40-second clean mean: even the unchanged
+ancestor is faster in this cohort. The gain is established by the
+same-cohort balanced comparison.
+
+All **14 captures**, including warmups, match the fresh reference's 760
+asset hashes exactly. The four phase captures each contain 1,654
+evaluations, one complete graph, and balanced evaluation boundaries.
+Original SDK hashes were verified, and the isolated SDK's original
+assemblies were restored after each cohort. Evidence is session-only in
+`compact-execution-macro-results/`, `compact-execution-phases-results/`,
+the two preserved bundles, and `compact-execution-measure.py`.
+
+#### Compatibility evidence on the measured candidate and remaining account
+
+Seven focused cases cover compact scalar/object demand, empty/missing and
+substring reads, case-insensitive names, batch shadowing and staged
+merges, stable mutable objects, eager filtered snapshots, deferred
+all-environment views, and binary-log round trips with full/selected
+forwarding switches both in-process and out-of-process. In-process logging
+retains all initial properties regardless of those remote-only switches;
+remote nodes require explicit forwarding configuration.
+
+For this candidate, the Release engine-test build and whole-repository
+`./build.sh -c Release -v quiet` both complete with zero warnings/errors.
+The direct MTP test executable with class filters `*Lookup_Tests`,
+`*BuildManager_Logging_Tests`, `*ModuleEvaluationSharingMetrics_Tests`,
+and `*ProjectInstance_Internal_Tests` reports **153 passed, zero failed,
+one platform skip**, including all seven focused cases. Existing forwarding
+method filters report **five passed, zero failed, two existing skips**.
+The Release bootstrap activates SDK `11.0.100-rc.1.26420.103`, builds
+`src/Samples/Dependency/Dependency.csproj`, and runs `dotnet msbuild
+--help`; its engine hash matches the candidate. These are scoped checks,
+not a claim that the previously nongreen full suite now passes.
+
+Retain this foundation for its measured execution-throughput improvement.
+It removes an unnecessary representation transition while preserving
+required observations, rather than merely delaying that transition to
+lookup activation. Remaining logging snapshot, compact hit/miss/overlay
+search, object-demand, write/merge, and compatibility-barrier costs are
+not separately priced by this coarse candidate cohort. In particular,
+object fallback can repeat scope-table searches. Those residuals and the
+remaining target/task/runtime account still need bottom-up specification;
+the result does not by itself bring restore close to the 5-6-second goal.
 
 ## Earlier profiling
 

@@ -119,11 +119,24 @@ files are unique per configuration as wholes, but most of their blocks repeat.
   0.6 ms: 92 us of non-body work per task against a ~35 us allowance). Target
   traversal is 0.64 ms, intrinsic groups 0.37 ms, and the `ProjectStarted`
   property snapshot 0.22 ms.
-- **Converting compact properties into objects for logging costs 1.035 CPU
-  s** on that serial path, although execution reads by name at most 3.6% of
-  them ([details](evaluation-perf.md#request-activation-and-property-views)).
+- **Converting compact properties into objects for logging cost 1.035 CPU
+  s** on the baseline serial path, although execution reads by name at most
+  3.6% of them. The compact execution foundation now avoids that conversion
+  ([details](evaluation-perf.md#request-activation-and-property-views)).
 - **~2.3 s of the serial path is not covered by CPU scopes**: scheduler
   waits, `MSBuild`-task round trips between requests, or uncovered work.
+
+The compact execution change has a repeatable throughput saving in a
+separate 760-asset Xeon cohort: four balanced pairs reduce mean outer
+restore from **18.018 to 17.218 s (4.44%)**. A separate phase cohort reduces
+extraction execution from **8.215 to 7.772 s (5.40%)**, saving 0.452 and
+0.434 s in its two pairs. Execution allocations also fall by 267 MB
+(27%), a secondary benefit. All 14 captures match the same 760 assets.
+Graph elapsed changes are inconsistent; do not credit a graph win or add
+these savings to the Ryzen/Native AOT results. Individual snapshot,
+lookup, object-demand, write/merge, and compatibility-barrier costs remain
+unpriced
+([methods and limits](evaluation-perf.md#compact-properties-through-execution-implementation-and-paired-results)).
 
 ## Direction
 
@@ -169,7 +182,7 @@ evaluator, and caching evaluated projects or task results.
 | Area | State |
 | --- | --- |
 | Compiled evaluation modules, typed property/condition/item programs, source-bound imports and `Exists`, residual metadata programs, constant-literal item batching | Opt-in (`MSBUILDENABLECOMPILEDMODULEEVALUATION`, `MSBUILDENABLECOMPILEDMODULEEFFECTBATCHING`) |
-| Compact-state request activation frame (logging snapshot and lookups without object conversion) | Opt-in through effect batching; not yet priced |
+| Compact-state request activation frame (logging snapshot and lookups without object conversion) | Opt-in through effect batching; repeatable Xeon execution-throughput saving, residual operations not yet priced |
 | Compiled target plans and direct task actions | Opt-in (`MSBUILDENABLEACTIONGRAPHPARTIALEVALUATION`) |
 | Async logging notification coalescing, separator-free path fast exit | Default-on |
 | Property-group effect attachment (`MSBUILDATTACHPROPERTYGROUPS`, verify with `MSBUILDATTACHPROPERTYGROUPSVERIFY`) | Experimental opt-in |
@@ -198,7 +211,7 @@ evaluator, and caching evaluated projects or task results.
 4. **Property state representation** with slot-indexed compact state and
    compatibility views, measured against the floor's slot variant.
 5. **Execution:** split the uncovered ~2.3 s of the serial path (scheduler
-   waits, `MSBuild`-task round trips), then price the activation frame.
+   waits, `MSBuild`-task round trips), then price the activation-frame residuals.
 6. **Hand off to NuGet and runtime owners:** `TieredPGO=false` for the static
    graph console, the binlog's serial path, and the Native AOT console. File
    globbing through the regex interpreter belongs here too.

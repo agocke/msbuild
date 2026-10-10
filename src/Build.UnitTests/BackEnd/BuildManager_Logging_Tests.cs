@@ -81,11 +81,15 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         }
 
         [Theory]
-        [InlineData(false)]
-        [InlineData(true)]
-        public void CompactExecutionPreservesProjectStartedPropertiesInBinaryLog(bool outOfProc)
+        [InlineData(false, true)]
+        [InlineData(false, false)]
+        [InlineData(true, true)]
+        [InlineData(true, false)]
+        public void CompactExecutionPreservesProjectStartedPropertiesInBinaryLog(bool outOfProc, bool forwardAllProperties)
         {
             _env.SetEnvironmentVariable("MSBUILDLOGPROPERTIESANDITEMSAFTEREVALUATION", "0");
+            _env.SetEnvironmentVariable("MSBUILDFORWARDALLPROPERTIESFROMCHILD", forwardAllProperties ? "1" : "0");
+            _env.SetEnvironmentVariable("MSBUILDFORWARDPROPERTIESFROMCHILD", "Value;Missing");
             var file = _env.CreateFile(
                 "compact-execution.proj",
                 """
@@ -127,19 +131,18 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             replayLogger.Initialize(replay);
             replay.Replay(binlog);
             ProjectStartedEventArgs started = replayLogger.ProjectStartedEvents.ShouldHaveSingleItem();
-            if (outOfProc)
-            {
-                // Remote nodes omit ProjectStarted properties unless all properties are serialized,
-                // matching evaluation without compact state.
-                (started.Properties?.Cast<DictionaryEntry>() ?? []).ShouldBeEmpty();
-                return;
-            }
-
             DictionaryEntry value = started.Properties.Cast<DictionaryEntry>()
                 .Single(entry => (string)entry.Key == "Value");
             value.Value.ShouldBe("initial;value");
-            started.Properties.Cast<DictionaryEntry>()
-                .Single(entry => (string)entry.Key == "Unused").Value.ShouldBe("untouched");
+            if (!outOfProc || forwardAllProperties)
+            {
+                started.Properties.Cast<DictionaryEntry>()
+                    .Single(entry => (string)entry.Key == "Unused").Value.ShouldBe("untouched");
+            }
+            else
+            {
+                started.Properties.Cast<DictionaryEntry>().ShouldHaveSingleItem();
+            }
         }
 
         [DotNetOnlyFact]
