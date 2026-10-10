@@ -3,6 +3,7 @@
 
 using System;
 using System.Diagnostics;
+using Microsoft.Build.Instrumentation;
 #if !NETFRAMEWORK
 using System.Diagnostics.Metrics;
 #endif
@@ -226,6 +227,7 @@ namespace Microsoft.Build.BackEnd
             private readonly string _parentName;
             private readonly long _startTimestamp;
             private readonly bool _recordCount;
+            private readonly CostLedger.Frame _ledgerFrame;
 
             internal Scope(
                 BuildExecutionMetric metric,
@@ -233,6 +235,7 @@ namespace Microsoft.Build.BackEnd
                 string parentName)
             {
                 _metric = metric;
+                _ledgerFrame = CostLedger.Enabled ? CostLedger.Enter(metric) : default;
                 _name = name;
                 _parentName = parentName;
                 _startTimestamp =
@@ -253,6 +256,7 @@ namespace Microsoft.Build.BackEnd
 
             public void Dispose()
             {
+                CostLedger.Exit(_ledgerFrame);
                 if (_startTimestamp != 0)
                 {
                     Record(

@@ -20,6 +20,7 @@ using Microsoft.Build.Experimental.BuildCheck;
 using Microsoft.Build.Experimental.BuildCheck.Infrastructure;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Framework.Telemetry;
+using Microsoft.Build.Instrumentation;
 using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.Debugging;
@@ -421,7 +422,10 @@ namespace Microsoft.Build.BackEnd
             }
             else
             {
+                // The continuation may run on another request-builder thread.
+                CostLedger.DetachedFrames ledgerFrames = CostLedger.Detach();
                 handle = await handles.ToTask();
+                CostLedger.Attach(ledgerFrames);
             }
 
             RestoreOperatingEnvironment();
@@ -1001,7 +1005,10 @@ namespace Microsoft.Build.BackEnd
                     CultureInfo savedCulture = CultureInfo.CurrentCulture;
                     CultureInfo savedUICulture = CultureInfo.CurrentUICulture;
 
+                    // The continuation may run on another request-builder thread.
+                    CostLedger.DetachedFrames ledgerFrames = CostLedger.Detach();
                     handle = await handles.ToTask();
+                    CostLedger.Attach(ledgerFrames);
 
                     CultureInfo.CurrentCulture = savedCulture;
                     CultureInfo.CurrentUICulture = savedUICulture;

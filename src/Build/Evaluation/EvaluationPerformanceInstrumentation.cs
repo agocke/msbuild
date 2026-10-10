@@ -3,6 +3,7 @@
 
 using System;
 using System.Diagnostics;
+using Microsoft.Build.Instrumentation;
 #if !NETFRAMEWORK
 using System.Diagnostics.Metrics;
 #endif
@@ -586,10 +587,12 @@ namespace Microsoft.Build.Evaluation
             private readonly EvaluationPerformanceMetric _metric;
             private readonly long _startTimestamp;
             private readonly bool _recordCount;
+            private readonly CostLedger.Frame _ledgerFrame;
 
             internal Scope(EvaluationPerformanceMetric metric)
             {
                 _metric = metric;
+                _ledgerFrame = CostLedger.Enabled ? CostLedger.Enter(metric) : default;
                 _startTimestamp =
 #if NETFRAMEWORK
                     0;
@@ -608,6 +611,7 @@ namespace Microsoft.Build.Evaluation
 
             public void Dispose()
             {
+                CostLedger.Exit(_ledgerFrame);
                 if (_startTimestamp != 0)
                 {
                     RecordDuration(

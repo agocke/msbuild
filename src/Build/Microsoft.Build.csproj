@@ -211,6 +211,7 @@
     <Compile Include="Evaluation\EvaluationModule.cs" />
     <Compile Include="Evaluation\CompiledExpressionProgram.cs" />
     <Compile Include="Evaluation\EvaluationPerformanceInstrumentation.cs" />
+    <Compile Include="Instrumentation\CostLedger.cs" />
     <Compile Include="Evaluation\ModuleEvaluationSharingMetrics.cs" />
     <Compile Include="Evaluation\PropertyFunctionReceiver.cs" />
     <Compile Include="Evaluation\ToolsetElement.cs" />
