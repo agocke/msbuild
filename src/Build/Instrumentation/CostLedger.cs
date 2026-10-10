@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -93,13 +94,20 @@ internal static class CostLedger
 
     internal static Frame Enter(BuildExecutionMetric metric) => Enter(s_executionBase + (int)metric);
 
+    /// <summary>
+    /// Closes a scope. Inlined so an inactive frame (ledger disabled) costs only a null check.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static void Exit(in Frame frame)
     {
-        if (frame.Owner is null)
+        if (frame.Owner is not null)
         {
-            return;
+            ExitActive(frame);
         }
+    }
 
+    private static void ExitActive(in Frame frame)
+    {
         ThreadLedger? ledger = t_ledger;
         if (ledger is not null && ledger.Holds(frame))
         {
@@ -108,7 +116,7 @@ internal static class CostLedger
         else if (ledger is null || !ReferenceEquals(ledger, frame.Owner))
         {
             // Closed on a thread that does not hold it: the request resumed elsewhere without Attach.
-            frame.Owner.MarkMigrated(frame);
+            frame.Owner!.MarkMigrated(frame);
         }
         else
         {

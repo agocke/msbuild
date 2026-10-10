@@ -41,8 +41,14 @@ namespace Microsoft.Build.Evaluation.Expander
                 ? string.Join(", ", args.Select(a => a?.GetType().Name ?? "null"))
                 : string.Empty;
 
-            File.AppendAllText(logFile, $"ReceiverType={receiverType?.FullName}; ObjectInstanceType={objectInstance?.GetType().FullName}; MethodName={methodName}({argSignature})\n");
+            // Evaluations run in parallel (for example during graph construction); serialize the appends.
+            lock (s_logFunctionCallLock)
+            {
+                File.AppendAllText(logFile, $"ReceiverType={receiverType?.FullName}; ObjectInstanceType={objectInstance?.GetType().FullName}; MethodName={methodName}({argSignature})\n");
+            }
         }
+
+        private static readonly object s_logFunctionCallLock = new();
 
         internal static bool TryExecutePathFunction(string methodName, out object? returnVal, object[] args)
         {
