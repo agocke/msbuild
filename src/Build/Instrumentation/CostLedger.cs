@@ -43,6 +43,7 @@ internal static class CostLedger
     private static readonly string[] s_scopeNames = CreateScopeNames();
     private static readonly int s_calibrationScope = s_scopeNames.Length - 1;
     private static readonly List<ThreadLedger> s_threads = [];
+    private static readonly long s_origin = Stopwatch.GetTimestamp();
     private static readonly object s_dumpLock = new();
 
     private static long s_ledgerCount;
@@ -213,7 +214,7 @@ internal static class CostLedger
         builder.AppendLine(
             "scope\tcount\tmigrated\tabandoned\t" +
             "incl_instructions\texcl_instructions\tincl_cycles\texcl_cycles\t" +
-            "incl_task_ms\texcl_task_ms\tincl_wall_ms\texcl_wall_ms\tincl_alloc_bytes\texcl_alloc_bytes");
+            "incl_task_ms\texcl_task_ms\tincl_wall_ms\texcl_wall_ms\tincl_alloc_bytes\texcl_alloc_bytes\tfirst_start_ms\tlast_end_ms");
         for (int i = 0; i < totals.Length; i++)
         {
             ref Entry entry = ref totals[i];
@@ -236,6 +237,8 @@ internal static class CostLedger
                 .Append('\t').Append(FormatMilliseconds(TicksToNanoseconds(entry.Exclusive.WallTicks)))
                 .Append('\t').Append(entry.Inclusive.AllocatedBytes)
                 .Append('\t').Append(entry.Exclusive.AllocatedBytes)
+                .Append('\t').Append(FormatMilliseconds(TicksToNanoseconds(entry.FirstStart - s_origin)))
+                .Append('\t').Append(FormatMilliseconds(TicksToNanoseconds(entry.LastEnd - s_origin)))
                 .AppendLine();
         }
 
@@ -438,6 +441,12 @@ internal static class CostLedger
         internal Snapshot Inclusive;
         internal Snapshot Exclusive;
 
+        /// <summary>
+        /// Earliest start and latest end timestamps of any frame, so a parallel phase's elapsed span is visible.
+        /// </summary>
+        internal long FirstStart;
+        internal long LastEnd;
+
         internal void Add(in Entry other)
         {
             Count += other.Count;
@@ -445,6 +454,11 @@ internal static class CostLedger
             Abandoned += other.Abandoned;
             Inclusive += other.Inclusive;
             Exclusive += other.Exclusive;
+            if (other.Count > 0)
+            {
+                FirstStart = FirstStart == 0 ? other.FirstStart : Math.Min(FirstStart, other.FirstStart);
+                LastEnd = Math.Max(LastEnd, other.LastEnd);
+            }
         }
     }
 
@@ -560,6 +574,9 @@ internal static class CostLedger
             Snapshot inclusive = _carried[_depth] + (now - _starts[_depth]);
             ref Entry entry = ref Entries[frame.Scope];
             entry.Count++;
+            long start = _starts[_depth].WallTicks;
+            entry.FirstStart = entry.FirstStart == 0 ? start : Math.Min(entry.FirstStart, start);
+            entry.LastEnd = Math.Max(entry.LastEnd, now.WallTicks);
             entry.Inclusive += inclusive;
             entry.Exclusive += inclusive - _children[_depth];
             if (_depth > 0)
