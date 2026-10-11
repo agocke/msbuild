@@ -222,26 +222,27 @@ evaluator, and caching evaluated projects or task results.
 | Async logging notification coalescing, separator-free path fast exit | Default-on |
 | Property-group effect attachment (`MSBUILDATTACHPROPERTYGROUPS`, verify with `MSBUILDATTACHPROPERTYGROUPSVERIFY`) | Experimental opt-in; widened pure-function/observation support, local CPU benefit but no demonstrated macro win |
 | Cost ledger (`MSBUILDCOSTLEDGER`) and evaluation trace (`MSBUILDEVALUATIONTRACE`) | Diagnostic, inactive by default |
-| Fixes: empty AOT framework root in `ToolLocationHelper`, default-path read-tracker allocations | Default-on |
+| Fixes: empty AOT framework root in `ToolLocationHelper`, default-path read-tracker allocations, Unix path probe skipped for values without backslashes | Default-on |
+| Per-file properties-pass profile (`MSBUILDIMPORTCOSTPROFILE`) | Diagnostic, inactive by default |
 
 ## Next steps
 
-1. **Explain and improve property-group reuse economics before widening again.**
-   Pure functions and revalidated filesystem/path observations now increase
-   reuse from 569 k to 697 k groups; verification finds zero mismatches.
-   Local phase ledgers suggest a 7.9% incremental properties-pass CPU saving,
-   but separate phase-hook pairs do not consistently replicate it, and four
-   macro pairs show no wall win. A same-engine single-CPU off/on control saves
-   9.0% of properties CPU but only 2.8% of total evaluation. CPU profiles show
-   remaining ordinary interpretation is about 71% of the widened group
-   subtree; key lookup/publication costs more than write replay. Price hits
-   and fallbacks by actual block cost, not count or census-average weights,
-   and reconcile graph CPU/elapsed with item/glob work, GC, JIT, and scheduling
-   in the same capture
-   ([details](evaluation-perf.md#widened-property-group-reuse-local-implementation-and-economics)).
-   Then decide between cheaper keys, eligibility for specific expensive
-   blocks, and larger shared-state attachment. Item reuse and construction
-   remain unimplemented; the census's 86% is not this cache's coverage.
+1. **Attach repeated imports as prepared batches.** Group-level replay cannot
+   amortize shared props/targets state: hits average 1.6 writes, and each write
+   still goes through `SetProperty`, which is ~45% of a literal element's cost
+   ([details](evaluation-perf.md#measured-per-file-costs-and-the-unix-path-probe)).
+   Weighted by measured per-file costs, 54% of the properties pass sits in
+   import executions that repeat with identical live-ins, and ~25% in files
+   with one or two keys across the whole restore. Key an import subtree on its
+   live-ins and apply its recorded effect (properties, import list,
+   observations, events) as one batch into property state, starting with the
+   single-key `eng/*.props` files. Then reduce fixed per-element cost in the
+   residual (operation-ID lookup, XML re-reads) for the `.targets` files that
+   are unique per configuration. Property-group reuse
+   ([details](evaluation-perf.md#widened-property-group-reuse-local-implementation-and-economics))
+   remains the fallback inside non-repeating imports. Validate filesystem
+   observations against the shared evaluation context, not by repeating the
+   call. Item reuse and construction remain unimplemented.
 2. **Fast paths for the late-bound property functions** (`File.ReadAllText`,
    `Regex.Match`/`IsMatch`, `Match.Groups`, `Version.*`,
    `RuntimeInformation.*`, `File.Exists`, `ToolLocationHelper.GetPlatformSDK*`)

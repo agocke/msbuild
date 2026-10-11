@@ -762,7 +762,9 @@ namespace Microsoft.Build.Evaluation
                            EvaluationPerformanceMetric.PropertiesAndImports))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.Properties))
                 {
+                    ImportCostProfile.Enter(ImportCostProfile.ProjectKey);
                     PerformDepthFirstPass(_projectRootElement);
+                    ImportCostProfile.Exit();
                 }
 
                 SetAllProjectsProperty();
@@ -4054,6 +4056,7 @@ namespace Microsoft.Build.Evaluation
                            "Import",
                            importElement.Project))
                 {
+                    ImportCostProfile.BeginResolution();
                     importedProjectRootElements = ExpandAndLoadImports(
                         directoryOfImportingFile,
                         importElement,
@@ -4061,6 +4064,7 @@ namespace Microsoft.Build.Evaluation
                         module,
                         compiledConditionId,
                         compiledImportPath);
+                    ImportCostProfile.EndResolution();
                 }
 
                 if (importedProjectRootElements != null)
@@ -4073,7 +4077,9 @@ namespace Microsoft.Build.Evaluation
                         _resolvedImports.Add((importedProjectRootElement, importElement, sdkResult));
 
                         EvaluationTrace.ImportEnter(importedProjectRootElement.FullPath ?? string.Empty);
+                        ImportCostProfile.Enter(importedProjectRootElement.FullPath ?? string.Empty);
                         PerformDepthFirstPass(importedProjectRootElement);
+                        ImportCostProfile.Exit();
                         EvaluationTrace.ImportExit();
                     }
                 }

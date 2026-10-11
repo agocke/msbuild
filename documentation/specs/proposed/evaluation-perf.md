@@ -280,6 +280,67 @@ The census assumes attaching an effect and checking a key are cheap. Item keys
 need an O(1) identity for the list an operation applies to, not the census's
 O(n) hash. Item operation construction (~30 G) is not covered.
 
+### Measured per-file costs and the Unix path probe
+
+The census weights every element at an average cost. `MSBUILDIMPORTCOSTPROFILE`
+measures each file's inclusive and exclusive cost in the properties pass
+directly, from the cost ledger's per-thread counters (JIT `Release` engine,
+console PGO and binlog off, user and kernel instructions). The pass is 82.7 G,
+~19% of it kernel. Resolving and loading imports is 14.6% of the pass, which the
+census does not weight at all.
+
+Applying each file's measured exclusive cost to the share of its executions
+that repeat with identical live-ins (`analysis/import_costs.py`) gives a
+**file-level reuse bound of 54%**, against the census's 59% for imports at
+average weights. Files fall into two regimes:
+
+| Regime | Examples | Share of pass | Distinct keys |
+| --- | --- | ---: | ---: |
+| Repeat almost perfectly | `eng/Subsets.props`, `Version.Details.props`, `liveBuilds.targets`, `Versions.props`, `WasmToolCache.props`, `DefaultVersions.props` | ~25% | 1-2 |
+| Unique per configuration as wholes | `Microsoft.Common.CurrentVersion.targets` (10%), `Microsoft.NET.Sdk.targets` (4.6%), `BeforeCommon.targets`, both `Directory.Build.targets` | ~25% | ~1 per configuration |
+
+The root `Directory.Build.props` (9.1%) is keyed per project, with 61% repeat.
+Only block-level reuse reaches the second regime.
+
+**Per-element cost was dominated by a filesystem probe.** Even
+`Version.Details.props`, 208 property elements, half of them literals and none
+with conditions, costs ~9.8 k instructions per element. A synthetic harness
+evaluating 2,000-property projects in-process prices elements directly (ledger,
+JIT, no logger, almost no prior state):
+
+| Element | Before | After the fix below |
+| --- | ---: | ---: |
+| Literal | 6.2 k | 6.2 k |
+| Literal containing `/` | 20.6 k | 6.2 k |
+| `$(Base)` | 8.4 k | |
+| `$(Base)/x` | 29.8 k | 9.4 k |
+| Literal with `'$(P)' == ''` condition | 12.3 k | 12.2 k |
+
+On Linux, `FileUtilities.MaybeAdjustFilePath` sent every value containing a
+slash to `LooksLikeUnixFilePath`, which calls `Directory.Exists` with an
+uncached `stat` system call. Without a backslash the adjusted value equals the
+input, so the probe cannot change the result; both overloads now return early
+when there is no backslash. In the restore, the properties pass drops from
+77.6 G instructions / 35.7 task-clock s to 66.1 G / 27.9 s, and system CPU from
+14.3 to 8.8 s. Four balanced wall-time pairs (JIT `Release` engine, console PGO
+and binlog off) improve every pair, and assets are identical:
+
+| | Wall s | Process-tree CPU s | Instructions |
+| --- | ---: | ---: | ---: |
+| Before | 17.37 +/- 0.17 | 126.0 +/- 1.4 | 302.1 G |
+| After | **16.63 +/- 0.16** | 115.0 +/- 0.8 | 288.0 G |
+
+**The rest of a literal element is writing state.** A profile of the literal
+harness puts ~45% of the remaining ~6.2 k in `ProjectInstance.SetProperty`
+(prior-value lookup, `ProjectPropertyInstance` allocation, hash-set insert),
+~12% in the `PropertyAssignmentOperation` constructor's operation-ID lookup,
+~7% re-reading the element's XML inner text, ~7% in the expander, and ~6% in
+the global-property check. The floor's dictionary variant spends 929. Replaying
+recorded writes through `SetProperty`, as the property-group prototype does,
+keeps the largest part, so attaching a cheap element saves at most about half
+of it. Amortizing a repeated import needs its effect applied as one prepared
+batch, not as one write per element.
+
 ### Property-group effect attachment prototype
 
 `MSBUILDATTACHPROPERTYGROUPS=1` (experimental, off by default) records each

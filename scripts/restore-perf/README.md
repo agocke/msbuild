@@ -59,6 +59,9 @@ instruction accounting where hardware counters exist.
 
 - `MSBUILDCOSTLEDGER=<prefix>` (and `MSBUILDCOSTLEDGERLEVEL=2`): per-scope instruction/cycle/CPU/allocation ledger
   from each process, `<prefix>.<pid>.tsv`. The file header reports the probe cost per scope.
+- `MSBUILDIMPORTCOSTPROFILE=<prefix>` (with `MSBUILDCOSTLEDGER`): per-file inclusive and exclusive cost of the
+  properties and imports pass, plus import resolution and loading, `<prefix>.<pid>.tsv`. Weight the live-in
+  census by it with `analysis/import_costs.py <trace-dir> <imports.pid.tsv>`.
 - `MSBUILDEVALUATIONTRACE=<existing dir>`: condition and property-element streams plus final property tables.
   Analyze with `analysis/trace_stats.py <dir>` and `analysis/invariance.py <dir>`, and replay against the
   reference implementation with `floor/build-and-run.sh <dir>`.

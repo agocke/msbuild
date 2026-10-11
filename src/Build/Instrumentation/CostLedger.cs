@@ -90,6 +90,11 @@ internal static class CostLedger
 
     internal static void DisableForTesting() => s_enabled = false;
 
+    /// <summary>
+    /// Reads the current thread's counters (instructions, cycles, task clock), for keyed profiles.
+    /// </summary>
+    internal static Snapshot ReadCurrentThread() => GetLedger().ReadTotal();
+
     internal static Frame Enter(EvaluationPerformanceMetric metric) => Enter((int)metric);
 
     internal static Frame Enter(BuildExecutionMetric metric) => Enter(s_executionBase + (int)metric);
