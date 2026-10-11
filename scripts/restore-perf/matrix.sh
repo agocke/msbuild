@@ -7,8 +7,8 @@
 #
 # example:
 #   matrix.sh pgo 3 \
-#     "pgo-on|r2r||-p:GenerateRestoreUseStaticGraphEvaluationBinlog=false" \
-#     "pgo-off|r2r|DOTNET_TieredPGO=0|-p:GenerateRestoreUseStaticGraphEvaluationBinlog=false"
+#     "pgo-on|r2r||" \
+#     "pgo-off|r2r|DOTNET_TieredPGO=0|"
 #
 # Each repetition runs every configuration once, reversing order on alternate repetitions.
 set -euo pipefail

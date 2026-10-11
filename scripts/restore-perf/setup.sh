@@ -20,6 +20,10 @@ fi
 git -C "$RT" checkout -q "$RUNTIME_COMMIT"
 echo "runtime at $(git -C "$RT" log -1 --format='%h %s')"
 
+# Newer runtime main no longer enables the restore console's binlog, which costs ~6 s on a serial path and
+# is not engine work. Match that so every machine measures the same workload.
+sed -i '/<GenerateRestoreUseStaticGraphEvaluationBinlog>true<\/GenerateRestoreUseStaticGraphEvaluationBinlog>/d' "$RT/eng/Build.props"
+
 # Downloads the pinned SDK into runtime/.dotnet, the Arcade toolset, and every package.
 (cd "$RT" && NUGET_PACKAGES=$PACKAGES/ ./build.sh -restore)
 echo "toolset: $(detect_toolset_proj)"

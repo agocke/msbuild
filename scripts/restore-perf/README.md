@@ -22,9 +22,11 @@ scripts/restore-perf/snapshot-sdk.sh base       # freeze artifacts/bin/bootstrap
 scripts/restore-perf/make-r2r-sdk.sh base base-r2r   # optional: ReadyToRun like the shipped SDK
 
 # Interleaved comparison: label|sdk|environment|msbuild arguments
-NOBL=-p:GenerateRestoreUseStaticGraphEvaluationBinlog=false
-scripts/restore-perf/matrix.sh pgo 3 "on|base-r2r||$NOBL" "off|base-r2r|DOTNET_TieredPGO=0|$NOBL"
+scripts/restore-perf/matrix.sh pgo 3 "on|base-r2r||" "off|base-r2r|DOTNET_TieredPGO=0|"
 ```
+
+`setup.sh` also deletes runtime's `GenerateRestoreUseStaticGraphEvaluationBinlog` line from `eng/Build.props`, as
+newer runtime main does, so restores run without the console binlog. On a clone set up earlier, rerun `setup.sh`.
 
 `run.sh <sdk> <out>` runs one restore and writes `result.txt`, `cpu.txt`, and `assets.sha256`; build output
 stays on the terminal. CPU time includes user and system time for the process tree. Pass a
@@ -69,7 +71,7 @@ instruction accounting where hardware counters exist.
 ## Profiling
 
 ```bash
-DOTNET_TieredPGO=0 BENCH_ARGS=$NOBL scripts/restore-perf/perf-record.sh base out/profile
+DOTNET_TieredPGO=0 scripts/restore-perf/perf-record.sh base out/profile
 scripts/restore-perf/fetch-runtime-symbols.sh base          # once per SDK: libcoreclr symbols
 perf script -i out/profile/perf.data --pid <console pid> -F comm,tid,period,ip,sym,dso > s.txt
 analysis/classify.py < s.txt                                # subsystem x operation kind

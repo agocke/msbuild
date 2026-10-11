@@ -7,7 +7,8 @@
 #   wrapper    optional prefix, e.g.: perf stat -x, -o "$OUT/perf-stat.csv" -e instructions:u,instructions:k --
 #
 # Environment passes through (MSBUILDCOSTLEDGER, MSBUILDEVALUATIONTRACE, DOTNET_TieredPGO, ...).
-# BENCH_ARGS adds MSBuild arguments, e.g. -p:GenerateRestoreUseStaticGraphEvaluationBinlog=false.
+# BENCH_ARGS adds MSBuild arguments, e.g. -p:GenerateRestoreUseStaticGraphEvaluationBinlog=true to restore the
+# console binlog that setup.sh removes.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
@@ -55,6 +56,7 @@ set +e
 status=$?
 set -e
 end=$(date +%s.%N)
+echo "$start $end" > "$OUT/times.txt"
 
 assets=$(find "$RT/artifacts/obj" -name project.assets.json | wc -l)
 binlog=$([[ -f "$RT/artifacts/log/Debug/Restore-Build.proj.binlog" ]] && echo yes || echo no)
