@@ -341,6 +341,84 @@ keeps the largest part, so attaching a cheap element saves at most about half
 of it. Amortizing a repeated import needs its effect applied as one prepared
 batch, not as one write per element.
 
+### Compiled modules with effect batching in Release
+
+The compiled-module path (`MSBUILDENABLECOMPILEDMODULEEVALUATION=1`,
+`MSBUILDENABLECOMPILEDMODULEEFFECTBATCHING=1`) applies runs of constant
+properties as cached deltas into compact property state. Its earlier
+measurements used Debug engine assemblies. With the `Release` engine (JIT,
+path-probe fix included, console PGO and binlog off), level-1 console ledgers
+and assets identical to the default engine:
+
+| Console process | Default | Modules + batching |
+| --- | ---: | ---: |
+| Total evaluation | 165.0 G / 61.9 s | **101.4 G / 41.1 s** |
+| Properties and imports | 66.1 G | 35.4 G |
+| Item operation construction | 33.8 G | 16.0 G |
+| Lazy item application | 53.8 G | 39.4 G |
+| Module lowering | | 1.1 G |
+| Restore wall (single runs) | 17.10 s | 16.27 s |
+| Process-tree user CPU | 104.8 s | 81.5 s |
+
+These are single runs; balanced wall-time pairs on a ReadyToRun snapshot are
+still needed. With batching on, a JIT-everything profile of the console
+(245 G, JIT-inflated) puts the remaining work in item evaluation (41.8 G),
+other evaluation (28.5 G), GC threads (27.8 G), file globbing (26.1 G),
+conditions (16.5 G), and import resolution (14.0 G). Properties are no longer
+a leading cost. Globbing is 85% regex interpreter: `FileMatcher` walks
+directory trees and calls `Regex.IsMatch` on every file when a glob's file
+name part is not a simple pattern.
+
+### Restore timeline
+
+The ledger records each scope's first start and last end, which places the
+phases of one restore (JIT `Release` engine, console PGO and binlog off,
+single runs):
+
+| Phase | Default | Modules + batching |
+| --- | ---: | ---: |
+| Graph evaluation in the console, elapsed | 6.35 s (61.3 CPU s) | 4.94 s (43.5 CPU s) |
+| Gap before execution | 0.6 s | 0.7 s |
+| Execution (`BuildSession`), elapsed | 5.43 s | 5.77 s |
+| Restore wall | 17.10 s | 16.03 s |
+
+Graph evaluation runs ~9.7 threads wide on 8 cores/16 threads, so an
+evaluation saving of X CPU seconds is worth about X/10 seconds of wall time.
+Execution is serial: its 1,643 project builds account for ~4.1 CPU s of the
+5.4 s span. The remaining ~4.5 s is the outer MSBuild process (startup and
+three Arcade evaluations spanning 1.9 s with 0.6 CPU s, inflated by JIT in
+this IL-only snapshot), console startup, and NuGet's work after execution.
+These remaining buckets have not been measured separately.
+
+### Evaluation without filesystem reads: `eng/Versions.props`
+
+`eng/Versions.props` reads `global.json` with `File.ReadAllText`, extracts the
+SDK version with `Regex.Match`, and derives workload band properties from it
+with `Version.Parse`, `MSBuild::Add`, `String.Compare`, and `Split`. Every
+input is the same in all 1,643 evaluations. An experiment in the benchmark
+clone switches between the original, a literal SDK version in place of the
+read, and literal values for the whole derived chain. Assets are identical in
+every variant. Exclusive instructions per evaluation:
+
+| `eng/Versions.props` | Reads `global.json` | Literal SDK version | All derived values literal |
+| --- | ---: | ---: | ---: |
+| Default engine | 1,696 k | 1,221 k | 892 k |
+| Modules + batching | 1,006 k | | **289 k** |
+
+Without the read, the rest of the chain is pure but is still evaluated in
+every configuration; only literal elements can be batched. Four balanced
+wall-time pairs on the default engine (original versus all literal) show no
+macro change: 16.54 +/- 0.14 s versus 16.47 +/- 0.22 s, 286.5 versus 284.0 G
+instructions. The whole file is ~1% of evaluation.
+
+The same file shows what the module path does not fold. Its import,
+`Version.Details.props`, has ~110 literal properties followed by ~110
+aliases such as `<MicrosoftCodeAnalysisVersion>$(MicrosoftCodeAnalysisPackageVersion)</MicrosoftCodeAnalysisVersion>`,
+each reading a property the same file wrote earlier. The file is constant as
+a whole, but the aliases are evaluated one at a time, ~620 k instructions per
+evaluation under batching. Folding them needs constant propagation within an
+import.
+
 ### Property-group effect attachment prototype
 
 `MSBUILDATTACHPROPERTYGROUPS=1` (experimental, off by default) records each
