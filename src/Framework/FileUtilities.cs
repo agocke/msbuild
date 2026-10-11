@@ -726,11 +726,11 @@ namespace Microsoft.Build.Framework
         {
             var comparisonType = StringComparison.Ordinal;
 
-            // Don't bother with arrays or properties or network paths, or those that
-            // have no slashes.
+            // Don't bother with arrays or properties or network paths, or those that have no backslashes:
+            // without one the adjusted value equals the input, so the path probe cannot change the result.
             if (NativeMethods.IsWindows || string.IsNullOrEmpty(value)
                 || value.StartsWith("$(", comparisonType) || value.StartsWith("@(", comparisonType)
-                || value.StartsWith("\\\\", comparisonType) || value.IndexOfAny(Slashes) < 0)
+                || value.StartsWith("\\\\", comparisonType) || value.IndexOf('\\') < 0)
             {
                 return value;
             }
@@ -754,7 +754,8 @@ namespace Microsoft.Build.Framework
                 return value;
             }
 
-            if (value.Span.IndexOfAny(UnixDirectorySeparator, WindowsDirectorySeparator) < 0)
+            // Without a backslash the adjusted value equals the input, so the path probe cannot change the result.
+            if (value.Span.IndexOf(WindowsDirectorySeparator) < 0)
             {
                 return value;
             }
