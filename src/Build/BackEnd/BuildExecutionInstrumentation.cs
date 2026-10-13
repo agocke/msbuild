@@ -54,6 +54,7 @@ namespace Microsoft.Build.BackEnd
         FallbackTargetPreBody,
         TaskYield,
         TaskReacquire,
+        TaskBatching,
     }
 
     internal static class BuildExecutionInstrumentation

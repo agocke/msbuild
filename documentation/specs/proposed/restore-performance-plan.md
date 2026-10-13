@@ -132,6 +132,29 @@ logging, which saved 4.4% of restore wall time in a separate 760-asset
 cohort
 ([details](evaluation-perf.md#compact-properties-through-execution-implementation-and-paired-results)).
 
+A fresh **639-asset, 32-logical-CPU Xeon cohort** now connects the existing
+prepared target/task plans to the effect-batching execution frame
+([full account](evaluation-perf.md#prepared-execution-on-the-32-thread-xeon)).
+The initial six balanced macro pairs save **0.752 s / 5.02%**
+(15.002 -> 14.249 s, paired 95% CI [0.108, 1.397] s); a separate
+final-source repeat saves 0.374 s on average but remains inconclusive
+(14.748 -> 14.373 s, CI [-0.280, 1.029] s). Two final diagnostic phase
+pairs both reduce extraction time, but their variable baseline prevents
+crediting a precise phase saving. Retain the bounded integration on this
+phase evidence, not as a confirmed 5% final-source macro result.
+
+Evaluation reaches width 32, mean active width 26.12, while extraction
+still has width one. `MSBUILDFORCEMULTITHREADED=1` changes the outer CLI,
+not the `BuildParameters` created by NuGet's console, so it does not test
+parallel extraction; its four-pair macro saving is inconclusive. Final
+level-2 ledgers cover all 16,058 task bodies and 5.121 CPU s of request
+service. The narrow task pipeline still spends **78.87 us/task** outside
+bodies, above the 35 us allowance. The final profiled candidate averages
+3.729 ms/request, not the 1.4 ms target. Hardware instruction/cycle
+counters are unavailable here; these CPU prices use validated task clock.
+All macro and final diagnostic captures match 639 assets. Do not mix this
+cohort with the Ryzen or earlier Xeon absolute timings.
+
 ## Direction
 
 **Partially evaluate the existing interpreter** (the first Futamura
@@ -175,7 +198,7 @@ evaluator, and caching evaluated projects or task results.
 | --- | --- |
 | Compiled evaluation modules, typed property/condition/item programs, source-bound imports and `Exists`, residual metadata programs, constant-literal item batching | Opt-in (`MSBUILDENABLECOMPILEDMODULEEVALUATION`, `MSBUILDENABLECOMPILEDMODULEEFFECTBATCHING`); -39% evaluation instructions in `Release` |
 | Compact-state request activation frame (logging snapshot and lookups without object conversion) | Opt-in through effect batching; repeatable execution-throughput saving |
-| Compiled target plans and direct task actions | Opt-in (`MSBUILDENABLEACTIONGRAPHPARTIALEVALUATION`) |
+| Compiled target plans and direct task actions | Opt-in through effect batching or `MSBUILDENABLEACTIONGRAPHPARTIALEVALUATION`; repeatable diagnostic extraction saving, final-source macro magnitude uncertain |
 | Property-group effect attachment (`MSBUILDATTACHPROPERTYGROUPS`, verify with `MSBUILDATTACHPROPERTYGROUPSVERIFY`) | Experimental opt-in; no macro win |
 | Async logging notification coalescing, separator-free path fast exit, Unix path probe skipped without backslashes, empty AOT framework root in `ToolLocationHelper`, default-path read-tracker allocations | Default-on |
 | Cost ledger with phase spans (`MSBUILDCOSTLEDGER`), per-file properties-pass profile (`MSBUILDIMPORTCOSTPROFILE`), evaluation trace (`MSBUILDEVALUATIONTRACE`) | Diagnostic, inactive by default |
@@ -198,9 +221,12 @@ evaluator, and caching evaluated projects or task results.
 4. **Contained wins.** A glob matcher that avoids the regex interpreter
    (~20 G), memoization of pure property functions, and prepared condition
    trees measured against the floor.
-5. **Execution activation frame.** Prepared plans bound to compact state, to
-   cut per-request work from ~3.3 ms toward 1.4 ms. Try multithreaded
-   execution (`MSBUILDFORCEMULTITHREADED=1`) as a multiplier afterward.
+5. **Execution activation frame.** Retain the bounded prepared-plan
+   integration and its fallback, then reduce parameter/output, task-service,
+   activation-frame, and scheduler costs toward 1.4 ms/request. Task bodies
+   and fallback batching are now separately covered by the ledger. Parallel
+   extraction needs NuGet's inner `BuildParameters` to opt in, not just an
+   outer `MSBUILDFORCEMULTITHREADED=1` flag.
 6. **Complete the timeline.** Measure the outer MSBuild process, console
    startup, and NuGet's work after execution, which together take ~4.5 s.
 7. **Hand off to NuGet and runtime owners:** `TieredPGO=false` and Native AOT

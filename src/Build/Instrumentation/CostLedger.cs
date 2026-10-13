@@ -344,6 +344,7 @@ internal static class CostLedger
             BuildExecutionMetric.TaskInitialize or
             BuildExecutionMetric.TaskParameters or
             BuildExecutionMetric.TaskBody or
+            BuildExecutionMetric.TaskBatching or
             BuildExecutionMetric.TaskOutputs or
             BuildExecutionMetric.IntrinsicTask or
             BuildExecutionMetric.TaskYield or

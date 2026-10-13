@@ -57,6 +57,25 @@ public sealed class CostLedger_Tests : IDisposable
     }
 
     [Fact]
+    public void TaskBodyMeasurementDoesNotRequireAMeterListener()
+    {
+        CostLedger.Entry entry = RunOnNewThread(() =>
+        {
+            using (BuildExecutionInstrumentation.Measure(BuildExecutionMetric.TaskBody))
+            {
+                Spin();
+            }
+
+            return CostLedger.GetCurrentThreadEntryForTesting(BuildExecutionMetric.TaskBody);
+        });
+
+        entry.Count.ShouldBe(1);
+        entry.Migrated.ShouldBe(0);
+        entry.Abandoned.ShouldBe(0);
+        entry.Inclusive.AllocatedBytes.ShouldBeGreaterThan(0);
+    }
+
+    [Fact]
     public void DetachedFramesCloseOnAnotherThreadAfterAttach()
     {
         CostLedger.Frame frame = default;

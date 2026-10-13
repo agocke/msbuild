@@ -41,6 +41,111 @@ namespace Microsoft.Build.UnitTests.BackEnd
             _testOutput = output;
         }
 
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void EffectBatchingExecutionPreservesOutputNamesAndConditions(bool prepared)
+        {
+            using TestEnvironment environment = TestEnvironment.Create(_testOutput);
+            environment.SetEnvironmentVariable(Traits.EnableCompiledModuleEffectBatchingEnvVarName, prepared ? "1" : "0");
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "0");
+
+            using ProjectFromString project = new("""
+                <Project>
+                  <ItemGroup>
+                    <File Include="a;b;c">
+                      <Group>A</Group>
+                      <Run>true</Run>
+                      <Continue>false</Continue>
+                    </File>
+                    <File Include="d">
+                      <Group>B</Group>
+                      <Run>true</Run>
+                      <Continue>false</Continue>
+                    </File>
+                    <File Include="skip">
+                      <Group>C</Group>
+                      <Run>false</Run>
+                      <Continue>false</Continue>
+                    </File>
+                  </ItemGroup>
+                  <Target Name="Build">
+                    <CreateItem Include="@(File)"
+                                Condition="'%(File.Run)' == 'true'"
+                                ContinueOnError="%(File.Continue)">
+                      <Output TaskParameter="Include"
+                              ItemName="Captured%(File.Group)"
+                              Condition="'%(File.Run)' == 'true'" />
+                    </CreateItem>
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance = project.Project.CreateProjectInstance();
+            MockLogger logger = new(_testOutput);
+
+            instance.Build(["Build"], [logger]).ShouldBeTrue();
+            instance.GetItems("CapturedA").Count.ShouldBe(3);
+            instance.GetItems("CapturedB").Count.ShouldBe(1);
+            instance.GetItems("CapturedC").ShouldBeEmpty();
+            logger.AssertNoErrors();
+            logger.AssertNoWarnings();
+        }
+
+        [Fact]
+        public void EffectBatchingExecutionReadsCurrentItemsAcrossRequests()
+        {
+            using TestEnvironment environment = TestEnvironment.Create(_testOutput);
+            environment.SetEnvironmentVariable(Traits.EnableCompiledModuleEffectBatchingEnvVarName, "1");
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "0");
+
+            using ProjectFromString project = new("""
+                <Project>
+                  <Target Name="Build">
+                    <Message Text="batch:%(File.Identity)" Importance="High" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance = project.Project.CreateProjectInstance();
+            instance.AddItem("File", "first");
+            MockLogger firstLogger = new(_testOutput);
+            instance.Build(["Build"], [firstLogger]).ShouldBeTrue();
+            firstLogger.AssertLogContains("batch:first");
+
+            instance.AddItem("File", "second");
+            MockLogger secondLogger = new(_testOutput);
+            instance.Build(["Build"], [secondLogger]).ShouldBeTrue();
+            secondLogger.AssertLogContains("batch:first");
+            secondLogger.AssertLogContains("batch:second");
+            secondLogger.AssertNoErrors();
+            secondLogger.AssertNoWarnings();
+        }
+
+        [Fact]
+        public void EffectBatchingExecutionBindsPreparedTaskActions()
+        {
+            using TestEnvironment environment = TestEnvironment.Create(_testOutput);
+            environment.SetEnvironmentVariable(Traits.EnableCompiledModuleEffectBatchingEnvVarName, "1");
+            environment.SetEnvironmentVariable(CompiledTargetPlan.EnablePartialEvaluationEnvVarName, "0");
+
+            using ProjectFromString project = new("""
+                <Project>
+                  <Target Name="Build">
+                    <Message Text="prepared-action" Importance="High" />
+                  </Target>
+                </Project>
+                """);
+            ProjectInstance instance = project.Project.CreateProjectInstance();
+            CompiledTargetPlan plan = CompiledTargetPlan.PartiallyEvaluate(instance, instance.Targets["Build"]);
+            MockLogger logger = new(_testOutput);
+
+            instance.Build(["Build"], [logger]).ShouldBeTrue();
+
+            plan.GetAction(0).GetFastAction().ShouldNotBeNull();
+            logger.AssertLogContains("prepared-action");
+            logger.AssertNoErrors();
+            logger.AssertNoWarnings();
+        }
+
         /*********************************************************************************
          *
          *                                  OUTPUT PARAMS

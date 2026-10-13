@@ -860,9 +860,12 @@ namespace Microsoft.Build.BackEnd
                 return false;
             }
 
-            long taskBodyStart = BuildExecutionInstrumentation.StartTimestamp();
             try
             {
+                using var taskBodyMeasurement = BuildExecutionInstrumentation.Measure(
+                    BuildExecutionMetric.TaskBody,
+                    BuildExecutionInstrumentation.DetailsEnabled ? _template.Name : null,
+                    frame.TargetLoggingContext.Target.Name);
 #if FEATURE_FILE_TRACKER
                 using (FullTracking.Track(
                     frame.TargetLoggingContext.Target.Name,
@@ -888,15 +891,6 @@ namespace Microsoft.Build.BackEnd
 
                 taskException = ex;
             }
-            finally
-            {
-                BuildExecutionInstrumentation.RecordSince(
-                    BuildExecutionMetric.TaskBody,
-                    taskBodyStart,
-                    BuildExecutionInstrumentation.DetailsEnabled ? _template.Name : null,
-                    frame.TargetLoggingContext.Target.Name);
-            }
-
             if (taskException == null)
             {
                 taskReturned = true;

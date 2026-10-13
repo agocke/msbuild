@@ -15,6 +15,8 @@ across sections.** Each section names its machine and its controls.
   2026, 8-core Ryzen 7 1800X): the current baseline.
 - [Cost-model accounting](#cost-model-accounting) (16-core Xeon Platinum
   8370C, Release engine).
+- [Prepared execution on the 32-thread Xeon](#prepared-execution-on-the-32-thread-xeon):
+  a fresh 639-asset cohort, serial extraction, and request-bound task plans.
 - [16-core configuration ladder](#16-core-configuration-ladder): independent
   hosting controls and supplemental CPU-service accounting.
 - [Earlier profiling](#earlier-profiling).
@@ -829,6 +831,162 @@ not separately priced by this coarse candidate cohort. In particular,
 object fallback can repeat scope-table searches. Those residuals and the
 remaining target/task/runtime account still need bottom-up specification;
 the result does not by itself bring restore close to the 5-6-second goal.
+
+### Prepared execution on the 32-thread Xeon
+
+This fresh cohort uses the 16-physical-core/32-logical-CPU Xeon Platinum
+8370C under Linux/WSL2, runtime
+`3b5416d32b67c2cb63f69a91975620de8ea0c13d`, and SDK
+`11.0.100-rc.1.26420.103`. `scripts/restore-perf/setup.sh` creates a fresh
+runtime checkout and removes its console-binlog line. Both bundles are
+Release ReadyToRun snapshots; PGO, both binlogs, server use, and node reuse
+are off. Both have `MSBUILDENABLECOMPILEDMODULEEVALUATION=1` and
+`MSBUILDENABLECOMPILEDMODULEEFFECTBATCHING=1`. Hardware instruction/cycle
+counters are unavailable; use task clock, not inferred instructions.
+
+#### Timestamped baseline and the multithreading probe
+
+`perf record -k CLOCK_MONOTONIC --call-graph fp`, with user-mode CPU-clock
+samples and process events, supplies process exec/exit boundaries. A
+session-only startup hook records existing coarse MSBuild EventSource
+events against the same monotonic clock. The initial baseline's actual
+outer exec-to-exit interval is **16.636 s**; the harness's 16.964 s also
+includes profiling/wrapper startup. Its contiguous phase account is:
+
+| Phase | Wall s |
+| --- | ---: |
+| Outer startup and Arcade evaluation | 0.991 |
+| `dotnet tool restore` | 0.436 |
+| Tools restore and outer root handoff | 0.890 |
+| Console startup and root traversal chain | 0.790 |
+| Parallel evaluation tail | 3.250 |
+| Graph edges and build activation | 0.569 |
+| Extraction execution | **7.346** |
+| NuGet restore and console finalization | 2.153 |
+| Outer finish | 0.210 |
+
+The full evaluation span is 3.823 s, with maximum width **32** and mean
+active width **26.12**. All **1,643 requests remain serial**, maximum width
+one: 4.471 ms/request amortized across the extraction session. Extraction
+is 44.16% of profiled wall. The supplied 8-core reference has a 4.75 s
+parallel-evaluation tail and roughly one-third serial extraction; the
+wider machine exposes a larger serial share. These are separate machines
+and diagnostic conditions, not an 8-to-32-core speedup measurement.
+
+Four balanced `MSBUILDFORCEMULTITHREADED=1` pairs give **14.715 -> 14.452 s**,
+a 0.263 s saving with paired 95% CI **[-0.106, 0.631] s**: inconclusive.
+The first probe failed with MSB4221 in Arcade `InstallDotNetCore` because
+`DOTNET_HOST_PATH` was unset; supplying the snapshot host fixes startup.
+The corrected runs all match 639 assets, but console request width stays
+one, including a timestamped 7.449 s extraction session. The flag is read
+by the outer CLI; NuGet constructs its own `BuildParameters`, whose
+`MultiThreaded` defaults false. This probe therefore does not test inner
+multithreaded extraction or establish a shared-node/lock bottleneck.
+Do not credit its apparent CPU reduction: outer task-host sidecars can
+outlive/reparent away from the timed process tree.
+
+#### Integration and macro acceptance
+
+The effect-batching opt-in now also enables the existing compiled target
+and direct task execution plans. Plans bind to request-owned compact
+state, with project-local task registration and existing compatibility
+fallbacks. No task results or evaluated projects are cached. The separate
+`MSBUILDENABLEACTIONGRAPHPARTIALEVALUATION=1` opt-in remains supported;
+either switch enables prepared execution. With both off, the default
+execution path is unchanged.
+
+Two independent six-pair `matrix.sh` cohorts alternate base/candidate
+order. Neither has a startup hook or cost ledger. The first candidate
+predates only the final fast-path task-body diagnostic fix; the second
+freezes the final production source. Do not pool them or substitute the
+first result for final-source acceptance:
+
+| Cohort | Base wall s | Candidate wall s | Saving s | Paired 95% CI s |
+| --- | ---: | ---: | ---: | ---: |
+| Initial integration | 15.002 | 14.249 | **0.752 / 5.02%** | [0.108, 1.397] |
+| Final-source repeat | 14.748 | 14.373 | 0.374 / 2.54% | **[-0.280, 1.029]** |
+
+The initial saving is positive in all six pairs; the final repeat is
+positive in five but statistically inconclusive. CPU means are
+105.893 -> 107.140 s and 105.912 -> 107.382 s respectively; neither
+cohort establishes a process-tree CPU reduction. All **24 macro captures**
+match the same 639 assets after normalizing only SDK snapshot paths.
+
+Two additional balanced phase pairs use the final source and the same
+hook/perf controls on both sides. Extraction is **10.678 -> 5.900 s** and
+**7.908 -> 6.353 s**, with means 9.293 -> 6.127 s. These repeat the
+direction, not a precise 3.166 s product saving: the baseline is variable
+and the diagnostic cohort differs markedly from unprobed macro timings.
+Do not add phase savings to macro savings. Evaluation still reaches width
+32 (mean active width 26.47-26.91 in the candidates); request width remains
+one. The candidate averages **3.729 ms/request**, still above the 1.4 ms
+budget. R2R/runtime stacks are partly unsymbolized, so these profiles do
+not fully attribute residual scheduler/runtime costs to methods.
+
+#### Final task-clock account and compatibility
+
+Two final-source level-2 console ledgers, separate from the phase/macro
+cohorts, each cover 1,643 evaluations/requests with no migrated or
+abandoned frames, multiplexed reads, or depth overflows. Both include
+all **16,058 task bodies**: 6,572 direct tasks and 9,486 fallback tasks.
+`TaskBody` now uses actual ledger scopes in both paths rather than
+Meter-listener-dependent timestamp recording. `TaskBatching` covers the
+unchanged fallback parameter collection and bucket preparation.
+
+| Final console scope | Count per capture | Mean inclusive CPU s |
+| --- | ---: | ---: |
+| Project build | 1,643 | 5.121 |
+| Task builder | 23,755 | 2.528 |
+| Task | 16,058 | 1.394 |
+| Task resolution | 9,486 | 0.252 |
+| Task initialization | 9,486 | 0.090 |
+| Task parameters | 9,486 | 0.378 |
+| Task bodies | 16,058 | **0.380** |
+| Task outputs, fallback/direct | 9,486 / 6,572 | 0.233 / 0.012 |
+| Fallback batching preparation | 23,755 | 0.119 |
+| Intrinsic groups | 29,343 | 0.504 |
+
+These are nested scopes, not additive totals. The narrow task-pipeline
+account `(Task + TaskResolve - TaskBody) / 16058` is **78.87 us/task**
+of non-body work; bodies average 23.66 us/task. This excludes outer
+task-builder preparation, dispatch, and scheduler gaps, and is not an
+apples-to-apples remeasurement of the historical 92 us figure. It still
+exceeds the 35 us allowance. Covered project service is 3.117 ms/request;
+the ledger is not complete extraction-process accounting.
+
+The earlier base console ledger has 68,489 task-builder calls and
+6.319 CPU s of project service, but lacks task-body and batching scopes.
+It cannot supply a separately measured base body price; missing does
+not mean zero. General task-builder calls drop by 44,734, while final
+parameter and intrinsic costs locate the remaining work. Separate
+batching-descriptor cache prototypes were removed: source-program
+compilation made the first slower, and the narrowed immutable-task
+cache saved only 0.204 s with CI [-0.092, 0.499] s while increasing CPU.
+Do not retain those caches for allocation savings alone.
+
+The final whole-repository Release build has zero warnings/errors.
+`dotnet test src/Build.UnitTests/Microsoft.Build.Engine.UnitTests.csproj -c
+Release -f net11.0` with native class filters for task/target/request
+builders, compiled actions, lookup, execution host, and ledger reports
+**362 passed, zero failed/skipped**. Four existing binary-log property
+forwarding cases pass both with ordinary settings and with the new
+effect-batching execution path enabled, including in-proc/out-of-proc
+nodes. New focused cases cover metadata-dependent output destinations
+and conditions, changed items across requests, prepared-action binding,
+and ledger body capture without a Meter listener. Scoped whitespace
+checks pass; unrelated existing formatting is retained. Bootstrap SDK
+activation, the dependency sample build, and `dotnet msbuild --help`
+also succeed. These are Linux scoped checks, not a full-suite or Windows
+claim. No graph/evaluator code was changed.
+
+Evidence is session-only under `serial-restore/results/`:
+`activation-v1/paired.json`, `activation-final-v1/paired.json`,
+`timeline-base/timeline.json`, `timeline-mt/timeline.json`,
+`mt-host-v1/paired.json`, and `activation-final-phases/summary.json`.
+The latter has all six final diagnostic captures; its
+`source-manifest.json` records the dirty source and frozen engine hashes.
+The final ReadyToRun engine SHA-256 is
+`ae6c5bda73265c27aaadf55cd782c519d79b8b60d8d4a134f049519d9d3ee62b`.
 
 ## 16-core configuration ladder
 

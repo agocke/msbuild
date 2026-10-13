@@ -349,8 +349,14 @@ namespace Microsoft.Build.BackEnd
                         _buildRequestEntry.TaskEnvironment);
                 }
 
-                List<string> taskParameterValues = CreateListOfParameterValues();
-                buckets = BatchingEngine.PrepareBatchingBuckets(taskParameterValues, lookup, _targetChildInstance.Location, _targetLoggingContext);
+                using (BuildExecutionInstrumentation.Measure(
+                           BuildExecutionMetric.TaskBatching,
+                           BuildExecutionInstrumentation.DetailsEnabled ? _taskNode?.Name : null,
+                           _targetLoggingContext.Target.Name))
+                {
+                    List<string> taskParameterValues = CreateListOfParameterValues();
+                    buckets = BatchingEngine.PrepareBatchingBuckets(taskParameterValues, lookup, _targetChildInstance.Location, _targetLoggingContext);
+                }
 
                 Dictionary<string, string> lookupHash = null;
 
@@ -902,94 +908,91 @@ namespace Microsoft.Build.BackEnd
                 Exception taskException = null;
 
                 // If this is the MSBuild task, we need to execute it's special internal method.
-                long taskBodyStart = BuildExecutionInstrumentation.StartTimestamp();
-                try
+                using (BuildExecutionInstrumentation.Measure(
+                           BuildExecutionMetric.TaskBody,
+                           BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
+                           _targetLoggingContext.Target.Name))
                 {
-                    if (taskExecutionHost.TaskInstance is MSBuild msbuildTask)
+                    try
                     {
-                        // https://github.com/dotnet/msbuild/issues/11025
-                        // The metaproject's inner <MSBuild> tasks are generator-authored plumbing,
-                        // not user code, so the user's outer SkipNonexistentTargets attribute should
-                        // propagate one level further into the real underlying projects. Inheriting
-                        // here (rather than at the engine level) keeps the operative value visible
-                        // in the binlog right under this task.
-                        if (!msbuildTask.SkipNonexistentTargets
-                            && FileUtilities.IsMetaprojectFilename(_buildRequestEntry.RequestConfiguration.ProjectFullPath)
-                            && (_buildRequestEntry.Request.BuildRequestDataFlags & BuildRequestDataFlags.SkipNonexistentTargets) == BuildRequestDataFlags.SkipNonexistentTargets)
+                        if (taskExecutionHost.TaskInstance is MSBuild msbuildTask)
                         {
-                            msbuildTask.SkipNonexistentTargets = true;
-                            taskLoggingContext.LogComment(MessageImportance.Low, "MSBuildTaskInheritedSkipNonexistentTargets");
+                            // https://github.com/dotnet/msbuild/issues/11025
+                            // The metaproject's inner <MSBuild> tasks are generator-authored plumbing,
+                            // not user code, so the user's outer SkipNonexistentTargets attribute should
+                            // propagate one level further into the real underlying projects. Inheriting
+                            // here (rather than at the engine level) keeps the operative value visible
+                            // in the binlog right under this task.
+                            if (!msbuildTask.SkipNonexistentTargets
+                                && FileUtilities.IsMetaprojectFilename(_buildRequestEntry.RequestConfiguration.ProjectFullPath)
+                                && (_buildRequestEntry.Request.BuildRequestDataFlags & BuildRequestDataFlags.SkipNonexistentTargets) == BuildRequestDataFlags.SkipNonexistentTargets)
+                            {
+                                msbuildTask.SkipNonexistentTargets = true;
+                                taskLoggingContext.LogComment(MessageImportance.Low, "MSBuildTaskInheritedSkipNonexistentTargets");
+                            }
+
+                            var undeclaredProjects = GetUndeclaredProjects(msbuildTask);
+
+                            if (undeclaredProjects?.Count > 0)
+                            {
+                                _continueOnError = ContinueOnError.ErrorAndStop;
+
+                                taskException = new InvalidProjectFileException(
+                                    taskHost.ProjectFileOfTaskNode,
+                                    taskHost.LineNumberOfTaskNode,
+                                    taskHost.ColumnNumberOfTaskNode,
+                                    0,
+                                    0,
+                                    ResourceUtilities.FormatResourceStringIgnoreCodeAndKeyword(
+                                        "UndeclaredMSBuildTasksNotAllowedInIsolatedGraphBuilds",
+                                        string.Join(";", undeclaredProjects.Select(p => $"\"{p}\"")),
+                                        taskExecutionHost.ProjectInstance.FullPath),
+                                    null,
+                                    null,
+                                    null);
+                            }
+                            else
+                            {
+                                _targetBuilderCallback.EnterMSBuildCallbackState();
+
+                                try
+                                {
+                                    taskResult = await msbuildTask.ExecuteInternal();
+                                }
+                                finally
+                                {
+                                    _targetBuilderCallback.ExitMSBuildCallbackState();
+                                }
+                            }
                         }
-
-                        var undeclaredProjects = GetUndeclaredProjects(msbuildTask);
-
-                        if (undeclaredProjects?.Count > 0)
+                        else if (taskExecutionHost.TaskInstance is CallTarget callTargetTask)
                         {
-                            _continueOnError = ContinueOnError.ErrorAndStop;
-
-                            taskException = new InvalidProjectFileException(
-                                taskHost.ProjectFileOfTaskNode,
-                                taskHost.LineNumberOfTaskNode,
-                                taskHost.ColumnNumberOfTaskNode,
-                                0,
-                                0,
-                                ResourceUtilities.FormatResourceStringIgnoreCodeAndKeyword(
-                                    "UndeclaredMSBuildTasksNotAllowedInIsolatedGraphBuilds",
-                                    string.Join(";", undeclaredProjects.Select(p => $"\"{p}\"")),
-                                    taskExecutionHost.ProjectInstance.FullPath),
-                                null,
-                                null,
-                                null);
+                            taskResult = await callTargetTask.ExecuteInternal();
                         }
                         else
                         {
-                            _targetBuilderCallback.EnterMSBuildCallbackState();
-
-                            try
-                            {
-                                taskResult = await msbuildTask.ExecuteInternal();
-                            }
-                            finally
-                            {
-                                _targetBuilderCallback.ExitMSBuildCallbackState();
-                            }
-                        }
-                    }
-                    else if (taskExecutionHost.TaskInstance is CallTarget callTargetTask)
-                    {
-                        taskResult = await callTargetTask.ExecuteInternal();
-                    }
-                    else
-                    {
 #if FEATURE_FILE_TRACKER
-                        using (FullTracking.Track(taskLoggingContext.TargetLoggingContext.Target.Name, _taskNode.Name, _buildRequestEntry.ProjectRootDirectory, _buildRequestEntry.RequestConfiguration.Project.PropertiesToBuildWith))
+                            using (FullTracking.Track(taskLoggingContext.TargetLoggingContext.Target.Name, _taskNode.Name, _buildRequestEntry.ProjectRootDirectory, _buildRequestEntry.RequestConfiguration.Project.PropertiesToBuildWith))
 #endif
-                        {
-                            taskResult = taskExecutionHost.Execute();
+                            {
+                                taskResult = taskExecutionHost.Execute();
+                            }
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    if (ExceptionHandling.IsCriticalException(ex) || Environment.GetEnvironmentVariable("MSBUILDDONOTCATCHTASKEXCEPTIONS") == "1")
+                    catch (Exception ex)
                     {
-                        taskLoggingContext.LogFatalTaskError(
-                            ex,
-                            new BuildEventFileInfo(_targetChildInstance.Location),
-                            _taskNode.Name);
+                        if (ExceptionHandling.IsCriticalException(ex) || Environment.GetEnvironmentVariable("MSBUILDDONOTCATCHTASKEXCEPTIONS") == "1")
+                        {
+                            taskLoggingContext.LogFatalTaskError(
+                                ex,
+                                new BuildEventFileInfo(_targetChildInstance.Location),
+                                _taskNode.Name);
 
-                        throw new CriticalTaskException(ex);
+                            throw new CriticalTaskException(ex);
+                        }
+
+                        taskException = ex;
                     }
-
-                    taskException = ex;
-                }
-                finally
-                {
-                    BuildExecutionInstrumentation.RecordSince(
-                        BuildExecutionMetric.TaskBody,
-                        taskBodyStart,
-                        BuildExecutionInstrumentation.DetailsEnabled ? _taskNode.Name : null,
-                        _targetLoggingContext.Target.Name);
                 }
 
                 if (taskException == null)

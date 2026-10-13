@@ -41,6 +41,7 @@ namespace Microsoft.Build.BackEnd
             "MSBUILDENABLEACTIONGRAPHPARTIALEVALUATION";
 
         internal static bool IsPartialEvaluationEnabled =>
+            Traits.Instance.EnableCompiledModuleEffectBatching ||
             Environment.GetEnvironmentVariable(EnablePartialEvaluationEnvVarName) == "1";
 
         private static readonly ConditionalWeakTable<ProjectInstance, PartiallyEvaluatedProject> s_projects = new();
