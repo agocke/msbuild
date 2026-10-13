@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Smoke.cs" />
+    <Reference Include="Microsoft.Build" HintPath="$(SdkDir)/Microsoft.Build.dll" />
+    <Reference Include="Microsoft.Build.Framework" HintPath="$(SdkDir)/Microsoft.Build.Framework.dll" />
+    <Reference Include="Microsoft.Build.Utilities.Core" HintPath="$(SdkDir)/Microsoft.Build.Utilities.Core.dll" />
+    <Reference Include="NuGet.Frameworks" HintPath="$(SdkDir)/NuGet.Frameworks.dll" />
+  </ItemGroup>
+</Project>

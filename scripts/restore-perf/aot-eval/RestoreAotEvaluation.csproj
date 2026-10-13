@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <IsAotCompatible>true</IsAotCompatible>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsAsErrors>$(WarningsAsErrors);IL2104;IL3053</WarningsAsErrors>
+    <!-- Linux ReadyToRun resolver DLLs use PE machine 0xfd1d; CSC does not recognize its OS encoding.
+         ILC consumes their portable IL. Do not exempt any trim/AOT diagnostics. -->
+    <NoWarn>$(NoWarn);CS8012</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="NativeExports.cs;CachedSdkResolver.cs" />
+    <SdkAssembly Include="Microsoft.Build;Microsoft.Build.Framework;Microsoft.Build.Utilities.Core;Microsoft.NET.StringTools;NuGet.Frameworks;NuGet.Versioning;Microsoft.NET.Sdk.WorkloadMSBuildSdkResolver;Microsoft.NET.Sdk.WorkloadManifestReader;System.Configuration.ConfigurationManager" />
+    <Reference Include="@(SdkAssembly)" HintPath="$(SdkDir)/%(Identity).dll" />
+    <TrimmerRootAssembly Include="Microsoft.Build.Utilities.Core" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableSdkResolverDynamicLoading" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableAllPropertyFunctions" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.RestrictPropertyFunctionReceivers" Value="true" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableConfigurationFileToolsets" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableReflectiveTaskExecution" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableReflectiveTaskParameterTypes" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableCustomPluginProbing" Value="false" Trim="true" />
+    <RuntimeHostConfigurationOption Include="Microsoft.Build.EnableReflectiveLoggerLoading" Value="false" Trim="true" />
+  </ItemGroup>
+  <Target Name="RequireSdkDir" BeforeTargets="ResolveAssemblyReferences" Condition="'$(SdkDir)' == ''">
+    <Error Text="Pass SdkDir; use aot-eval/build.sh." />
+  </Target>
+</Project>

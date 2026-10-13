@@ -1,0 +1,12 @@
+<Project>
+  <Target Name="AddRestoreEvaluationBridge" BeforeTargets="PrepareForBuild"
+          Condition="'$(MSBuildProjectName)' == 'Microsoft.Build' and '$(TargetFramework)' == 'net11.0'">
+    <ItemGroup>
+      <Compile Remove="Instance/ProjectInstance.cs" />
+      <Compile Remove="Instance/ProjectItemInstance.cs" />
+      <Compile Include="$(RestoreEvalWork)/ProjectInstance.cs" />
+      <Compile Include="$(RestoreEvalWork)/ProjectItemInstance.cs" />
+      <Compile Include="$(MSBuildThisFileDirectory)RestoreBenchmarkEvaluation.cs" />
+    </ItemGroup>
+  </Target>
+</Project>

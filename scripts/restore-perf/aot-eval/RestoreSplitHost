@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+sdk_dir=$(cd "$(dirname "$0")" && pwd)
+mode=${RESTORE_EVAL_MODE:-native}
+case "$mode" in
+  native|roundtrip|managed) ;;
+  *) echo "Unknown RESTORE_EVAL_MODE '$mode'" >&2; exit 1 ;;
+esac
+export MSBUILD_RESTORE_EVAL_MODE=$mode
+export MSBUILD_RESTORE_EVAL_LIBRARY=$sdk_dir/RestoreAotEvaluation.so
+export MSBUILD_RESTORE_EVAL_SDK_DIRECTORY=$sdk_dir
+exec "$sdk_dir/../../dotnet" "$@"

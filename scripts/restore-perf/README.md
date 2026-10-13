@@ -91,3 +91,65 @@ SDK resolvers into one native executable, and installs it in a new snapshot. Run
 For symbols, copy `aot-host/bin/Release/*/linux-x64/publish/RestoreAotHost.dbg` into perf's build-id cache as `debug`.
 The host registers exactly the tasks `dotnet/runtime`'s restore runs; another workload may need more
 (an unregistered task fails with MSB4283).
+
+## Native AOT evaluation with managed restore
+
+`aot-eval/` is a separate, evaluation-only prototype. A native shared library evaluates each project
+requested by NuGet's graph factory; the existing managed console receives evaluated `ProjectInstance`
+state and still constructs the graph, runs `_CollectRestoreInputs`, and performs NuGet restore.
+No tasks run natively, and an AOT compatibility failure does not fall back to managed evaluation.
+
+```bash
+# Requires an already built repository and a matching SDK snapshot. Both paths must be new.
+bash scripts/restore-perf/aot-eval/build.sh base aot-eval "$RESTORE_BENCH/aot-eval-build"
+bash scripts/restore-perf/aot-eval/smoke.sh aot-eval "$RESTORE_BENCH/aot-eval-build"
+
+ver=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sdk"]["version"])' \
+  "$RESTORE_BENCH/runtime/global.json")
+launcher=$RESTORE_BENCH/sdks/aot-eval/sdk/$ver/RestoreSplitHost
+common="DOTNET_TieredPGO=0 MSBUILDENABLECOMPILEDMODULEEVALUATION=1 MSBUILDENABLECOMPILEDMODULEEFFECTBATCHING=1"
+# Run this matrix only once the workload is native-evaluation compatible.
+PERF_EVENTS=task-clock scripts/restore-perf/matrix.sh aot-eval 4 \
+  "managed|aot-eval|$common RESTORE_EVAL_MODE=managed|-p:NuGetConsoleProcessFileName=$launcher" \
+  "roundtrip|aot-eval|$common RESTORE_EVAL_MODE=roundtrip|-p:NuGetConsoleProcessFileName=$launcher" \
+  "native|aot-eval|$common RESTORE_EVAL_MODE=native|-p:NuGetConsoleProcessFileName=$launcher"
+```
+
+`RESTORE_EVAL_MODE` selects `managed` (ordinary evaluation), `roundtrip` (managed evaluation through the
+same binary handoff), or `native` (the default when using the launcher). The launcher enables the bridge
+only in the console process, not the outer Arcade build. All modes use the same frozen SDK. This prototype
+rebuilds the engine as IL; it is not yet a shipping-ReadyToRun performance comparison.
+
+The build creates a detached worktree including the caller's tracked changes. Only that experimental
+build uses generated overlays for `ProjectInstance.FromFile` and task-item serialization; the caller's
+engine, graph, evaluator, `global.json`, and `NuGet.config` remain untouched. Full-state serialization
+preserves targets, task registrations, item definitions, escaped values, and project context.
+The overlay additionally transmits each task item's project directory: node execution normally supplies
+the working directory, but graph construction queries `FullPath` before executing anything.
+The managed engine's SHA256 must match the identity recorded alongside the native image.
+Snapshots share hardlinked files with the source snapshot, so treat both as immutable; the build unlinks
+the engine before replacing it. Never overwrite an existing destination or republish into a frozen SDK.
+
+The native host retains the strict property-function receiver allowlist and disables reflective task
+execution. It registers the workload resolver and a local-cache-only SDK resolver instead of the shipping
+NuGet SDK resolver, whose dependency closure in this SDK is not warning-clean under Native AOT.
+The cache resolver honors exact project SDK versions or the nearest `global.json` `msbuild-sdks` pins,
+accepts `sdk`/`Sdk` package directories, and uses the warmed `NUGET_PACKAGES` cache.
+Missing cached packages, version ranges, minimum-version requests, and unsupported property functions
+fail explicitly; it does not download packages. This is a benchmark restriction, not a general SDK resolver.
+No trim/AOT diagnostics are suppressed. The sole compiler exemption is CS8012 for Linux ReadyToRun SDK
+resolver metadata with its OS-encoded PE machine field.
+
+For handoff accounting, set `MSBUILD_RESTORE_EVAL_SUMMARY=<existing-output-dir>/handoff`; the console
+writes `<prefix>.<pid>.tsv` with bridged request count, state bytes, and summed evaluation, serialization,
+transfer, and deserialization microseconds. Transfer excludes the separately recorded evaluation and
+serialization. These are overlapping per-request elapsed-time sums, **not additive phase wall times**
+or instruction counts. Use uninstrumented balanced matrices for acceptance and require identical assets.
+
+The initial pinned-workload check transferred all 1,643 requests in managed roundtrip mode and produced
+the same 639 assets as ordinary managed restore. It serialized **5.84 GB**: this deliberately complete
+handoff is plumbing, not an optimized performance path. Native evaluation plus managed execution works
+on the focused fixtures and a full stock SDK project; the pinned runtime workload currently stops in
+`eng/Versions.props` at `System.Text.RegularExpressions.Match.Groups`, which is outside the restricted
+receiver set. Use a benchmark clone containing the AOT-compatible runtime refactoring before measuring
+native-mode macro performance; do not relax the receiver restrictions to hide this failure.
