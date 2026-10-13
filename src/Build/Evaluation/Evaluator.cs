@@ -828,6 +828,19 @@ namespace Microsoft.Build.Evaluation
 
                 LazyItemEvaluator<P, I, M, D> lazyEvaluator = null;
                 EvaluationTrace.Pass('I');
+                if (EvaluationTrace.ItemDetailActive)
+                {
+                    foreach (D definition in _data.ItemDefinitionsEnumerable)
+                    {
+                        if (definition is ProjectItemDefinitionInstance instance)
+                        {
+                            foreach (ProjectMetadataInstance metadata in instance.Metadata)
+                            {
+                                EvaluationTrace.ItemDefinition(instance.ItemType, metadata.Name, metadata.EvaluatedValueEscaped);
+                            }
+                        }
+                    }
+                }
                 using (EvaluationPerformanceInstrumentation.Measure(
                            EvaluationPerformanceMetric.ItemOperationConstruction))
                 using (_evaluationProfiler.TrackPass(EvaluationPass.Items))
@@ -3821,22 +3834,35 @@ namespace Microsoft.Build.Evaluation
 
         private void EvaluateItemElement(bool itemGroupConditionResult, ProjectItemElement itemElement, LazyItemEvaluator<P, I, M, D> lazyEvaluator)
         {
+            long profileStart = ItemCostProfile.Enabled ? ItemCostProfile.Start() : 0;
             bool itemConditionResult = lazyEvaluator.EvaluateConditionWithCurrentState(itemElement, ExpanderOptions.ExpandPropertiesAndItems, ParserOptions.AllowPropertiesAndItemLists);
 
             if (!itemConditionResult && !(_data.ShouldEvaluateForDesignTime && _data.CanEvaluateElementsWithFalseConditions))
             {
+                if (ItemCostProfile.Enabled)
+                {
+                    ItemCostProfile.End(itemElement.Location, ItemOperationKind(itemElement), 'F', profileStart);
+                }
+
                 return;
             }
 
             var conditionResult = itemGroupConditionResult && itemConditionResult;
 
             lazyEvaluator.ProcessItemElement(_projectRootElement.DirectoryPath, itemElement, conditionResult);
+            if (ItemCostProfile.Enabled)
+            {
+                ItemCostProfile.End(itemElement.Location, ItemOperationKind(itemElement), 'C', profileStart);
+            }
 
             if (conditionResult)
             {
                 RecordEvaluatedItemElement(itemElement);
             }
         }
+
+        private static string ItemOperationKind(ProjectItemElement itemElement) =>
+            itemElement.Include.Length > 0 ? "IncludeOperation" : itemElement.Update.Length > 0 ? "UpdateOperation" : "RemoveOperation";
 
         private void EvaluateItemElement(
             bool itemGroupConditionResult,

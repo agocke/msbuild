@@ -42,6 +42,14 @@ namespace Microsoft.Build.Evaluation
 
         private int _nextElementOrder = 0;
 
+        // Document order of operations, for the evaluation trace.
+        private int _nextOperationOrdinal;
+
+        /// <summary>
+        /// Number of operations constructed so far; the last one has ordinal <c>TraceOperationCount - 1</c>.
+        /// </summary>
+        internal int TraceOperationCount => _nextOperationOrdinal;
+
         private Dictionary<string, LazyItemList> _itemLists = Traits.Instance.EscapeHatches.UseCaseSensitiveItemNames ?
             new Dictionary<string, LazyItemList>() :
             new Dictionary<string, LazyItemList>(StringComparer.OrdinalIgnoreCase);
@@ -235,20 +243,39 @@ namespace Microsoft.Build.Evaluation
 #endif
 
                 bool trace = EvaluationTrace.Active;
+                int countBefore = trace ? listBuilder.Count : 0;
                 if (trace)
                 {
+                    ElementLocation location = Operation.ItemElement.Location;
                     EvaluationTrace.OperationEnter(
-                        Operation.ItemElement.Location,
+                        location,
                         Operation.GetType().Name,
                         Operation.ItemType,
                         HashItems(listBuilder),
                         Operation.EvaluationDirectory);
+                    if (EvaluationTrace.ItemDetailActive)
+                    {
+                        EvaluationTrace.ItemOperationSource(
+                            Operation.ItemElement,
+                            $"{location.File}:{location.Line}:{location.Column}",
+                            Operation.TraceOrdinal);
+                    }
                 }
 
+                long profileStart = ItemCostProfile.Enabled ? ItemCostProfile.Start() : 0;
                 Operation.Apply(listBuilder, globsToIgnore);
+                if (ItemCostProfile.Enabled)
+                {
+                    ItemCostProfile.End(Operation.ItemElement.Location, Operation.GetType().Name, 'A', profileStart);
+                }
 
                 if (trace)
                 {
+                    if (EvaluationTrace.ItemDetailActive)
+                    {
+                        TraceRows(listBuilder, Operation is IncludeOperation ? countBefore : 0, Operation is IncludeOperation);
+                    }
+
                     EvaluationTrace.OperationExit(HashItems(listBuilder));
                 }
 
@@ -261,6 +288,22 @@ namespace Microsoft.Build.Evaluation
                 _applyCalls++;
                 CheckInvariant();
 #endif
+            }
+
+            private static void TraceRows(OrderedItemDataCollection.Builder listBuilder, int start, bool appendedOnly)
+            {
+                EvaluationTrace.ItemRowsStart(appendedOnly, listBuilder.Count - start);
+                for (int i = start; i < listBuilder.Count; i++)
+                {
+                    I item = listBuilder[i].Item;
+                    EvaluationTrace.ItemRowStart(item.EvaluatedIncludeEscaped);
+                    foreach (M metadatum in item.Metadata)
+                    {
+                        EvaluationTrace.ItemRowMetadata(metadatum.Key, metadatum.EscapedValue);
+                    }
+
+                    EvaluationTrace.ItemRowEnd();
+                }
             }
 
 #if DEBUG

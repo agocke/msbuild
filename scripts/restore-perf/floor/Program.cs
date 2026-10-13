@@ -7,6 +7,7 @@
 // are compared: a dense id-indexed slot array and a case-insensitive Dictionary<string, string>.
 //
 // usage: Floor <trace-dir> [repetitions]
+//        Floor items <trace-dir> [item-cost-profile.tsv] [repetitions]   (see ItemFloor.cs)
 
 using System.Diagnostics;
 using System.Globalization;
@@ -18,6 +19,11 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
+        if (args[0] == "items")
+        {
+            return ItemFloor.Run(args[1..]);
+        }
+
         string dir = args[0];
         int reps = args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 3;
 

@@ -79,6 +79,7 @@ namespace Microsoft.Build.Evaluation
                 _conditionResult = builder.ConditionResult;
 
                 _lazyEvaluator = lazyEvaluator;
+                TraceOrdinal = lazyEvaluator._nextOperationOrdinal++;
 
                 foreach (ItemSpecFragment fragment in _itemSpec.Fragments)
                 {
@@ -118,6 +119,11 @@ namespace Microsoft.Build.Evaluation
             }
 
             internal ProjectItemElement ItemElement => _itemElement;
+
+            /// <summary>
+            /// Position of this operation in document order within its evaluation, for the evaluation trace.
+            /// </summary>
+            internal int TraceOrdinal { get; }
 
             internal string ItemType => _itemType;
 

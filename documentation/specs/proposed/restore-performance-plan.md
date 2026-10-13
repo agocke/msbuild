@@ -64,15 +64,26 @@ The restore's timeline (JIT `Release` engine, single runs,
 
 Evaluation runs ~10 threads wide, so an evaluation saving of X CPU seconds is
 worth about X/10 seconds of wall time. That is why specializations have
-removed large local costs without moving wall time. Execution and the third
-row need their own instruction reductions, and the third row has not yet
-been broken down.
+removed large local costs without moving wall time.
+
+A timestamped profile on ReadyToRun breaks down the rest
+([details](evaluation-perf.md#restore-timeline)). About 11 s of a profiled
+15.8 s is serial or nearly so:
+
+- execution, 5.15 s;
+- Arcade's outer steps before the console (startup and evaluation,
+  `dotnet tool restore`, and `Tools.proj`'s in-process NuGet restore), 2.1 s;
+- NuGet's restore after execution, 2.1 s;
+- graph edge construction, 0.75 s;
+- the root traversal chain, 0.67 s.
+
+Execution and the serial phases need their own instruction reductions.
 
 ## Where the instructions are
 
 | Pool | Default | With batching | Status |
 | --- | ---: | ---: | --- |
-| Item evaluation (construction and application) | ~87 G | ~55 G | Untouched; the largest pool |
+| Item evaluation (construction and application) | ~87 G | ~55 G | The largest pool; [floor](evaluation-perf.md#executable-floor-for-item-operations) 13.6x below MSBuild on 76% of it |
 | Properties and imports | ~66 G | ~35 G | Batching exists; folding and import attachment do not |
 | GC threads | ~30-40 G | ~28 G | Falls with allocations |
 | Conditions | ~36 G | ~16.5 G | Prepared trees not started |
@@ -119,6 +130,16 @@ executions that repeat with identical live-ins. Files fall into two regimes:
 
 The census also finds **60% of item-operation work repeating**. Resolving and
 loading imports is another ~15% of the pass.
+
+**Items have the same gap.** A reference implementation replays every item
+operation of the restore on compact rows: shared metadata blocks, programs
+prepared once per site, and metadata applied once per operation when it reads
+no item metadata. It is validated against MSBuild's recorded results. On the
+94% of operations it covers (76% of MSBuild's per-site item work), it spends
+**4.0 G against 54.6 G, 13.6x fewer instructions**: includes 12.5x and
+updates 16.8x. One update in runtime's `eng/Subsets.props` costs MSBuild
+18.5 G, 11.2 M instructions per evaluation
+([floor](evaluation-perf.md#executable-floor-for-item-operations)).
 
 ### Execution
 
@@ -205,14 +226,15 @@ evaluator, and caching evaluated projects or task results.
 
 ## Next steps
 
-1. **Make the compiled-module path the base.** Confirm its macro effect with
-   balanced pairs on a ReadyToRun snapshot, then build the remaining
+1. **Make the compiled-module path the base.** Four balanced ReadyToRun
+   pairs confirm it: 16.05 to 14.53 s and 272.8 to 204.0 G instructions
+   ([details](evaluation-perf.md#restore-timeline)). Build the remaining
    evaluation work on it.
-2. **Items.** Item evaluation is the largest pool left. Price construction
-   and application per site with the ledger, prepare construction once per
-   import (it depends almost only on XML), then attach repeated item
-   operations. That needs an O(1) identity for the list an operation applies
-   to.
+2. **Item batch execution.** Execute prepared item programs natively on
+   compact rows, per the [compact item engine plan](compact-item-engine.md),
+   starting with the shapes the floor covers. Then publish compact instances
+   with per-type promotion for the item types restore reads, and attach
+   repeated item regions through producer-originated identities.
 3. **Property folding and import attachment.** Constant propagation within an
    import, with `Version.Details.props` as the test case. Then key repeated
    imports on their live-ins and apply them as single deltas, starting with
@@ -227,10 +249,13 @@ evaluator, and caching evaluated projects or task results.
    and fallback batching are now separately covered by the ledger. Parallel
    extraction needs NuGet's inner `BuildParameters` to opt in, not just an
    outer `MSBUILDFORCEMULTITHREADED=1` flag.
-6. **Complete the timeline.** Measure the outer MSBuild process, console
-   startup, and NuGet's work after execution, which together take ~4.5 s.
+6. **Serial phases.** Graph edge construction (global-property dictionary
+   comparisons per reference lookup) and the graph builder's spinning main
+   thread (10.4 G instructions) are contained MSBuild fixes. The outer
+   Arcade steps and NuGet's post-execution restore belong to their owners.
 7. **Hand off to NuGet and runtime owners:** `TieredPGO=false` and Native AOT
-   for the static-graph console, and NuGet's own ~27 G.
+   for the static-graph console, and NuGet's own ~27 G. Rebuilding NuGet with
+   runtime-async does not measurably help.
 8. **Confirm on the 16-core machine**, using task clock where hardware
    counters are unavailable.
 

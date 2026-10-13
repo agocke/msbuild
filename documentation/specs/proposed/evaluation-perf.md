@@ -242,6 +242,101 @@ statically resolved name id. The MSBuild figures include the function and
 lower. The floor is untuned: for example, it classifies operands as
 boolean or numeric at run time even when one side is a static literal.
 
+### Executable floor for item operations
+
+The same approach applied to the items pass replays every item operation of one restore
+(`floor/build-and-run.sh items`). Measured on the Ryzen with the `Release` engine (JIT), console PGO off,
+and `kernel.perf_event_paranoid=2`, so both sides count user-mode instructions only.
+
+**MSBuild per site.** `MSBUILDITEMCOSTPROFILE` records, for each item element, the instructions spent
+evaluating its condition and constructing its operation, and then applying the operation. Operations nested
+in either (an item list read by a condition or reference) are excluded. Default engine (compiled modules
+off), in a run without the trace:
+
+| Default engine | Instructions |
+| --- | ---: |
+| Ledger: item operation construction | 33.7 G |
+| Ledger: lazy item application | 53.8 G |
+| Per site: construction of the 844,450 operations created | 17.6 G |
+| Per site: the 182,442 elements with false conditions | 3.0 G |
+| Per site: the 840,961 applications | 54.3 G |
+
+The ~12.5 G not attributed to sites is item-group conditions, publication into `ProjectInstance`, and the
+lazy-list plumbing. With compiled modules and batching, the two ledger scopes cost 15.3 G and 38.8 G in the
+same cohort, 54.1 G in total. Two sites in runtime's `eng/Subsets.props` dominate:
+
+- **The `ProjectToBuild` update at line 814** costs 18.5 G, 11.2 M instructions per evaluation. It has
+  eleven metadata elements, six of them conditioned on `%(Category)`, and is applied to every `ProjectToBuild`
+  item in every evaluation.
+- **A wildcard include at line 603** costs 6.9 G.
+
+**The floor.** A trace recorded with `MSBUILDEVALUATIONTRACEITEMS=1` (default engine) adds each operation's
+source, its position in document order, the final item definitions, and each operation's result rows. The
+replay keeps, per configuration and item type, an ordered list of value rows: escaped include, a shared
+immutable metadata block, and the defining element.
+
+- **Preparation**, once per site: specs and metadata values become templates of literal, `$(property)`,
+  `%(metadata)`, and built-in metadata segments. Conditions become trees. All-literal metadata becomes one
+  shared block. Preparing 20,478 sites costs 850 M instructions.
+- **Application:**
+  - Includes expand their spec and copy referenced rows. A copy flattens the source type's definitions
+    into it.
+  - Updates and removes match full paths. `@(Self)` matches the whole list without a lookup.
+  - A metadata program runs once for all rows when it reads no item metadata, otherwise row by row in a
+    working frame.
+- **Inputs from the trace:** final properties (the items pass sees final values), final item definitions,
+  and wildcard results.
+- **Validation:** every operation's rows are compared with the recorded ones. 6 of 790,968 checked
+  operations disagree; those, and every unsupported shape, are applied from the recorded rows and counted
+  as not covered.
+
+Two rules surfaced during validation. `$(MSBuildThisFile*)` is scoped to the file containing the
+element, not taken from the final property table. Includes and metadata values containing backslashes go
+through the Unix path heuristic (`FileUtilities.MaybeAdjustFilePath`), which collapses them to forward
+slashes when the first path segment exists relative to the working directory. The floor performs the same
+filesystem probe. Its outcome differs by site for the same text: `Link="Common\SkipLocalsInit.cs"` is
+rewritten at every application in `src/libraries/Directory.Build.targets` and at none in
+`System.Private.CoreLib.Shared.projitems`. So validation accepts either slash form.
+
+Coverage is 93.9% of operations, 84.1% of recorded rows, and **76.0% of MSBuild's per-site item work**.
+Not covered: wildcard includes (23 sites), item transforms or separators (21), item lists combined with
+properties (19), and property functions in metadata (13) or specs (10).
+
+| Covered operations | Count | MSBuild per operation | Floor per operation | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Include | 779,109 | 45,608 | 3,643 | 12.5x |
+| Update | 6,822 | 2,762,024 | 164,801 | 16.8x |
+| Remove | 4,996 | 34,746 | 9,667 | 3.6x |
+| **All covered** | 790,927 | 54.55 G total | **4.01 G total** | **13.6x** |
+
+Selected sites, instructions per application:
+
+| Site | MSBuild | Floor | Ratio |
+| --- | ---: | ---: | ---: |
+| `eng/Subsets.props:814`, `ProjectToBuild` update | 11.24 M | 667 k | 16.9x |
+| `eng/references.targets:37`, include with `Exclude="@(NetCoreAppLibrary)"` | 5.23 M | 390 k | 13.4x |
+| `NetCoreAppLibrary.props:255`, include | 997 k | 190 k | 5.3x |
+| `Microsoft.NETCoreSdk.BundledVersions.props`, a literal include with literal metadata | ~82 k | ~520 | ~157x |
+
+The largest uncovered work:
+
+- the `Subsets.props:603` wildcard (6.9 G, filesystem globbing);
+- the SDK's `Compile` update that computes `Link` with property functions (2.7 G);
+- Roslyn's transform includes (0.8 G);
+- the Arcade targeting-pack updates that mix item lists with properties (~1.5 G).
+
+The replay runs at an IPC of 1.77, against ~0.65 for the restore.
+
+The floor is untuned and omits three costs:
+
+- **Element conditions.** The 499,673 item-element conditions are not replayed; at the condition floor
+  they would add roughly 0.3-0.4 G.
+- **Publication.** The compact rows are the result, so there is no publication.
+- **The batched comparison.** The comparison is against the default engine. Batching already removed
+  37% of item instructions, mostly from constant literal includes, which are the floor's highest-ratio
+  sites. So the gap to the module path is smaller than 13.6x by an amount the per-site profile does not
+  yet measure.
+
 ### Amplification and invariance
 
 Across the 1,646 traced configurations:
@@ -390,7 +485,63 @@ Execution is serial: its 1,643 project builds account for ~4.1 CPU s of the
 5.4 s span. The remaining ~4.5 s is the outer MSBuild process (startup and
 three Arcade evaluations spanning 1.9 s with 0.6 CPU s, inflated by JIT in
 this IL-only snapshot), console startup, and NuGet's work after execution.
-These remaining buckets have not been measured separately.
+
+**Compiled modules on ReadyToRun.** Four balanced pairs on a ReadyToRun
+snapshot of the same engine, console PGO off, all runs with identical assets:
+default 16.05 +/- 0.84 s and 272.8 G instructions; compiled modules with
+batching **14.53 +/- 0.17 s and 204.0 G** (-25%). Every pair favored the
+module path, by 0.9 to 2.7 s. IPC stayed at ~0.65.
+
+**All phases.** A `perf record` of one module-path restore on the ReadyToRun
+snapshot, timestamped against the processes' start and exit events, places
+every phase. Perf stretches the run to 15.8 s from ~14.5 s.
+
+| Phase | Wall | Width |
+| --- | ---: | --- |
+| Outer MSBuild startup and Arcade `Build.proj` evaluation | 0.85 s | serial |
+| `dotnet tool restore`, launched by Arcade's `Tools.proj` | 0.28 s | serial |
+| In-process NuGet restore of `Tools.proj` in the outer MSBuild, including the vulnerability audit, ~55% JIT | 0.95 s | serial |
+| Console startup and the root traversal projects, evaluated one after another | 0.67 s | ~1 thread |
+| Parallel graph evaluation | 4.75 s | ~10 threads |
+| Graph edges (`GraphBuilder.AddEdgesFromProjectReferenceItems`) and build-session start | 0.75 s | ~1 thread |
+| Execution of 1,643 requests | 5.15 s | 1 thread |
+| NuGet restore after execution | 2.1 s | ~3 threads for 0.8 s, then ~10 |
+| Outer MSBuild finish | 0.29 s | serial |
+
+About 11 s of the 15.8 s is serial or nearly so. MSBuild owns the
+execution phase, the graph edges, the root traversal chain, and part of the
+first row. A JIT-everything profile of the same configuration names two
+contained costs:
+
+- **Graph edges.** Each reference resolves through
+  `allParsedProjects[ConfigurationMetadata]`, which compares global-property
+  dictionaries (`PropertyDictionary.Equals` is 19% of the window). Every
+  transitive edge allocates a `ProjectItemInstance`.
+- **The graph builder's main thread spins.**
+  `ParallelWorkSet.WaitForAllWorkAndComplete` loops on
+  `ConcurrentQueue.TryDequeue` while work is pending, retiring 10.4 G
+  instructions (4% of the console) and occupying a hardware thread through
+  the whole graph phase.
+
+While the console evaluates, the outer MSBuild process spends ~2 s of one
+core on tiered recompilation, off the critical path.
+
+**NuGet with runtime-async.** NuGet.Client at the commit the SDK ships
+(`2023968af`) was rebuilt for `net11.0` with and without
+`Features=runtime-async=on`. Both builds were compiled ReadyToRun and swapped
+into copies of the snapshot: 14 assemblies. Four interleaved repetitions on
+the module path:
+
+| NuGet assemblies | Wall | Instructions |
+| --- | ---: | ---: |
+| Shipped | 14.64 +/- 0.11 s | 204.1 G |
+| Rebuilt | 14.46 +/- 0.16 s | 204.1 G |
+| Rebuilt, runtime-async | 14.37 +/- 0.08 s | 201.9 G |
+
+Runtime-async removed the compiler's async state machines (188 to 20 in
+`NuGet.Commands`) but saved at most ~0.1 s and ~1% of instructions, within
+run-to-run variation. NuGet's own time goes to version parsing, JSON writing,
+content-model matching, and the trust store, not async overhead.
 
 ### Evaluation without filesystem reads: `eng/Versions.props`
 

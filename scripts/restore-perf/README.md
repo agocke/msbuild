@@ -64,9 +64,15 @@ instruction accounting where hardware counters exist.
 - `MSBUILDIMPORTCOSTPROFILE=<prefix>` (with `MSBUILDCOSTLEDGER`): per-file inclusive and exclusive cost of the
   properties and imports pass, plus import resolution and loading, `<prefix>.<pid>.tsv`. Weight the live-in
   census by it with `analysis/import_costs.py <trace-dir> <imports.pid.tsv>`.
+- `MSBUILDITEMCOSTPROFILE=<prefix>` (with `MSBUILDCOSTLEDGER`): per item element, the instructions spent
+  constructing and applying its operation, excluding nested operations, `<prefix>.<pid>.tsv`. Record it without
+  the evaluation trace, whose writes would inflate it.
 - `MSBUILDEVALUATIONTRACE=<existing dir>`: condition and property-element streams plus final property tables.
   Analyze with `analysis/trace_stats.py <dir>` and `analysis/invariance.py <dir>`, and replay against the
-  reference implementation with `floor/build-and-run.sh <dir>`.
+  reference implementation with `floor/build-and-run.sh <dir>`. Adding `MSBUILDEVALUATIONTRACEITEMS=1` records
+  item operation sources, document order, item definitions, and result rows; replay those with
+  `floor/build-and-run.sh items <dir> [<items.pid.tsv>]`, run from the runtime clone (the replay performs
+  MSBuild's working-directory path probes).
 
 ## Profiling
 

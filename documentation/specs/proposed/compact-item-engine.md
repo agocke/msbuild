@@ -2,18 +2,23 @@
 
 ## Decision and scope
 
-Build a compact item execution path for ordinary command-line MSBuild builds.
-Prepared item programs operate directly on configuration-owned ordered state,
-rather than constructing generic item objects and lazy operation graphs for
-every activation. Keep expensive compatibility and diagnostic views off the
-normal path until they are requested.
+Build a compact item execution path. Prepared item programs operate directly
+on configuration-owned ordered state, rather than constructing generic item
+objects and lazy operation graphs for every activation. Keep expensive
+compatibility and diagnostic views off the normal path until they are
+requested.
 
-The primary target is a complete `dotnet build` or `msbuild` invocation,
-including evaluation, target execution, task binding, logging, and node
-transfer. Static-graph restore remains an important measured workload, but
-neither a restore-specific evaluator nor a narrow graph query is the design
-goal. IDE and interactive execution may see no gains or small performance
-regressions; their correctness must remain unchanged.
+**Batch execution comes first.** The first deliverable executes prepared item
+operations natively, applying each operation's effect to compact rows as one
+batch. Publication, execution integration, and broader coverage follow it.
+
+The acceptance workload, for now, is the clean, package-cached static-graph
+restore of `dotnet/runtime` measured by the
+[restore plan](restore-performance-plan.md). The engine is not
+restore-specific: command-line builds share the same item programs and should
+benefit later, but they are not yet acceptance workloads. IDE and interactive
+evaluation may see no gains or performance regressions; their correctness must
+remain unchanged.
 
 This is a proposed architecture and staged implementation plan, not an
 implemented engine or a new performance result. Related evidence and strategy:
@@ -26,18 +31,37 @@ implemented engine or a new performance result. Related evidence and strategy:
 
 ### Why this direction
 
-The historical Release ledger for compiled modules and effect batching leaves
-16.0 G instructions in item-operation construction and 39.4 G in lazy
-application, against 101.4 G total evaluation
-([measurement and limitations](evaluation-perf.md#compiled-modules-with-effect-batching-in-release)).
-These are instruction pools, not an estimate of recoverable representation
-overhead. Required matching, filesystem work, expression execution, and
-observable effects remain required.
+Items are the largest evaluation pool left. With compiled modules and
+batching, item-operation construction and lazy application cost 15.3 G and
+38.8 G, against 87.4 G for the default engine
+([measurement](evaluation-perf.md#executable-floor-for-item-operations)).
 
-The compact engine can improve a cold, unique, single-configuration build.
-Coarse result attachment needs equivalent inputs and cheap identities; demand
-slicing needs consumers that remain narrow. Both can benefit from this
-foundation, but neither is a prerequisite.
+An executable floor prices the gap. A reference implementation replays every
+item operation of one restore on compact rows: shared metadata blocks,
+programs prepared once per site, and metadata applied once per operation when
+it reads no item metadata. It is validated against MSBuild's recorded rows
+(6 disagreements in 790,968 checked operations). On the operations it covers,
+76% of MSBuild's per-site item work, it spends **4.0 G against MSBuild's
+54.6 G: 13.6x fewer instructions**:
+
+- includes 12.5x;
+- updates 16.8x;
+- a literal include with literal metadata ~157x (~520 against ~82 k);
+- the single costliest site, runtime's `ProjectToBuild` update, 16.9x
+  (667 k against 11.2 M per evaluation).
+
+The comparison is against the default engine. Batching already removed part
+of that gap, most of it at the floor's highest-ratio sites, so the remaining
+gap to the module path is smaller than 13.6x. The floor's cost is real work:
+it expands, matches, evaluates conditions, and probes the filesystem where
+MSBuild does. Most of the difference is representation and per-operation
+overhead.
+
+The compact engine improves a cold, unique configuration without any reuse.
+Attaching repeated results (60% of item-operation work repeats with equal
+live-ins) needs cheap producer-originated identities, and demand slicing needs
+consumers that remain narrow. Both build on this foundation; neither is a
+prerequisite.
 
 Start with common project shapes, then provide explicit backstops. The goal
 of covering nearly all ordinary projects is a design aspiration, not a
@@ -258,6 +282,22 @@ This path still performs full evaluation. Pure-region fusion is useful even
 when every final item type is requested; demand slicing is separate future
 work.
 
+## Restore consumers
+
+Restore reads few item types, all through public `ProjectInstance` APIs:
+
+- **Graph construction** reads `ProjectReference` and `ProjectReferenceTargets`.
+- **The NuGet console** builds `_CollectRestoreInputs` in every configuration,
+  then calls `GetItems` for `PackageReference`, `PackageDownload`,
+  `PackageVersion`, `FrameworkReference`, `PrunePackageReference`,
+  `ProjectReference`, and `NuGetAuditSuppress`.
+
+Promoting a whole instance on its first public read would therefore promote
+every restore configuration. The restore path needs promotion per item type:
+the first public read of a type materializes that type's objects, which
+become authoritative for that type, while other types stay compact. Types
+that no consumer reads are never materialized.
+
 ## Carry compact state through command-line execution
 
 Evaluation-only compactness is insufficient. The CLI path must avoid
@@ -305,15 +345,17 @@ Language errors still surface with the existing location, code, severity,
 condition behavior, and ordering. No new default warnings or errors are
 introduced by compact eligibility.
 
-For public item APIs, the initial compatibility backstop can promote the
-whole instance after evaluation to its existing object representation. That
-representation becomes authoritative thereafter, including mutable
-definitions and include/metadata changes. Do not maintain independently
-writable compact and object copies. Engine-native readers must handle the
-promoted state correctly.
+For public item APIs, the compatibility backstop promotes an item type to its
+existing object representation on first public access; whole-instance
+promotion remains the fallback for APIs that touch every type, such as
+mutable item definitions. A promoted type's objects become authoritative,
+including include and metadata changes. Do not maintain independently
+writable compact and object copies of the same type. Engine-native readers
+must handle promoted types correctly. See [Restore consumers](#restore-consumers)
+for why per-type promotion is required rather than optional.
 
 Keep public occurrence identity, collection behavior, immutability checks,
-and deep-copy guarantees. Finer-grained views are allowed later only with
+and deep-copy guarantees. Views finer than an item type are allowed later only with
 a coherent mutation/identity protocol.
 
 Ordinary internal CLI reads must not accidentally call promotion APIs.
@@ -331,12 +373,11 @@ public language option. Confirm default-enablement policy after validation.
 
 | Stage | Deliverable | Exit evidence |
 | --- | --- | --- |
-| 0. Price the current path | Same-cohort site costs and a cost-weighted shape/capture/consumer census | Identify dominant supported shapes, required effects, snapshot pressure, and actual promotion sites |
-| 1. Implement the storage kernel | Ordered chunks, immutable metadata/context sharing, prefix snapshots, and native readers | Semantic differential cases pass; scans, copying, and retained bytes are priced under representative captures |
-| 2. Execute prepared item batches | Native execution for selected common shapes, with conservative whole-pass fallback | Repeatable net construction/application savings including binding and fallback costs |
-| 3. Publish compact instances | Direct state publication, native expression/graph reads, one-way public promotion | No unconditional final object drain; mutation, identity, copying, and observer cases agree |
-| 4. Integrate command-line execution | Native lookup/scopes/batching, consumed task adapters, logging, and transfer | A real build completes without forced full promotion on its supported path; total costs are not merely shifted into execution |
-| 5. Broaden and harden | Coverage expansion driven by fallback cost; bounded safe fusion | CLI macro measurements, representative compatibility cases, and modest memory/complexity justify retention and enablement |
+| 0. Price the current path (done) | Per-site MSBuild costs (`MSBUILDITEMCOSTPROFILE`) and the [item floor](evaluation-perf.md#executable-floor-for-item-operations) | Dominant shapes, attainable per-operation cost, and validated semantics for 94% of operations |
+| 1. **Batch execution** | Prepared item programs executed natively on compact rows for the shapes the floor covers: literal and property specs, plain item references, excludes, `@(Self)` and path-matched updates and removes, and ordered metadata programs applied once per operation when item-independent. Minimal storage: append-only per-type rows whose prefix snapshot is (array, count); copy-on-write only when captured rows are updated or removed. Whole-pass fallback. A measured legacy-publication bridge keeps instances usable. | Repeatable net item-pass instructions per configuration on restore, bridge and fallback included; identical restore assets |
+| 2. Publish compact instances | Direct publication; native graph reads of `ProjectReference`; per-type promotion for public reads | No final object drain on restore; promoted types limited to those consumers read; mutation and identity cases agree |
+| 3. Execution integration | Compact lookup, scopes, intrinsic item groups, and task binding for restore's `_CollectRestoreInputs`, then generally | The serial execution phase shrinks; costs are not shifted into binding or logging |
+| 4. Broaden and harden | Coverage driven by fallback cost: wildcards, transforms, and common property functions; bounded safe fusion | Restore macro pairs, compatibility cases, and modest memory and complexity justify enablement |
 
 A temporary legacy-publication bridge can keep an early prototype usable,
 but it is not completion of the CLI design. Measure its cost explicitly.
@@ -346,7 +387,14 @@ savings while measuring accumulated end-to-end throughput.
 
 Do not expand support merely to improve a project-count percentage. Rank
 backstops by the work they retain. A rare shape at a costly site may matter
-more than many cheap literal operations.
+more than many cheap literal operations. In the restore, the largest work the
+floor does not cover is one wildcard include (6.9 G), the SDK's `Compile`
+update that computes `Link` with property functions (2.7 G), Roslyn's
+transform includes (0.8 G), and Arcade's targeting-pack updates (~1.5 G).
+
+Sequence versions should carry a slot for a producer-originated identity from
+stage 1, so that later attachment of repeated item regions does not need a
+storage change. Do not build attachment in stage 1.
 
 ## Semantic validation
 
@@ -386,9 +434,9 @@ dotnet test src/Build.UnitTests/Microsoft.Build.Engine.UnitTests.csproj -c Relea
 dotnet test src/Build.OM.UnitTests/Microsoft.Build.Engine.OM.UnitTests.csproj -c Release
 ```
 
-Use focused xUnit v3 method/class filters during development, expand to
-affected backend/task/logging tests as those integrations land, and exercise
-Windows .NET Framework as well as modern .NET, Linux, and macOS. Full
+Use focused xUnit v3 method/class filters during development, and expand to
+affected backend/task/logging tests as those integrations land. The current
+work targets modern .NET on Linux. Full
 implementation validation includes the repository build and bootstrap sample
 checks described in `AGENTS.md`; these commands are planned checks, not
 results of writing this document.
@@ -398,11 +446,13 @@ results of writing this document.
 Use a release/bootstrap build of the local engine, not accidentally the
 installed SDK engine. Follow [bootstrap guidance](../../../.github/skills/use-bootstrap-msbuild/SKILL.md).
 
-The matrix covers cold-process and warm-process command-line builds,
-package-cached restore, a single configuration, multi-targeting, an actual
-target-executing build, and a no-op incremental build. Include ordinary
-logging and a typical binary-log invocation; disabled observers are useful
-for attribution but cannot be the only acceptance workload.
+The acceptance workload is the restore plan's clean, package-cached
+static-graph restore, measured with balanced pairs and identical assets.
+Instructions per configuration is the progress metric and restore wall time
+the acceptance metric. Later, the matrix extends to cold-process and
+warm-process command-line builds, multi-targeting, a target-executing build,
+and a no-op incremental build, with ordinary logging and a typical binary-log
+invocation.
 
 Use both small controlled shapes and representative project/solution
 workloads. Keep SDK, target graph, package/cache state, output state, node
@@ -428,17 +478,19 @@ Keep detailed instrumentation diagnostic-only. Do not add per-row tracing,
 list hashing, or allocation-heavy counters to the normal path.
 
 Retain repeatable, bounded phase-level savings with modest implementation
-and memory cost. Judge the accumulated design on complete CLI throughput:
-an evaluation saving that reappears during binding, logging, or transfer is
-not an end-to-end win. Separate CPU savings from parallel critical-path
-savings. A result on static-graph restore alone does not establish the
+and memory cost. Judge the accumulated design on complete restore
+throughput: an evaluation saving that reappears during binding, logging, or
+transfer is not an end-to-end win. Separate CPU savings from parallel
+critical-path savings: evaluation runs ~10 threads wide on 8 cores, so an
+evaluation saving of X CPU seconds is worth about X/10 seconds of wall time,
+while execution is serial. A restore result does not establish the
 ordinary-build result.
 
 Reject or revise a stage if common prefix captures cause quadratic copying,
 compatibility boundaries force immediate full promotion, fallback dominates
 the measured item work, preparation costs outweigh execution savings, or
-obsolete state causes substantial retention. Do not require IDE speedups,
-but investigate unbounded or large interactive regressions.
+obsolete state causes substantial retention. IDE regressions are acceptable
+while correctness holds.
 
 ## Follow-on work
 

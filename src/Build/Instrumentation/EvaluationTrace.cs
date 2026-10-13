@@ -32,6 +32,15 @@ namespace Microsoft.Build.Instrumentation;
 /// reads and <c>Q type hash</c> records reads of other item lists.</item>
 /// <item><c>F name value</c> is one entry of the final property table; <c>X</c> ends the evaluation.</item>
 /// </list>
+/// With <c>MSBUILDEVALUATIONTRACEITEMS=1</c>, the items pass also records, for replaying item operations:
+/// <list type="bullet">
+/// <item><c>D type name value</c>: one metadata value of a final item definition, before the first operation.</item>
+/// <item><c>T location type include exclude update remove matchOnMetadata matchOnMetadataOptions keepMetadata removeMetadata keepDuplicates</c>
+/// and one <c>H location name value condition</c> per metadata element: an operation's source, once per thread.</item>
+/// <item><c>Y ordinal</c> after <c>O</c>: the operation's position in document order within the evaluation.</item>
+/// <item>Before <c>Z</c>, <c>A count</c> (rows an include appended) or <c>L count</c> (the whole list after an
+/// update or remove), each followed by <c>N include (name value)*</c> rows with all metadata the item reports.</item>
+/// </list>
 /// Evaluations do not nest on a thread; one that ends by an exception is closed by the next
 /// <see cref="BeginEvaluation"/> on that thread.
 /// </remarks>
@@ -53,12 +62,25 @@ internal static class EvaluationTrace
     [ThreadStatic]
     private static int t_operationDepth;
 
+    [ThreadStatic]
+    private static HashSet<string>? t_itemSites;
+
+
     internal static bool Enabled { get; } = !string.IsNullOrEmpty(s_directory) && Directory.Exists(s_directory);
+
+    /// <summary>
+    /// Whether item operations also record their sources and result rows (<c>MSBUILDEVALUATIONTRACEITEMS=1</c>).
+    /// </summary>
+    internal static bool ItemDetail { get; } = Enabled && Environment.GetEnvironmentVariable(ItemDetailEnvironmentVariable) == "1";
+
+    internal const string ItemDetailEnvironmentVariable = "MSBUILDEVALUATIONTRACEITEMS";
 
     /// <summary>
     /// Whether the current thread is inside a traced evaluation.
     /// </summary>
     internal static bool Active => Enabled && t_active;
+
+    internal static bool ItemDetailActive => ItemDetail && t_active;
 
     internal static void BeginEvaluation(string projectFile)
     {
@@ -202,6 +224,100 @@ internal static class EvaluationTrace
         }
 
         public override readonly string ToString() => _hash.ToString("x16");
+    }
+
+    /// <summary>
+    /// Records one metadata value of a final item definition at the start of the items pass.
+    /// </summary>
+    internal static void ItemDefinition(string itemType, string name, string escapedValue)
+    {
+        if (ItemDetailActive)
+        {
+            Write('D', itemType, name, escapedValue);
+        }
+    }
+
+    /// <summary>
+    /// Records an item operation's source the first time this thread applies an operation from it, then the
+    /// operation's position in document order.
+    /// </summary>
+    internal static void ItemOperationSource(ProjectItemElement element, string site, int ordinal)
+    {
+        if (!ItemDetailActive)
+        {
+            return;
+        }
+
+        t_itemSites ??= new HashSet<string>(StringComparer.Ordinal);
+        if (t_itemSites.Add(site))
+        {
+            StreamWriter writer = t_writer!;
+            writer.Write('T');
+            WriteField(writer, site);
+            WriteField(writer, element.ItemType);
+            WriteField(writer, element.Include);
+            WriteField(writer, element.Exclude);
+            WriteField(writer, element.Update);
+            WriteField(writer, element.Remove);
+            WriteField(writer, element.MatchOnMetadata);
+            WriteField(writer, element.MatchOnMetadataOptions);
+            WriteField(writer, element.KeepMetadata);
+            WriteField(writer, element.RemoveMetadata);
+            WriteField(writer, element.KeepDuplicates);
+            writer.Write('\n');
+            foreach (ProjectMetadataElement metadata in element.Metadata)
+            {
+                writer.Write('H');
+                WriteField(writer, site);
+                WriteField(writer, metadata.Name);
+                WriteField(writer, metadata.Value);
+                WriteField(writer, metadata.Condition);
+                writer.Write('\n');
+            }
+        }
+
+        Write('Y', ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// Starts the rows of an operation's result: the full list after an update or remove (<c>L count</c>),
+    /// or only the rows an include appended (<c>A count</c>).
+    /// </summary>
+    internal static void ItemRowsStart(bool appendedOnly, int count)
+    {
+        if (ItemDetailActive)
+        {
+            Write(appendedOnly ? 'A' : 'L', count.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>
+    /// Starts one result row, <c>N include (name value)*</c>; metadata pairs follow through <see cref="ItemRowMetadata"/>.
+    /// </summary>
+    internal static void ItemRowStart(string escapedInclude)
+    {
+        if (ItemDetailActive)
+        {
+            t_writer!.Write('N');
+            WriteField(t_writer, escapedInclude);
+        }
+    }
+
+    internal static void ItemRowMetadata(string name, string escapedValue)
+    {
+        if (ItemDetailActive)
+        {
+            WriteField(t_writer!, name);
+            WriteField(t_writer!, escapedValue);
+        }
+    }
+
+    internal static void ItemRowEnd()
+    {
+        if (ItemDetailActive)
+        {
+            t_writer!.Write('\n');
+        }
     }
 
     internal static void Condition(string condition, bool result)
