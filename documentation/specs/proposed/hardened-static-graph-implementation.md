@@ -150,12 +150,19 @@ default, explicit overrides, immutable configuration, and ordinary-build
 compatibility. The selected OS is recorded in the Ninja graph; see
 [captured construction platform](hardened-static-graph.md#captured-construction-platform).
 
-The next observed evaluation blocker is Roslyn's language-version expression
-in `Microsoft.CSharp.Core.targets`: the allowlist rejects the array index in
-`$(_TargetFrameworkVersionWithoutV.Split('.')[0])`. This is a pure-expression
-coverage gap, not an OS-discovery requirement. The stock Roslyn task also lacks
-DeclaredIO annotations. SDK `Build` is still unsupported; ambient discovery
-has not been allowed as a fallback.
+Read-only array indexing is now supported during evaluation and target
+construction, including Roslyn's language-version expression
+`$(_TargetFrameworkVersionWithoutV.Split('.')[0])`. Process cases cover
+computed indices, chained string operations, character arrays, invalid
+indices, and rejection of unapproved array methods.
+
+The next observed evaluation blocker is
+`ToolLocationHelper.GetPlatformSDKLocation` in
+`Microsoft.Common.CurrentVersion.targets`, which discovers installed platform
+SDKs through default disk/registry locations. That discovery needs explicit
+configuration or a fetch-stage result, not another pure-function allowance.
+The stock Roslyn task also lacks DeclaredIO annotations. SDK `Build` is still
+unsupported; ambient discovery has not been allowed as a fallback.
 
 Use existing SDK overlays for a single-framework C# hello-world profile:
 

@@ -120,8 +120,12 @@ construction tasks a second time. No additional target interpreter is added.
   permitted during construction.
 - Conditions, target/project routing, batch membership, all emitted parameter
   values, and item metadata must resolve during construction. Property
-  functions are restricted to the hardened allowlist. File-I/O tasks must
-  never run to make an unavailable construction value known.
+  functions are restricted to the hardened allowlist. Array indexing uses
+  the existing read-only `Array.GetValue` binding, including computed indices
+  and chained expressions; bounds/conversion errors still fail construction.
+  Other array methods and arbitrary object indexers are not admitted by this
+  allowance. File-I/O tasks must never run to make an unavailable construction
+  value known.
 - Expand supported `MSBuild` and `CallTarget` intrinsics into construction
   state and dependency edges, not host commands that invoke MSBuild.
   Configured projects retain their global-property and inner-build identity.

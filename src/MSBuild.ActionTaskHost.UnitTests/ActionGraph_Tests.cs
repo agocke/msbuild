@@ -237,19 +237,34 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
     [InlineData("$([MSBuild]::GetTargetPlatformIdentifier('net11.0-windows10.0'))", "windows")]
     [InlineData("$([MSBuild]::GetTargetPlatformVersion('net11.0-windows10.0'))", "10.0")]
     [InlineData("$([MSBuild]::FilterTargetFrameworks('net11.0;netstandard2.0', 'net11.0'))", "net11.0")]
-    public void AllowsFrameworkParsingOverDeclaredValues(string expression, string expected)
+    [InlineData("$(Parts.Split('.')[0])", "alpha")]
+    [InlineData("$(Parts.Split('.')[$(ArrayIndex)])", "beta")]
+    [InlineData("$(Parts.Split('.')[2].ToUpperInvariant())", "GAMMA")]
+    [InlineData("$(Parts.ToCharArray()[0])", "a")]
+    [InlineData("$([MSBuild]::Add(9, $([MSBuild]::Subtract($(_TargetFrameworkVersionWithoutV.Split('.')[0]), 5)))).0", "15.0")]
+    public void AllowsPureExpressionsOverDeclaredValues(string expression, string expected)
     {
         using TestEnvironment env = TestEnvironment.Create(_output);
         string directory = env.CreateFolder().Path;
         string project = WriteProject(directory);
         string contents = File.ReadAllText(project);
         contents = contents.Replace("<Target Name=\"Build\"",
-            $"<PropertyGroup><Parsed>{expression}</Parsed></PropertyGroup><Target Name=\"Build\"");
+            $"""
+            <PropertyGroup>
+              <Parts>alpha.beta.gamma</Parts>
+              <ArrayIndex>1</ArrayIndex>
+              <_TargetFrameworkVersionWithoutV>11.0</_TargetFrameworkVersionWithoutV>
+              <Parsed>{expression}</Parsed>
+            </PropertyGroup>
+            <Target Name="Build"
+            """);
+        contents = contents.Replace("<GraphValueTask",
+            $"<PropertyGroup><Constructed>{expression}</Constructed></PropertyGroup><GraphValueTask");
         contents = contents.Replace("</GraphValueTask>", """
             </GraphValueTask>
             <ItemGroup>
               <Values>
-                <Tag>$(Parsed)</Tag>
+                <Tag>$(Parsed)|$(Constructed)</Tag>
               </Values>
             </ItemGroup>
             """);
@@ -261,7 +276,36 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
         Ninja(graph, out bool success);
 
         success.ShouldBeTrue();
-        File.ReadAllText(Path.Combine(directory, "first.txt")).ShouldBe("literal%3B;value|" + expected);
+        File.ReadAllText(Path.Combine(directory, "first.txt")).ShouldBe($"literal%3B;value|{expected}|{expected}");
+    }
+
+    [UnixOnlyTheory]
+    [InlineData("$(Parts.Split('.')[3])", "MSB4184")]
+    [InlineData("$(Parts.Split('.')[-1])", "MSB4184")]
+    [InlineData("$(Parts.Split('.').SetValue('changed', 0))", "MSB4287")]
+    [InlineData("$(Parts.Split('.').Clone())", "MSB4287")]
+    public void RejectsInvalidArrayIndicesAndUnapprovedArrayMethods(string expression, string errorCode)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        string contents = File.ReadAllText(project).Replace("<Target Name=\"Build\"",
+            $"""
+            <PropertyGroup>
+              <Parts>alpha.beta.gamma</Parts>
+              <Parsed>{expression}</Parsed>
+            </PropertyGroup>
+            <Target Name="Build"
+            """);
+        File.WriteAllText(project, contents);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph, out string log).ShouldBeFalse();
+
+        log.ShouldContain(errorCode);
+        File.Exists(graph).ShouldBeFalse();
+        Directory.Exists(graph + ".actions").ShouldBeFalse();
+        File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
     }
 
     [UnixOnlyFact]
@@ -546,6 +590,9 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
     }
 
     private bool Generate(string project, string graph, string arguments = "")
+        => Generate(project, graph, out _, arguments);
+
+    private bool Generate(string project, string graph, out string log, string arguments = "")
     {
         string testDirectory = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         string framework = Path.GetFileName(testDirectory);
@@ -553,7 +600,7 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
         string host = Path.GetFullPath(Path.Combine(testDirectory, "..", "..", "..",
             "MSBuild.ActionTaskHost", configuration, framework, "MSBuild.ActionTaskHost.dll"));
         string dotnet = RunnerUtilities.BootstrapDotnetHostPath;
-        RunnerUtilities.ExecBootstrapedMSBuild(
+        log = RunnerUtilities.ExecBootstrapedMSBuild(
             $"\"{project}\" --hardened-graph -nr:false -v:minimal {arguments}"
                 + $" -p:MSBuildEmitActionGraph=\"{graph}\" -p:MSBuildActionTaskHost=\"{host}\""
                 + $" -p:MSBuildActionDotNetHost=\"{dotnet}\"",

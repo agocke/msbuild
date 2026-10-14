@@ -61,6 +61,7 @@ internal sealed class HardenedActionGraph
         }
 
         return receiver.IsPrimitive || receiver.IsEnum ||
+            (receiver.IsArray && string.Equals(member, nameof(Array.GetValue), StringComparison.OrdinalIgnoreCase)) ||
             name is "System.String" or "System.Math" or "System.MathF" or "System.Convert" or
                 "System.Decimal" or "System.Version" or "System.Guid" or "System.DateTime" or
                 "System.DateTimeOffset" or "System.TimeSpan" or "System.IO.Path" ||
