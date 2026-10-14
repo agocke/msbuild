@@ -418,5 +418,11 @@ echo
 echo "Composite SDK created at:"
 echo "  $output_dir"
 echo
-echo "Run a hardened build with:"
-echo "  $output_dir/msbuild-hardened <project> -restore --hardened-graph -m:1 -nr:false"
+echo "Restore separately with:"
+echo "  $output_dir/msbuild-hardened <project> -target:Restore -nr:false"
+echo
+echo "Construct an experimental action graph with:"
+echo "  $output_dir/msbuild-hardened <project> --hardened-graph -m:1 -nr:false \\"
+echo "    -p:MSBuildEmitActionGraph=<absolute-build.ninja> \\"
+echo "    -p:MSBuildActionTaskHost=<absolute-host.dll> \\"
+echo "    -p:MSBuildActionDotNetHost=<absolute-dotnet>"

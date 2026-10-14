@@ -7,12 +7,12 @@ hosts. This roadmap describes planned work, not implemented behavior.
 ## Current foundation
 
 - `HardenedTargetValidator` walks target bodies, tracks batching and
-  static/deferred values, and can execute Pure tasks through a callback.
+  static/deferred values, and constructs DeclaredIO invocations through a callback.
 - `HardenedTaskClassificationResolver` resolves implementation annotations.
   `HardenedDeclaredIOFootprint` records paths, not executable actions.
-- `RequestBuilder` normally validates and then enters ordinary `BuildTargets`.
-  With `MSBuildEmitActionGraph`, it publishes the constructed bundle and returns
-  without ordinary target execution.
+- In hardened mode, `RequestBuilder` requires graph/host configuration,
+  publishes the constructed bundle, and returns without ordinary `BuildTargets`.
+  Restore is a separate ordinary invocation, not a hardened-mode exception.
 - `TaskExecutionHost` depends on project, batching, and engine logging state.
 - Existing composite SDK overlays provide a starting point for compilation.
 - `MSBuild.ActionTaskHost` executes a hand-authored JSON invocation in a fresh
@@ -24,8 +24,7 @@ hosts. This roadmap describes planned work, not implemented behavior.
   unchanged regeneration, invalidation, and failure propagation.
 
 Reuse these pieces without introducing another target interpreter. Keep
-ordinary builds and existing validation behavior unchanged outside the new
-opt-in graph-generation path.
+ordinary builds unchanged outside the opt-in hardened graph-generation path.
 
 ## 1. Prove an engine-free task host
 
@@ -49,15 +48,16 @@ Migrate participating tasks and target invocations from the separate Pure
 contract to explicit `DeclaredInputs` and `DeclaredOutputs`. Empty lists permit
 construction-time execution with known parameters and ordinary `<Output>`
 mappings. Nonempty footprints remain unexecuted actions and cannot publish
-MSBuild return values. Existing public attributes need not be removed.
+MSBuild return values. Retire the branch-only Pure attribute, interface, and
+environment; reuse `TaskEnvironment` rather than a second context abstraction.
 
 **Done when:** a zero-I/O task's returned items and metadata can construct a
 later invocation, while missing declarations, unavailable parameters, and
 file-I/O output mappings fail before action side effects.
 
-Implemented in the opt-in emitter with annotated test tasks. Migrating the
-broader existing Pure task catalog and SDK overlays is still pending; the
-legacy validation path is unchanged.
+The existing construction-time task catalog now uses DeclaredIO and ordinary
+task context. Hardened mode has no validator-only execution path. The broader
+SDK overlays remain experimental and require graph-compatible adaptation.
 
 ## 3. Emit a concrete Ninja graph
 
@@ -107,6 +107,46 @@ Then test parallel execution where modeled dependencies permit it.
 The process fixture covers these behaviors with conservative action ordering.
 
 ## 5. Compile with the pinned SDK
+
+The explicit compiler fixture is implemented in
+`src/Samples/ActionGraphHelloWorld/HelloWorld.proj`. It uses the test assembly's
+audited `GraphCSharpCompileTask` to invoke the real `csc.dll` with explicit
+sources, references, compiler/runtime files, and one assembly output. A second
+standalone action writes the runtime configuration. MSBuild emits both actions
+without compiling; Ninja produces a runnable `HelloWorld.dll`.
+
+Process tests cover `Hello, World!`, a no-op second Ninja run, recompilation
+after a source edit without regenerating the graph, and a genuine compiler
+error blocking the runtime-config action. The compiler adapter rejects missing
+declarations for its explicit inputs/output and refuses execution with the
+MSBuild engine loaded. It is a fixture, not a general Roslyn task replacement.
+
+After a Release repository build, supply the installed .NET 11 runtime and
+reference-pack versions explicitly:
+
+```sh
+source artifacts/sdk-build-env.sh
+sdk_version="$(dotnet --version)"
+runtime_version="<installed .NET 11 runtime version>"
+reference_version="<installed .NET 11 reference-pack version>"
+
+dotnet msbuild src/Samples/ActionGraphHelloWorld/HelloWorld.proj --hardened-graph \
+  -p:MSBuildEmitActionGraph="$PWD/artifacts/hello-world/build.ninja" \
+  -p:MSBuildActionTaskHost="$PWD/artifacts/bin/MSBuild.ActionTaskHost/Release/net11.0/MSBuild.ActionTaskHost.dll" \
+  -p:MSBuildActionDotNetHost="$DOTNET_ROOT/dotnet" \
+  -p:CompilerDirectory="$DOTNET_ROOT/sdk/$sdk_version/Roslyn/bincore" \
+  -p:ReferenceAssemblyDirectory="$DOTNET_ROOT/packs/Microsoft.NETCore.App.Ref/$reference_version/ref/net11.0" \
+  -p:RuntimeDirectory="$DOTNET_ROOT/shared/Microsoft.NETCore.App/$runtime_version" \
+  -p:RuntimeVersion="$runtime_version"
+ninja -C artifacts/hello-world -f build.ninja -j1
+dotnet artifacts/hello-world/HelloWorld.dll
+```
+
+This bypasses SDK `Build` and reference-resolution targets. The neighboring
+`HelloWorld.csproj` records the SDK integration trial: ordinary restore works,
+but hardened evaluation encounters ambient SDK/workload discovery, and the
+stock Roslyn task lacks DeclaredIO annotations. Pure framework-parsing
+functions are supported; ambient discovery has not been allowed as a fallback.
 
 Use existing SDK overlays for a single-framework C# hello-world profile:
 

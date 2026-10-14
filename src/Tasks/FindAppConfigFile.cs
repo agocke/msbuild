@@ -161,26 +161,26 @@ namespace Microsoft.Build.Tasks
     }
 
     /// <summary>
-    /// Finds the app.config file using host path semantics from the engine-supplied Pure task environment
-    /// without mutating input items.
+    /// Finds the app.config file using host path semantics without mutating input items.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    [MSBuildPureTask]
-    public sealed class FindAppConfigFileWithDeterministicSemantics : FindAppConfigFile, IPureTask
+    [MSBuildDeclaredIOTask]
+    public sealed class FindAppConfigFileWithDeterministicSemantics : FindAppConfigFile
     {
-        private PureTaskEnvironment _pureTaskEnvironment;
+        /// <summary>
+        /// Gets or sets the declared file inputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; } = [];
 
-        /// <inheritdoc />
-        public PureTaskEnvironment PureTaskEnvironment
-        {
-            get => _pureTaskEnvironment ??= Microsoft.Build.Framework.PureTaskEnvironment.Fallback;
-            set => _pureTaskEnvironment = value;
-        }
+        /// <summary>
+        /// Gets or sets the declared file outputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; } = [];
 
         private protected override string GetFileName(string itemSpec)
         {
             int fileNameStart = itemSpec.LastIndexOf('/');
-            if (PureTaskEnvironment.UsesWindowsPathSemantics)
+            if (NativeMethodsShared.IsWindows)
             {
                 fileNameStart = Math.Max(fileNameStart, itemSpec.LastIndexOf('\\'));
             }

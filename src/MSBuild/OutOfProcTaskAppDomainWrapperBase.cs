@@ -368,12 +368,6 @@ namespace Microsoft.Build.CommandLine
                 }
 
                 wrappedTask.BuildEngine = oopTaskHostNode;
-
-                if (wrappedTask is IPureTask pureTask)
-                {
-                    pureTask.PureTaskEnvironment = PureTaskEnvironment.Create(
-                        new AbsolutePath(projectDirectory));
-                }
             }
             catch (Exception e) when (!ExceptionHandling.IsCriticalException(e))
             {

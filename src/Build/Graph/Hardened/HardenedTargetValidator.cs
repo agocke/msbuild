@@ -23,7 +23,6 @@ namespace Microsoft.Build.Graph.Hardened;
 
 internal enum HardenedTaskClassification
 {
-    Pure,
     DeclaredIO,
     Unaudited,
 }
@@ -59,19 +58,6 @@ internal sealed class HardenedTargetValidator
         "VolumeSeparatorChar",
     };
 
-    private static readonly HashSet<string> s_staticMSBuildParameters = new(
-        [
-            "Projects",
-            "Targets",
-            "Properties",
-            "RemoveProperties",
-            "SkipNonexistentProjects",
-            "SkipNonexistentTargets",
-            "ToolsVersion",
-            "TargetAndPropertyListSeparators",
-        ],
-        MSBuildNameIgnoreCaseComparer.Default);
-
     private static readonly string[] s_staticMSBuildProjectMetadata =
     [
         ItemMetadataNames.PropertiesMetadataName,
@@ -83,8 +69,7 @@ internal sealed class HardenedTargetValidator
 
     private readonly Dictionary<string, HardenedTaskDescriptor> _taskDescriptors;
     private readonly HardenedTaskClassifier? _taskClassifier;
-    private readonly HardenedPureTaskExecutor? _pureTaskExecutor;
-    private readonly bool _constructActions;
+    private readonly HardenedConstructionTaskExecutor? _constructionTaskExecutor;
     private readonly List<InvalidProjectFileException> _diagnostics = [];
     private readonly List<HardenedDeclaredIOFootprint> _declaredIOFootprints = [];
     private readonly HashSet<string> _diagnosticKeys = new(StringComparer.Ordinal);
@@ -101,9 +86,9 @@ internal sealed class HardenedTargetValidator
 
     internal HardenedTargetValidator(
         IReadOnlyDictionary<string, HardenedTaskClassification> taskClassifications,
-        HardenedPureTaskExecutor? pureTaskExecutor = null)
+        HardenedConstructionTaskExecutor? constructionTaskExecutor = null)
     {
-        _pureTaskExecutor = pureTaskExecutor;
+        _constructionTaskExecutor = constructionTaskExecutor;
         _taskDescriptors = new Dictionary<string, HardenedTaskDescriptor>(
             taskClassifications.Count,
             MSBuildNameIgnoreCaseComparer.Default);
@@ -118,9 +103,9 @@ internal sealed class HardenedTargetValidator
 
     internal HardenedTargetValidator(
         IReadOnlyDictionary<string, HardenedTaskDescriptor> taskDescriptors,
-        HardenedPureTaskExecutor? pureTaskExecutor = null)
+        HardenedConstructionTaskExecutor? constructionTaskExecutor = null)
     {
-        _pureTaskExecutor = pureTaskExecutor;
+        _constructionTaskExecutor = constructionTaskExecutor;
         _taskDescriptors = new Dictionary<string, HardenedTaskDescriptor>(
             taskDescriptors.Count,
             MSBuildNameIgnoreCaseComparer.Default);
@@ -133,12 +118,10 @@ internal sealed class HardenedTargetValidator
 
     internal HardenedTargetValidator(
         HardenedTaskClassifier taskClassifier,
-        HardenedPureTaskExecutor? pureTaskExecutor = null,
-        bool constructActions = false)
-        : this(new Dictionary<string, HardenedTaskDescriptor>(), pureTaskExecutor)
+        HardenedConstructionTaskExecutor? constructionTaskExecutor = null)
+        : this(new Dictionary<string, HardenedTaskDescriptor>(), constructionTaskExecutor)
     {
         _taskClassifier = taskClassifier;
-        _constructActions = constructActions;
     }
 
     internal HardenedTargetValidator()
@@ -275,7 +258,7 @@ internal sealed class HardenedTargetValidator
 
         if (targetExecutes)
         {
-            if (_constructActions && target.OnErrorChildren.Count != 0)
+            if (target.OnErrorChildren.Count != 0)
             {
                 ReportUnsupported(target.Location, "OnError", "action graph construction");
             }
@@ -829,25 +812,17 @@ internal sealed class HardenedTargetValidator
 
         foreach (KeyValuePair<string, (string, ElementLocation)> parameter in task.TestGetParameters)
         {
-            bool requiresStatic = _constructActions || classification == HardenedTaskClassification.Pure ||
-                isCallTarget ||
-                (isMSBuild && s_staticMSBuildParameters.Contains(parameter.Key));
             ExpressionValidationResult parameterResult = ValidateExpression(
                 task,
                 parameter.Value.Item1,
                 parameter.Value.Item2,
                 $"parameter '{parameter.Key}' of task '{task.Name}'",
-                requireStatic: requiresStatic,
+                requireStatic: true,
                 isCondition: false,
                 metadataBatchingValidated: true,
-                includeItemMetadata: classification == HardenedTaskClassification.Pure ||
-                    (!isCallTarget && !isMSBuild));
+                includeItemMetadata: !isCallTarget);
 
-            if (requiresStatic ||
-                parameterResult.State.Availability == ValueAvailability.Blocked)
-            {
-                taskControlState = ValueState.Combine(taskControlState, parameterResult.State);
-            }
+            taskControlState = ValueState.Combine(taskControlState, parameterResult.State);
         }
 
         if (isMSBuild)
@@ -861,22 +836,18 @@ internal sealed class HardenedTargetValidator
                 ? ResolveDeclaredIO(task, taskDescriptor)
                 : ValueState.Static;
         taskControlState = ValueState.Combine(taskControlState, declaredIOState);
-        bool zeroIO = _constructActions &&
-            _declaredIOFootprints.Count > footprintCount &&
+        bool zeroIO = _declaredIOFootprints.Count > footprintCount &&
             _declaredIOFootprints[footprintCount] is { InputPaths.Count: 0, OutputPaths.Count: 0 };
 
-        if (_constructActions)
+        if (classification != HardenedTaskClassification.DeclaredIO && !isCallTarget)
         {
-            if (classification != HardenedTaskClassification.DeclaredIO && !isCallTarget)
-            {
-                ReportUnsupported(task.Location, $"task '{task.Name}' without explicit DeclaredIO", "action graph construction");
-            }
+            ReportUnsupported(task.Location, $"task '{task.Name}' without explicit DeclaredIO", "action graph construction");
+        }
 
-            if (!string.IsNullOrEmpty(task.MSBuildRuntime) || !string.IsNullOrEmpty(task.MSBuildArchitecture) ||
-                !string.IsNullOrEmpty(task.ContinueOnError))
-            {
-                ReportUnsupported(task.Location, "task hosting or ContinueOnError overrides", "action graph construction");
-            }
+        if (!string.IsNullOrEmpty(task.MSBuildRuntime) || !string.IsNullOrEmpty(task.MSBuildArchitecture) ||
+            !string.IsNullOrEmpty(task.ContinueOnError))
+        {
+            ReportUnsupported(task.Location, "task hosting or ContinueOnError overrides", "action graph construction");
         }
 
         ValueState? intrinsicTaskOutputState = null;
@@ -899,14 +870,13 @@ internal sealed class HardenedTargetValidator
             }
         }
 
-        HardenedPureTaskExecutor? pureTaskExecutor = _pureTaskExecutor;
-        bool pureTaskExecuted = false;
-        if (pureTaskExecutor is not null && taskControlState.IsStatic &&
-            ((_constructActions && classification == HardenedTaskClassification.DeclaredIO && _diagnostics.Count == 0) ||
-             (!_constructActions && classification == HardenedTaskClassification.Pure)))
+        HardenedConstructionTaskExecutor? constructionTaskExecutor = _constructionTaskExecutor;
+        bool zeroIOTaskExecuted = false;
+        if (constructionTaskExecutor is not null && taskControlState.IsStatic &&
+            classification == HardenedTaskClassification.DeclaredIO && _diagnostics.Count == 0)
         {
-            pureTaskExecutor(target, task, ValidationLookup);
-            pureTaskExecuted = !_constructActions || zeroIO;
+            constructionTaskExecutor(target, task, ValidationLookup);
+            zeroIOTaskExecuted = zeroIO;
         }
 
         foreach (ProjectTaskInstanceChild output in task.Outputs)
@@ -1023,7 +993,7 @@ internal sealed class HardenedTargetValidator
             {
                 outputState = intrinsicState.WithOrigin($"output '{resolvedOutputTaskParameter}' of task '{task.Name}'");
             }
-            else if (pureTaskExecuted)
+            else if (zeroIOTaskExecuted)
             {
                 outputState = ValueState.Static;
             }
@@ -1035,7 +1005,7 @@ internal sealed class HardenedTargetValidator
             {
                 case ProjectTaskOutputPropertyInstance propertyOutput:
                     callTargetScope?.CallerAssignedProperties.Add(destination);
-                    if (pureTaskExecuted && outputState.IsStatic)
+                    if (zeroIOTaskExecuted && outputState.IsStatic)
                     {
                         Context.SetConcreteProperty(
                             destination,
@@ -1059,7 +1029,7 @@ internal sealed class HardenedTargetValidator
         }
 
         callTargetScope?.CallerAssignedProperties.Add(ReservedPropertyNames.lastTaskResult);
-        if (pureTaskExecuted || isStaticallyEmptyMSBuild)
+        if (zeroIOTaskExecuted || isStaticallyEmptyMSBuild)
         {
             Context.SetConcreteProperty(
                 ReservedPropertyNames.lastTaskResult,
@@ -1076,7 +1046,7 @@ internal sealed class HardenedTargetValidator
 
         return new TaskValidationResult(
             canStopOnFailure,
-            Executed: !pureTaskExecuted && !isStaticallyEmptyMSBuild,
+            Executed: !zeroIOTaskExecuted && !isStaticallyEmptyMSBuild,
             callTargetScope?.Clone());
     }
 

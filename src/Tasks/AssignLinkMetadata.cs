@@ -15,10 +15,18 @@ namespace Microsoft.Build.Tasks
     /// Task to assign a reasonable "Link" metadata to the provided items.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    [MSBuildPureTask]
-    public class AssignLinkMetadata : TaskExtension, IPureTask
+    [MSBuildDeclaredIOTask]
+    public class AssignLinkMetadata : TaskExtension, IMultiThreadableTask
     {
-        private PureTaskEnvironment _pureTaskEnvironment;
+        /// <summary>
+        /// Gets or sets the declared file inputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; } = [];
+
+        /// <summary>
+        /// Gets or sets the declared file outputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; } = [];
 
         /// <summary>
         /// The set of items to assign metadata to
@@ -31,12 +39,10 @@ namespace Microsoft.Build.Tasks
         [Output]
         public ITaskItem[] OutputItems { get; set; }
 
-        /// <inheritdoc />
-        public PureTaskEnvironment PureTaskEnvironment
-        {
-            get => _pureTaskEnvironment ??= Microsoft.Build.Framework.PureTaskEnvironment.Fallback;
-            set => _pureTaskEnvironment = value;
-        }
+        /// <summary>
+        /// Gets or sets the task execution environment for thread-safe path resolution.
+        /// </summary>
+        public TaskEnvironment TaskEnvironment { get; set; } = TaskEnvironment.Fallback;
 
         /// <summary>
         /// Sets "Link" metadata on any item where the project file in which they
@@ -86,7 +92,7 @@ namespace Microsoft.Build.Tasks
         private string GetDirectory(string path)
         {
             int separator = path.LastIndexOf('/');
-            if (PureTaskEnvironment.UsesWindowsPathSemantics)
+            if (NativeMethodsShared.IsWindows)
             {
                 separator = Math.Max(separator, path.LastIndexOf('\\'));
             }
@@ -100,12 +106,14 @@ namespace Microsoft.Build.Tasks
         {
             try
             {
-                if (PureTaskEnvironment.UsesWindowsPathSemantics)
+                if (NativeMethodsShared.IsWindows)
                 {
                     path = path.Replace('/', '\\');
                 }
 
-                return Path.GetFullPath(PureTaskEnvironment.GetAbsolutePath(path));
+#pragma warning disable MSBuildTask0002 // TaskEnvironment resolves the path; GetFullPath only canonicalizes it.
+                return Path.GetFullPath(TaskEnvironment.GetAbsolutePath(path));
+#pragma warning restore MSBuildTask0002
             }
             catch (Exception e) when (ExceptionHandling.IsIoRelatedException(e))
             {

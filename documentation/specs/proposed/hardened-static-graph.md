@@ -211,11 +211,18 @@ already-running independent commands may finish.
 
 The implemented emitter initially supports Unix shell commands, one project
 per invocation, conservative action ordering, and dependencies on earlier
-producers. It rejects forward-produced inputs, legacy Pure-only tasks,
+producers. It rejects forward-produced inputs, tasks without DeclaredIO,
 cross-project `MSBuild` tasks, hosting/ContinueOnError overrides, and `OnError`.
 `DependsOnTargets`, before/after targets, batching, and supported `CallTarget`
 construction use the existing hardened walk. Participating zero-I/O tasks
-must use explicit DeclaredIO, even while the legacy validator retains Pure.
+must use explicit DeclaredIO with empty declarations. The separate Pure
+annotation, interface, and environment have been retired; participating tasks
+use the existing `TaskEnvironment` for project-directory context.
+
+`--hardened-graph` always constructs a graph. `MSBuildEmitActionGraph`,
+`MSBuildActionTaskHost`, and `MSBuildActionDotNetHost` must be configured; there
+is no validation-then-execution fallback. Restore must run separately without
+`--hardened-graph`, before starting construction.
 
 Manifests have content-derived names and are written before the Ninja entry
 point is atomically replaced; unchanged manifests and entry points retain
@@ -241,6 +248,10 @@ Synthetic success stamps must not hide unsupported filesystem effects.
 The first milestone is a small task chain, then a pinned framework-only C#
 compilation and a two-project build. Start with conservative ordering and
 `ninja -j1`; allow concurrency only where dependencies establish its safety.
+The explicit Hello World fixture now demonstrates real compiler execution,
+runtime-config generation, source invalidation, and compiler failure through
+standalone hosts. It does not yet admit an ordinary SDK `Build` target chain;
+see the [prototype roadmap](hardened-static-graph-implementation.md#5-compile-with-the-pinned-sdk).
 
 Content caching, generalized fetch, deferred value flow, richer failure
 handling, relocation, automatic regeneration, and persistent analysis are

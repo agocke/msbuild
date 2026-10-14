@@ -1242,11 +1242,16 @@ namespace Microsoft.Build.BackEnd
                     _requestEntry.RequestConfiguration.Project.ProjectFileLocation, "NoTargetSpecified");
 
                 ProjectInstance actionProject = _requestEntry.RequestConfiguration.Project;
-                bool emitActions = !isRestoreSubmission && !string.IsNullOrEmpty(actionProject.GetPropertyValue("MSBuildEmitActionGraph"));
+                bool emitActions = !string.IsNullOrEmpty(actionProject.GetPropertyValue("MSBuildEmitActionGraph"));
                 ProjectErrorUtilities.VerifyThrowInvalidProject(
                     !emitActions || _componentHost.BuildParameters.HardenedGraphValidation,
                     actionProject.ProjectFileLocation, "HardenedGraphUnsupportedConstruct",
                     "MSBuildEmitActionGraph without --hardened-graph", "action graph construction");
+                ProjectErrorUtilities.VerifyThrowInvalidProject(
+                    !_componentHost.BuildParameters.HardenedGraphValidation || (emitActions && !isRestoreSubmission),
+                    actionProject.ProjectFileLocation, "HardenedGraphUnsupportedConstruct",
+                    isRestoreSubmission ? "restore during action graph construction" : "--hardened-graph without MSBuildEmitActionGraph",
+                    "action graph construction");
                 if (emitActions)
                 {
                     _requestEntry.ActionGraph = new HardenedActionGraph(actionProject, _requestEntry.TaskEnvironment);
@@ -1262,64 +1267,61 @@ namespace Microsoft.Build.BackEnd
                             "true",
                             mayBeReserved: true));
 
-                    // Restore produces imported graph inputs for the subsequent hardened build.
-                    // Until restore itself is modeled, expose the hardened property but execute restore ordinarily.
-                    if (!isRestoreSubmission)
+                    HardenedItemOperationPlan itemOperationPlan = new(
+                        GetHardenedWorkspaceRoot(project));
+                    ITaskBuilder constructionTaskBuilder =
+                        (ITaskBuilder)_componentHost.GetComponent(BuildComponentType.TaskBuilder);
+                    IReadOnlyList<InvalidProjectFileException> diagnostics;
+                    TaskEnvironment originalEnvironment = _requestEntry.TaskEnvironment;
+                    string originalThreadDirectory = FileUtilities.CurrentThreadWorkingDirectory;
+                    TaskEnvironment constructionEnvironment = _requestEntry.ActionGraph.CreateConstructionEnvironment();
+                    _requestEntry.TaskEnvironment = constructionEnvironment;
+                    try
                     {
-                        HardenedItemOperationPlan itemOperationPlan = new(
-                            GetHardenedWorkspaceRoot(project));
-                        ITaskBuilder pureTaskBuilder =
-                            (ITaskBuilder)_componentHost.GetComponent(BuildComponentType.TaskBuilder);
-                        IReadOnlyList<InvalidProjectFileException> diagnostics;
-                        try
-                        {
-                            HardenedTargetValidator validator = new(
-                                (task, taskIdentityParameters) =>
-                                    HardenedTaskClassificationResolver.Classify(
-                                        project,
-                                        _projectLoggingContext,
-                                        task,
-                                        taskIdentityParameters),
-                                (target, task, lookup) =>
-                                    ExecuteHardenedPureTask(pureTaskBuilder, target, task, lookup),
-                                constructActions: emitActions);
-                            diagnostics = validator.Validate(
+                        HardenedTargetValidator validator = new(
+                            (task, taskIdentityParameters) =>
+                                HardenedTaskClassificationResolver.Classify(
                                     project,
-                                    baseLookup,
-                                    allTargets.Select(target => target.name),
-                                    itemOperationPlan);
-                        }
-                        finally
-                        {
-                            ((IBuildComponent)pureTaskBuilder).ShutdownComponent();
-                        }
-
-                        if (diagnostics.Count > 0)
-                        {
-                            foreach (InvalidProjectFileException diagnostic in diagnostics)
-                            {
-                                _projectLoggingContext.LogInvalidProjectFileError(diagnostic);
-                            }
-
-                            throw diagnostics[0];
-                        }
-
-                        baseLookup.ConfigureHardenedItemOperationPlan(itemOperationPlan);
-                        if (emitActions)
-                        {
-                            _requestEntry.ActionGraph.Publish();
-                            BuildResult graphResult = new(_requestEntry.Request);
-                            foreach (var target in allTargets)
-                            {
-                                graphResult.AddResultsForTarget(target.name, new TargetResult(
-                                    Array.Empty<ProjectItemInstance.TaskItem>(),
-                                    new WorkUnitResult(WorkUnitResultCode.Success, WorkUnitActionCode.Continue, null)));
-                            }
-
-                            graphResult.EvaluationId = project.EvaluationId;
-                            return graphResult;
-                        }
+                                    _projectLoggingContext,
+                                    task,
+                                    taskIdentityParameters),
+                            (target, task, lookup) =>
+                                ExecuteHardenedConstructionTask(constructionTaskBuilder, target, task, lookup));
+                        diagnostics = validator.Validate(
+                            project,
+                            baseLookup,
+                            allTargets.Select(target => target.name),
+                            itemOperationPlan);
                     }
+                    finally
+                    {
+                        _requestEntry.TaskEnvironment = originalEnvironment;
+                        constructionEnvironment.Dispose();
+                        FileUtilities.CurrentThreadWorkingDirectory = originalThreadDirectory;
+                        ((IBuildComponent)constructionTaskBuilder).ShutdownComponent();
+                    }
+
+                    if (diagnostics.Count > 0)
+                    {
+                        foreach (InvalidProjectFileException diagnostic in diagnostics)
+                        {
+                            _projectLoggingContext.LogInvalidProjectFileError(diagnostic);
+                        }
+
+                        throw diagnostics[0];
+                    }
+
+                    _requestEntry.ActionGraph.Publish();
+                    BuildResult graphResult = new(_requestEntry.Request);
+                    foreach (var target in allTargets)
+                    {
+                        graphResult.AddResultsForTarget(target.name, new TargetResult(
+                            Array.Empty<ProjectItemInstance.TaskItem>(),
+                            new WorkUnitResult(WorkUnitResultCode.Success, WorkUnitActionCode.Continue, null)));
+                    }
+
+                    graphResult.EvaluationId = project.EvaluationId;
+                    return graphResult;
                 }
 
                 // Set the current directory to that required by the project.
@@ -1369,7 +1371,7 @@ namespace Microsoft.Build.BackEnd
                 }
             }
 
-            void ExecuteHardenedPureTask(
+            void ExecuteHardenedConstructionTask(
                 ITaskBuilder taskBuilder,
                 ProjectTargetInstance target,
                 ProjectTaskInstance task,

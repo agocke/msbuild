@@ -42,13 +42,6 @@ namespace Microsoft.Build.UnitTests
         }
 
         [Fact]
-        public void MSBuildPureTaskAttributeIsNotInherited()
-        {
-            typeof(PureTask).GetCustomAttribute<MSBuildPureTaskAttribute>().ShouldNotBeNull();
-            typeof(DerivedTask).GetCustomAttribute<MSBuildPureTaskAttribute>().ShouldBeNull();
-        }
-
-        [Fact]
         public void MSBuildDeclaredIOAttributesAreNotInherited()
         {
             MSBuildDeclaredIOTaskAttribute task =
@@ -90,11 +83,6 @@ namespace Microsoft.Build.UnitTests
             }
         }
     }
-
-    [MSBuildPureTask]
-    internal class PureTask;
-
-    internal sealed class DerivedTask : PureTask;
 
     [MSBuildDeclaredIOTask]
     [MSBuildDeclaredIORequiresUnset("LegacyDirectory")]

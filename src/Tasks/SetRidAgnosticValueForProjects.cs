@@ -10,9 +10,19 @@ using Microsoft.Build.Utilities;
 namespace Microsoft.Build.Tasks
 {
     [MSBuildMultiThreadableTask]
-    [MSBuildPureTask]
+    [MSBuildDeclaredIOTask]
     public sealed class SetRidAgnosticValueForProjects : TaskExtension
     {
+        /// <summary>
+        /// Gets or sets the declared file inputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; } = [];
+
+        /// <summary>
+        /// Gets or sets the declared file outputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; } = [];
+
         public ITaskItem[] Projects { get; set; } = Array.Empty<ITaskItem>();
 
         [Output]

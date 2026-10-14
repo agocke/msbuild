@@ -12,11 +12,11 @@ namespace Microsoft.Build.UnitTests
     public sealed class SetRidAgnosticValueForProjects_Tests
     {
         [Fact]
-        public void IsMarkedPure()
+        public void IsMarkedDeclaredIO()
         {
             Attribute.IsDefined(
                 typeof(SetRidAgnosticValueForProjects),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeTrue();
         }
 

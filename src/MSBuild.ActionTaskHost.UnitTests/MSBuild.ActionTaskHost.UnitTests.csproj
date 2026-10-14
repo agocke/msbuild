@@ -6,6 +6,10 @@
     <RootNamespace>Microsoft.Build.ActionTaskHost.UnitTests</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <None Include="..\Samples\ActionGraphHelloWorld\HelloWorld.proj"
+          Link="TestResources\HelloWorld.proj" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Samples\ActionGraphHelloWorld\Program.cs"
+          Link="TestResources\Program.cs" CopyToOutputDirectory="PreserveNewest" />
     <PackageReference Include="Shouldly" />
     <ProjectReference Include="..\MSBuild.ActionTaskHost\MSBuild.ActionTaskHost.csproj" />
     <ProjectReference Include="..\Tasks\Microsoft.Build.Tasks.csproj" />

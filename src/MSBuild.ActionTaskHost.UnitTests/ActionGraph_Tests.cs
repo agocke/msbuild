@@ -2,6 +2,8 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Security;
 using System.Text.Json;
@@ -16,6 +18,121 @@ namespace Microsoft.Build.ActionTaskHost.UnitTests;
 public sealed class ActionGraph_Tests(ITestOutputHelper output)
 {
     private readonly ITestOutputHelper _output = output;
+
+    [UnixOnlyTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NinjaCompilesAndRunsHelloWorldWithoutTheEngine(bool invalidSource)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder(subfolder: "compiler $ space'quote").Path;
+        string source = Path.Combine(directory, "Program.cs");
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "TestResources", "Program.cs"), source);
+        if (invalidSource)
+        {
+            File.WriteAllText(source, "System.Console.WriteLine(DoesNotExist);");
+        }
+
+        string dotnet = RunnerUtilities.BootstrapDotnetHostPath;
+        string dotnetDirectory = Path.GetDirectoryName(dotnet)!;
+        string framework = Path.GetFileName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar));
+        string runtimeDirectory = Directory.GetDirectories(
+            Path.Combine(dotnetDirectory, "shared", "Microsoft.NETCore.App"),
+            framework["net".Length..] + ".*").ShouldHaveSingleItem();
+        string runtimeVersion = Path.GetFileName(runtimeDirectory);
+        string compilerDirectory = Path.Combine(dotnetDirectory, "sdk", RunnerUtilities.BootstrapSdkVersion, "Roslyn", "bincore");
+        string referencePack = Directory.GetDirectories(
+            Path.Combine(dotnetDirectory, "packs", "Microsoft.NETCore.App.Ref"),
+            framework["net".Length..] + ".*").ShouldHaveSingleItem();
+        string references = Path.Combine(referencePack, "ref", framework);
+        Directory.Exists(references).ShouldBeTrue();
+        string project = Path.Combine(AppContext.BaseDirectory, "TestResources", "HelloWorld.proj");
+        string graph = Path.Combine(directory, "build.ninja");
+        string assembly = Path.Combine(directory, "HelloWorld.dll");
+        string runtimeConfig = Path.Combine(directory, "HelloWorld.runtimeconfig.json");
+        string arguments = $"-p:CompilerTaskAssembly=\"{typeof(GraphCSharpCompileTask).Assembly.Location}\""
+            + $" -p:CompilerDirectory=\"{compilerDirectory}\""
+            + $" -p:ReferenceAssemblyDirectory=\"{references}\""
+            + $" -p:RuntimeDirectory=\"{runtimeDirectory}\""
+            + $" -p:RuntimeVersion=\"{runtimeVersion}\""
+            + $" -p:HelloWorldSource=\"{source}\""
+            + $" -p:OutputDirectory=\"{directory}\"";
+
+        Generate(project, graph, arguments).ShouldBeTrue();
+        Directory.GetFiles(graph + ".actions", "*.json").Length.ShouldBe(2);
+        File.Exists(assembly).ShouldBeFalse();
+        File.Exists(runtimeConfig).ShouldBeFalse();
+
+        string compilation = Ninja(graph, out bool success);
+        if (invalidSource)
+        {
+            success.ShouldBeFalse();
+            compilation.ShouldContain("CS0103");
+            File.Exists(assembly).ShouldBeFalse();
+            File.Exists(runtimeConfig).ShouldBeFalse();
+            return;
+        }
+
+        success.ShouldBeTrue();
+        string result = RunnerUtilities.RunProcessAndGetOutput(
+            dotnet, $"\"{assembly}\"", out success, outputHelper: _output,
+            attachProcessId: false, environmentVariables: RunnerUtilities.GetBootstrapMSBuildEnvironmentVariables());
+        success.ShouldBeTrue();
+        result.Trim().ShouldBe("Hello, World!");
+        DateTime assemblyWrite = File.GetLastWriteTimeUtc(assembly);
+        DateTime configWrite = File.GetLastWriteTimeUtc(runtimeConfig);
+
+        string noOp = Ninja(graph, out success);
+        success.ShouldBeTrue();
+        noOp.ShouldContain("no work to do");
+        File.GetLastWriteTimeUtc(assembly).ShouldBe(assemblyWrite);
+        File.GetLastWriteTimeUtc(runtimeConfig).ShouldBe(configWrite);
+
+        File.WriteAllText(source, """System.Console.WriteLine("Hello again!");""");
+        File.SetLastWriteTimeUtc(source, assemblyWrite.AddSeconds(2));
+        Ninja(graph, out success);
+        success.ShouldBeTrue();
+        result = RunnerUtilities.RunProcessAndGetOutput(
+            dotnet, $"\"{assembly}\"", out success, outputHelper: _output,
+            attachProcessId: false, environmentVariables: RunnerUtilities.GetBootstrapMSBuildEnvironmentVariables());
+        success.ShouldBeTrue();
+        result.Trim().ShouldBe("Hello again!");
+        File.GetLastWriteTimeUtc(runtimeConfig).ShouldBe(configWrite);
+    }
+
+    [UnixOnlyTheory]
+    [InlineData("$([MSBuild]::GetTargetFrameworkIdentifier('net11.0'))", ".NETCoreApp")]
+    [InlineData("$([MSBuild]::GetTargetFrameworkVersion('net11.0'))", "11.0")]
+    [InlineData("$([MSBuild]::IsTargetFrameworkCompatible('net11.0', 'netstandard2.0'))", "True")]
+    [InlineData("$([MSBuild]::GetTargetPlatformIdentifier('net11.0-windows10.0'))", "windows")]
+    [InlineData("$([MSBuild]::GetTargetPlatformVersion('net11.0-windows10.0'))", "10.0")]
+    [InlineData("$([MSBuild]::FilterTargetFrameworks('net11.0;netstandard2.0', 'net11.0'))", "net11.0")]
+    public void AllowsFrameworkParsingOverDeclaredValues(string expression, string expected)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        string contents = File.ReadAllText(project);
+        contents = contents.Replace("<Target Name=\"Build\"",
+            $"<PropertyGroup><Parsed>{expression}</Parsed></PropertyGroup><Target Name=\"Build\"");
+        contents = contents.Replace("</GraphValueTask>", """
+            </GraphValueTask>
+            <ItemGroup>
+              <Values>
+                <Tag>$(Parsed)</Tag>
+              </Values>
+            </ItemGroup>
+            """);
+        File.WriteAllText(project, contents);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph).ShouldBeTrue();
+        File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
+        Ninja(graph, out bool success);
+
+        success.ShouldBeTrue();
+        File.ReadAllText(Path.Combine(directory, "first.txt")).ShouldBe("literal%3B;value|" + expected);
+    }
 
     [UnixOnlyFact]
     public void EmitsWithoutExecutingActionsAndNinjaBuildsIncrementally()
@@ -36,6 +153,14 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
         using (JsonDocument invocation = JsonDocument.Parse(File.ReadAllText(manifests[0])))
         {
             invocation.RootElement.GetProperty("taskType").GetString().ShouldBe(typeof(GraphTransformTask).FullName);
+        }
+        foreach (string manifest in manifests)
+        {
+            using JsonDocument invocation = JsonDocument.Parse(File.ReadAllText(manifest));
+            if (invocation.RootElement.GetProperty("parameters").TryGetProperty("Text", out JsonElement text))
+            {
+                text[0].GetProperty("metadata").GetProperty("ConstructionDirectory").GetString().ShouldBe(directory);
+            }
         }
 
         Ninja(graph, out bool success);
@@ -66,12 +191,14 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
     [InlineData("Unknown")]
     [InlineData("OutputMapping")]
     [InlineData("MissingDeclaration")]
+    [InlineData("MissingZeroDeclaration")]
     [InlineData("ConflictingOutputs")]
     [InlineData("Exists")]
     [InlineData("PropertyIO")]
     [InlineData("EvaluationIO")]
     [InlineData("ContinueOnError")]
     [InlineData("OnError")]
+    [InlineData("Status")]
     public void RejectsUnsupportedGraphsWithoutPublishingOrExecutingActions(string invalid)
     {
         using TestEnvironment env = TestEnvironment.Create(_output);
@@ -83,12 +210,14 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
             "Unknown" => contents.Replace("</Target>", "<Exec Command=\"touch forbidden.txt\" /></Target>"),
             "OutputMapping" => contents.Replace("DeclaredOutputs=\"first.txt\" />", "DeclaredOutputs=\"first.txt\"><Output TaskParameter=\"Text\" PropertyName=\"Bad\" /></GraphTransformTask>"),
             "MissingDeclaration" => contents.Replace("DeclaredOutputs=\"first.txt\"", ""),
+            "MissingZeroDeclaration" => contents.Replace("<GraphValueTask DeclaredInputs=\"\" DeclaredOutputs=\"\">", "<GraphValueTask DeclaredInputs=\"\">"),
             "ConflictingOutputs" => contents.Replace("DeclaredOutputs=\"second.txt\"", "DeclaredOutputs=\"first.txt\""),
             "Exists" => contents.Replace("<Target Name=\"Build\"", "<Target Name=\"Build\" Condition=\"Exists('first.txt')\""),
             "PropertyIO" => contents.Replace("<Target Name=\"Build\"", "<Target Name=\"Build\" Condition=\"$([System.IO.File]::Exists('first.txt'))\""),
             "EvaluationIO" => contents.Replace("<Target Name=\"Build\"", "<PropertyGroup><Bad>$([System.IO.File]::WriteAllText('$(MSBuildProjectDirectory)/forbidden.txt', 'bad'))</Bad></PropertyGroup><Target Name=\"Build\""),
             "ContinueOnError" => contents.Replace("Text=\"@(Values)\"", "Text=\"@(Values)\" ContinueOnError=\"true\""),
             "OnError" => contents.Replace("</Target>", "<OnError ExecuteTargets=\"Failure\" /></Target><Target Name=\"Failure\" />"),
+            "Status" => contents.Replace("Source=\"first.txt\"", "Source=\"first.txt\" Condition=\"'$(MSBuildLastTaskResult)' == 'true'\""),
             _ => throw new InvalidOperationException(invalid),
         };
         File.WriteAllText(project, contents);
@@ -101,6 +230,90 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
         File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
         File.Exists(Path.Combine(directory, "second.txt")).ShouldBeFalse();
         File.Exists(Path.Combine(directory, "forbidden.txt")).ShouldBeFalse();
+    }
+
+    [UnixOnlyTheory]
+    [InlineData("--hardened-graph")]
+    [InlineData("--hardened-graph -p:MSBuildIsRestoring=true")]
+    [InlineData("--hardened-graph -restore")]
+    public void HardenedModeRequiresGraphEmissionWithoutExecutingTasks(string arguments)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        File.WriteAllText(project, File.ReadAllText(project).Replace("</Project>", """
+            <Target Name="Restore">
+              <WriteLinesToFile File="forbidden.txt" Lines="restored" Overwrite="true" />
+            </Target>
+            </Project>
+            """));
+
+        string log = RunnerUtilities.ExecBootstrapedMSBuild(
+            $"\"{project}\" {arguments} -nr:false -v:minimal",
+            out bool success, outputHelper: _output);
+
+        success.ShouldBeFalse();
+        log.ShouldContain("MSB4286");
+        File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
+        File.Exists(Path.Combine(directory, "second.txt")).ShouldBeFalse();
+        File.Exists(Path.Combine(directory, "forbidden.txt")).ShouldBeFalse();
+    }
+
+    [UnixOnlyFact]
+    public void RejectsCombinedRestoreAndConstructionWithGraphConfiguration()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        File.WriteAllText(project, File.ReadAllText(project).Replace("</Project>", """
+            <Target Name="Restore">
+              <WriteLinesToFile File="forbidden.txt" Lines="restored" Overwrite="true" />
+            </Target>
+            </Project>
+            """));
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph, "-restore").ShouldBeFalse();
+
+        File.Exists(graph).ShouldBeFalse();
+        Directory.Exists(graph + ".actions").ShouldBeFalse();
+        File.Exists(Path.Combine(directory, "forbidden.txt")).ShouldBeFalse();
+    }
+
+    [UnixOnlyFact]
+    public void MigratedZeroIOTaskUsesProjectContextAndSingleNode()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        string contents = File.ReadAllText(project).Replace("Text=\"@(Values)\"", "Text=\"@(Assigned)\"");
+        contents = contents.Replace("<GraphTransformTask File=\"first.txt\"", """
+            <ItemGroup>
+              <Input Include="folder/file.txt" />
+            </ItemGroup>
+            <AssignTargetPathWithProjectDirectory
+                Files="@(Input)" RootFolder="$(MSBuildProjectDirectory)"
+                DeclaredInputs="" DeclaredOutputs="">
+              <Output TaskParameter="AssignedFiles" ItemName="Assigned" />
+            </AssignTargetPathWithProjectDirectory>
+            <ItemGroup>
+              <Assigned>
+                <Tag>%(Assigned.TargetPath)|$(MSBuildNodeCount)</Tag>
+              </Assigned>
+            </ItemGroup>
+            <GraphTransformTask File="first.txt"
+            """);
+        File.WriteAllText(project, contents);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph, "-m:2").ShouldBeTrue();
+        Directory.GetFiles(graph + ".actions", "*.json").Length.ShouldBe(2);
+        File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
+
+        Ninja(graph, out bool success);
+
+        success.ShouldBeTrue();
+        File.ReadAllText(Path.Combine(directory, "first.txt")).ShouldBe("folder/file.txt|folder/file.txt|1");
     }
 
     [UnixOnlyFact]
@@ -202,29 +415,135 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
         return project;
     }
 
-    private bool Generate(string project, string graph)
+    private bool Generate(string project, string graph, string arguments = "")
     {
         string testDirectory = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         string framework = Path.GetFileName(testDirectory);
         string configuration = Path.GetFileName(Path.GetDirectoryName(testDirectory))!;
         string host = Path.GetFullPath(Path.Combine(testDirectory, "..", "..", "..",
             "MSBuild.ActionTaskHost", configuration, framework, "MSBuild.ActionTaskHost.dll"));
-        string dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH")!;
+        string dotnet = RunnerUtilities.BootstrapDotnetHostPath;
         RunnerUtilities.ExecBootstrapedMSBuild(
-            $"\"{project}\" --hardened-graph -nr:false -v:minimal"
+            $"\"{project}\" --hardened-graph -nr:false -v:minimal {arguments}"
                 + $" -p:MSBuildEmitActionGraph=\"{graph}\" -p:MSBuildActionTaskHost=\"{host}\""
                 + $" -p:MSBuildActionDotNetHost=\"{dotnet}\"",
             out bool succeeded, outputHelper: _output);
         return succeeded;
     }
 
-    private void Ninja(string graph, out bool success)
+    private string Ninja(string graph, out bool success)
         => RunnerUtilities.RunProcessAndGetOutput("ninja", $"-f \"{graph}\" -j1", out success, outputHelper: _output);
 }
 
 [MSBuildDeclaredIOTask]
-public sealed class GraphValueTask : Utilities.Task
+public sealed class GraphCSharpCompileTask : Utilities.Task, IMultiThreadableTask
 {
+    public TaskEnvironment TaskEnvironment { get; set; } = TaskEnvironment.Fallback;
+    public ITaskItem[] DeclaredInputs { get; set; } = [];
+    public ITaskItem[] DeclaredOutputs { get; set; } = [];
+
+    [Required]
+    public ITaskItem[] Sources { get; set; } = [];
+
+    [Required]
+    public ITaskItem[] References { get; set; } = [];
+
+    [Required]
+    public string CompilerAssembly { get; set; } = "";
+
+    [Required]
+    public string DotNetHost { get; set; } = "";
+
+    [Required]
+    public string OutputAssembly { get; set; } = "";
+
+    public override bool Execute()
+    {
+        foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (assembly.GetName().Name == "Microsoft.Build")
+            {
+                throw new InvalidOperationException("Compilation actions must run without the engine.");
+            }
+        }
+
+        StringComparer comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        HashSet<string> inputs = new(comparer);
+        foreach (ITaskItem input in DeclaredInputs)
+        {
+            inputs.Add(Absolute(input.ItemSpec));
+        }
+
+        RequireInput(CompilerAssembly);
+        RequireInput(DotNetHost);
+        foreach (ITaskItem source in Sources)
+        {
+            RequireInput(source.ItemSpec);
+        }
+
+        foreach (ITaskItem reference in References)
+        {
+            RequireInput(reference.ItemSpec);
+        }
+
+        if (Sources.Length == 0 || References.Length == 0 ||
+            DeclaredOutputs.Length != 1 || !comparer.Equals(Absolute(DeclaredOutputs[0].ItemSpec), Absolute(OutputAssembly)))
+        {
+            throw new InvalidOperationException("The compiler fixture requires sources, references, and its exact declared assembly output.");
+        }
+
+        ProcessStartInfo start = TaskEnvironment.GetProcessStartInfo();
+        start.FileName = Absolute(DotNetHost);
+        start.UseShellExecute = false;
+        start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
+        start.ArgumentList.Add(Absolute(CompilerAssembly));
+        start.ArgumentList.Add("-nologo");
+        start.ArgumentList.Add("-noconfig");
+        start.ArgumentList.Add("-nostdlib+");
+        start.ArgumentList.Add("-target:exe");
+        start.ArgumentList.Add("-deterministic+");
+        start.ArgumentList.Add("-debug-");
+        start.ArgumentList.Add("-out:" + Absolute(OutputAssembly));
+        foreach (ITaskItem reference in References)
+        {
+            start.ArgumentList.Add("-reference:" + Absolute(reference.ItemSpec));
+        }
+
+        foreach (ITaskItem source in Sources)
+        {
+            start.ArgumentList.Add(Absolute(source.ItemSpec));
+        }
+
+        using Process process = new() { StartInfo = start };
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("The compiler process did not start.");
+        }
+
+        System.Threading.Tasks.Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        System.Threading.Tasks.Task<string> stderr = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        Log.LogMessage(MessageImportance.High, "{0}", stdout.GetAwaiter().GetResult());
+        Log.LogMessage(MessageImportance.High, "{0}", stderr.GetAwaiter().GetResult());
+        return process.ExitCode == 0;
+
+        string Absolute(string path) => TaskEnvironment.GetAbsolutePath(path).GetCanonicalForm().Value;
+
+        void RequireInput(string path)
+        {
+            if (!inputs.Contains(Absolute(path)))
+            {
+                throw new InvalidOperationException($"Compiler input '{path}' was not declared.");
+            }
+        }
+    }
+}
+
+[MSBuildDeclaredIOTask]
+public sealed class GraphValueTask : Utilities.Task, IMultiThreadableTask
+{
+    public TaskEnvironment TaskEnvironment { get; set; } = TaskEnvironment.Fallback;
     public ITaskItem[] DeclaredInputs { get; set; } = [];
     public ITaskItem[] DeclaredOutputs { get; set; } = [];
 
@@ -235,6 +554,7 @@ public sealed class GraphValueTask : Utilities.Task
     {
         Utilities.TaskItem value = new("literal%253B%3Bvalue", treatAsFilePath: false);
         ((ITaskItem2)value).SetMetadataValueLiteral("Tag", "metadata%25");
+        ((ITaskItem2)value).SetMetadataValueLiteral("ConstructionDirectory", TaskEnvironment.ProjectDirectory);
         Values = [value];
         return true;
     }

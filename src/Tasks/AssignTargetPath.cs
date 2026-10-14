@@ -83,7 +83,7 @@ namespace Microsoft.Build.Tasks
                     // NOTE: at this point fullRootPath may or may not have a trailing slash
                     // Ensure trailing slash otherwise c:\bin appears to match part of c:\bin2\foo
                     // Also ensure that relative segments in the path are resolved and throw on illegal characters in Path.GetFullPath to preserve pre-existing behavior.
-                    fullRootPathString = 
+                    fullRootPathString =
 #pragma warning disable MSBuildTask0002 // AbsolutePath already resolved the path; GetFullPath only canonicalizes. Guarded by ChangeWave.
                         Path.GetFullPath(new AbsolutePath(FileUtilities.EnsureTrailingSlash(RootFolder), projectDirectory));
 #pragma warning restore MSBuildTask0002
@@ -129,7 +129,7 @@ namespace Microsoft.Build.Tasks
                         {
                             if (useCanonicalPathSemantics)
                             {
-                                AbsolutePath itemSpecFullFileNamePath = 
+                                AbsolutePath itemSpecFullFileNamePath =
                                     new AbsolutePath(Files[i].ItemSpec, projectDirectory).GetCanonicalForm();
 
 
@@ -144,9 +144,9 @@ namespace Microsoft.Build.Tasks
                                     targetPath = Path.GetFileName(Files[i].ItemSpec);
                                 }
                             }
-                            else 
+                            else
                             {
-                                string itemSpecFullFileNamePath = 
+                                string itemSpecFullFileNamePath =
 #pragma warning disable MSBuildTask0002 // AbsolutePath already resolved the path; GetFullPath only canonicalizes. Guarded by ChangeWave.
                                     Path.GetFullPath(new AbsolutePath(Files[i].ItemSpec, projectDirectory));
 #pragma warning restore MSBuildTask0002
@@ -181,25 +181,21 @@ namespace Microsoft.Build.Tasks
     }
 
     /// <summary>
-    /// Assigns TargetPath metadata using the engine-supplied Pure task environment.
+    /// Assigns TargetPath metadata using the engine-supplied task environment.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    [MSBuildPureTask]
-    public sealed class AssignTargetPathWithProjectDirectory : AssignTargetPath, IPureTask
+    [MSBuildDeclaredIOTask]
+    public sealed class AssignTargetPathWithProjectDirectory : AssignTargetPath
     {
-        private PureTaskEnvironment _pureTaskEnvironment;
+        /// <summary>
+        /// Gets or sets the declared file inputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; } = [];
 
-        /// <inheritdoc />
-        public PureTaskEnvironment PureTaskEnvironment
-        {
-            get => _pureTaskEnvironment ??= Microsoft.Build.Framework.PureTaskEnvironment.Fallback;
-            set => _pureTaskEnvironment = value;
-        }
-
-        protected override AbsolutePath GetProjectDirectory()
-        {
-            return PureTaskEnvironment.ProjectDirectory;
-        }
+        /// <summary>
+        /// Gets or sets the declared file outputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; } = [];
 
         protected override bool UseCanonicalPathSemantics => true;
     }

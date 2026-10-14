@@ -1226,7 +1226,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       </AppConfigWithTargetPath>
     </ItemGroup>
 
-    <FindAppConfigFileWithDeterministicSemantics
+    <FindAppConfigFileWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs=""
         PrimaryList="@(None)"
         SecondaryList="@(Content)"
         TargetPath="$(TargetFileName).config"
@@ -1358,7 +1358,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
   <Target Name="AssignLinkMetadata" Condition=" '$(SynthesizeLinkMetadata)' == 'true' ">
 
     <!-- NONE ITEMS -->
-    <AssignLinkMetadata Items="@(None)"
+    <AssignLinkMetadata DeclaredInputs="" DeclaredOutputs="" Items="@(None)"
                         Condition="'@(None)' != '' and '%(None.DefiningProjectFullPath)' != '$(MSBuildProjectFullPath)'">
       <Output TaskParameter="OutputItems" ItemName="_Temp" />
     </AssignLinkMetadata>
@@ -1370,7 +1370,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- CONTENT ITEMS -->
-    <AssignLinkMetadata Items="@(Content)"
+    <AssignLinkMetadata DeclaredInputs="" DeclaredOutputs="" Items="@(Content)"
                         Condition="'@(Content)' != '' and '%(Content.DefiningProjectFullPath)' != '$(MSBuildProjectFullPath)'">
       <Output TaskParameter="OutputItems" ItemName="_Temp" />
     </AssignLinkMetadata>
@@ -1382,7 +1382,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- PAGE ITEMS -->
-    <AssignLinkMetadata Items="@(Page)"
+    <AssignLinkMetadata DeclaredInputs="" DeclaredOutputs="" Items="@(Page)"
                         Condition="'@(Page)' != '' and '%(Page.DefiningProjectFullPath)' != '$(MSBuildProjectFullPath)'">
       <Output TaskParameter="OutputItems" ItemName="_Temp" />
     </AssignLinkMetadata>
@@ -1394,7 +1394,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- APPLICATIONDEFINITION ITEMS -->
-    <AssignLinkMetadata Items="@(ApplicationDefinition)"
+    <AssignLinkMetadata DeclaredInputs="" DeclaredOutputs="" Items="@(ApplicationDefinition)"
                         Condition="'@(ApplicationDefinition)' != '' and '%(ApplicationDefinition.DefiningProjectFullPath)' != '$(MSBuildProjectFullPath)'">
       <Output TaskParameter="OutputItems" ItemName="_Temp" />
     </AssignLinkMetadata>
@@ -1406,7 +1406,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- EMBEDDEDRESOURCE ITEMS -->
-    <AssignLinkMetadata Items="@(EmbeddedResource)"
+    <AssignLinkMetadata DeclaredInputs="" DeclaredOutputs="" Items="@(EmbeddedResource)"
                         Condition="'@(EmbeddedResource)' != '' and '%(EmbeddedResource.DefiningProjectFullPath)' != '$(MSBuildProjectFullPath)'">
       <Output TaskParameter="OutputItems" ItemName="_Temp" />
     </AssignLinkMetadata>
@@ -1418,7 +1418,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- RESOURCE ITEMS -->
-    <AssignLinkMetadata Items="@(Resource)"
+    <AssignLinkMetadata DeclaredInputs="" DeclaredOutputs="" Items="@(Resource)"
                         Condition="'@(Resource)' != '' and '%(Resource.DefiningProjectFullPath)' != '$(MSBuildProjectFullPath)'">
       <Output TaskParameter="OutputItems" ItemName="_Temp" />
     </AssignLinkMetadata>
@@ -1983,7 +1983,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     <!-- IsRidAgnostic metadata is used to determine whether global properties such as RuntimeIdentifier and SelfContained flow to a referenced project.
          However, for multi-targeted projects there may be a different IsRidAgnostic value for each TargetFramework.  In that case, this task selects
          the IsRidAgnostic value for the NearestTargetFramework for the project. -->
-    <SetRidAgnosticValueForProjects Projects="@(AnnotatedProjects)">
+    <SetRidAgnosticValueForProjects DeclaredInputs="" DeclaredOutputs="" Projects="@(AnnotatedProjects)">
       <Output ItemName="UpdatedAnnotatedProjects" TaskParameter="UpdatedProjects" />
     </SetRidAgnosticValueForProjects>
 
@@ -3278,7 +3278,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- AssignTargetPath generates TargetPath metadata that is consumed by CreateManifestResourceNames target for manifest name generation -->
-    <AssignTargetPathWithProjectDirectory Files="@(EmbeddedResource)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory DeclaredInputs="" DeclaredOutputs="" Files="@(EmbeddedResource)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_Temporary" />
     </AssignTargetPathWithProjectDirectory>
 
@@ -3289,19 +3289,19 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_Temporary Remove="@(_Temporary)" />
     </ItemGroup>
 
-    <AssignTargetPathWithProjectDirectory Files="@(Content)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory DeclaredInputs="" DeclaredOutputs="" Files="@(Content)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="ContentWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPathWithProjectDirectory Files="@(None)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory DeclaredInputs="" DeclaredOutputs="" Files="@(None)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_NoneWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPathWithProjectDirectory Files="@(BaseApplicationManifest)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory DeclaredInputs="" DeclaredOutputs="" Files="@(BaseApplicationManifest)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_DeploymentBaseManifestWithTargetPath"/>
     </AssignTargetPathWithProjectDirectory>
 
-    <AssignTargetPathWithProjectDirectory Files="@(None)" RootFolder="$(MSBuildProjectDirectory)" Condition="'@(_DeploymentBaseManifestWithTargetPath)'=='' and '%(None.Extension)'=='.manifest'">
+    <AssignTargetPathWithProjectDirectory DeclaredInputs="" DeclaredOutputs="" Files="@(None)" RootFolder="$(MSBuildProjectDirectory)" Condition="'@(_DeploymentBaseManifestWithTargetPath)'=='' and '%(None.Extension)'=='.manifest'">
       <Output TaskParameter="AssignedFiles" ItemName="_DeploymentBaseManifestWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
@@ -3365,7 +3365,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       </EmbeddedResource>
     </ItemGroup>
 
-    <AssignCultureWithDeterministicSemantics Files="@(EmbeddedResource)" Condition="'%(Extension)'!='.licx'"  RespectAlreadyAssignedItemCulture="$(RespectAlreadyAssignedItemCulture)" WarnOnCultureOverwritten="$(WarnOnCultureOverwritten)">
+    <AssignCultureWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Files="@(EmbeddedResource)" Condition="'%(Extension)'!='.licx'"  RespectAlreadyAssignedItemCulture="$(RespectAlreadyAssignedItemCulture)" WarnOnCultureOverwritten="$(WarnOnCultureOverwritten)">
       <!-- Create the list of culture resx and embedded resource files -->
       <Output TaskParameter="AssignedFilesWithCulture" ItemName="_MixedResourceWithCulture"/>
       <!-- Create the list of non-culture resx and embedded resource files -->
@@ -5405,7 +5405,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_CompileItemsToCopy Include="@(Compile->'%(FullPath)')" Condition="('%(Compile.CopyToOutputDirectory)'=='Always' or '%(Compile.CopyToOutputDirectory)'=='PreserveNewest' or '%(Compile.CopyToOutputDirectory)'=='IfDifferent') AND '%(Compile.MSBuildSourceProjectFile)'!=''"/>
     </ItemGroup>
 
-    <AssignTargetPathWithProjectDirectory Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory DeclaredInputs="" DeclaredOutputs="" Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileItemsToCopyWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
@@ -5444,7 +5444,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_CompileItemsToCopy Include="@(Compile->'%(FullPath)')" Condition="('%(Compile.CopyToOutputDirectory)'=='Always' or '%(Compile.CopyToOutputDirectory)'=='PreserveNewest' or '%(Compile.CopyToOutputDirectory)'=='IfDifferent') AND '%(Compile.MSBuildSourceProjectFile)'==''"/>
     </ItemGroup>
 
-    <AssignTargetPathWithProjectDirectory Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory DeclaredInputs="" DeclaredOutputs="" Files="@(_CompileItemsToCopy)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileItemsToCopyWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 
@@ -5921,12 +5921,12 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- Find all files in the final output directory. -->
-    <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(_CleanOrphanFileWrites)">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Path="$(OutDir)" Files="@(_CleanOrphanFileWrites)">
       <Output TaskParameter="InPath" ItemName="_CleanOrphanFileWritesInOutput"/>
     </FindUnderPathWithDeterministicSemantics>
 
     <!-- Find all files in the intermediate output directory. -->
-    <FindUnderPathWithDeterministicSemantics Path="$(IntermediateOutputPath)"    Files="@(_CleanOrphanFileWrites)">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Path="$(IntermediateOutputPath)"    Files="@(_CleanOrphanFileWrites)">
       <Output TaskParameter="InPath" ItemName="_CleanOrphanFileWritesInIntermediate"/>
     </FindUnderPathWithDeterministicSemantics>
 
@@ -6012,24 +6012,24 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
     
     <!-- Even if we don't allow cleaning filewrites from outside of the project bubble, we should still include FileWritesShareable that are inside the bubble -->
-    <FindUnderPathWithDeterministicSemantics Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)" Path="$(MSBuildProjectDirectory)" Files="@(FileWritesShareable)" UpdateToAbsolutePaths="true">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)" Path="$(MSBuildProjectDirectory)" Files="@(FileWritesShareable)" UpdateToAbsolutePaths="true">
       <Output TaskParameter="InPath" ItemName="FileWrites"/>
     </FindUnderPathWithDeterministicSemantics>
 
     <!-- Find all files in the final output directory. Use separate item includes for Files based on condition so we don't create a whole new
          item list unnecessarily -->
-    <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(FileWrites)" UpdateToAbsolutePaths="true" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Path="$(OutDir)" Files="@(FileWrites)" UpdateToAbsolutePaths="true" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)">
       <Output TaskParameter="InPath" ItemName="_CleanCurrentFileWritesInOutput"/>
     </FindUnderPathWithDeterministicSemantics>
-    <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(FileWrites);@(FileWritesShareable)" UpdateToAbsolutePaths="true" Condition="$(TrackFileWritesShareableOutsideOfProjectDirectory)">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Path="$(OutDir)" Files="@(FileWrites);@(FileWritesShareable)" UpdateToAbsolutePaths="true" Condition="$(TrackFileWritesShareableOutsideOfProjectDirectory)">
       <Output TaskParameter="InPath" ItemName="_CleanCurrentFileWritesInOutput"/>
     </FindUnderPathWithDeterministicSemantics>
 
     <!-- Find all files in the intermediate output directory. Same as above, use Conditions to prevent new item list writes -->
-    <FindUnderPathWithDeterministicSemantics Path="$(IntermediateOutputPath)" Files="@(FileWrites)" UpdateToAbsolutePaths="true" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Path="$(IntermediateOutputPath)" Files="@(FileWrites)" UpdateToAbsolutePaths="true" Condition="!$(TrackFileWritesShareableOutsideOfProjectDirectory)">
       <Output TaskParameter="InPath" ItemName="_CleanCurrentFileWritesInIntermediate"/>
     </FindUnderPathWithDeterministicSemantics>
-    <FindUnderPathWithDeterministicSemantics Path="$(IntermediateOutputPath)" Files="@(FileWrites);@(FileWritesShareable)" UpdateToAbsolutePaths="true" Condition="$(TrackFileWritesShareableOutsideOfProjectDirectory)">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Path="$(IntermediateOutputPath)" Files="@(FileWrites);@(FileWritesShareable)" UpdateToAbsolutePaths="true" Condition="$(TrackFileWritesShareableOutsideOfProjectDirectory)">
       <Output TaskParameter="InPath" ItemName="_CleanCurrentFileWritesInIntermediate"/>
     </FindUnderPathWithDeterministicSemantics>
 
@@ -6046,7 +6046,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- Remove duplicates from files produced in this build. -->
-    <RemoveDuplicates Inputs="@(_CleanCurrentFileWritesWithNoReferences)" >
+    <RemoveDuplicates DeclaredInputs="" DeclaredOutputs="" Inputs="@(_CleanCurrentFileWritesWithNoReferences)" >
       <Output TaskParameter="Filtered" ItemName="_CleanCurrentFileWrites"/>
     </RemoveDuplicates>
 
@@ -6159,12 +6159,12 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     </ItemGroup>
 
     <!-- Find all files in the final output directory. -->
-    <FindUnderPathWithDeterministicSemantics Path="$(OutDir)" Files="@(_CleanPriorFileWrites)">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Path="$(OutDir)" Files="@(_CleanPriorFileWrites)">
       <Output TaskParameter="InPath" ItemName="_CleanPriorFileWritesInOutput"/>
     </FindUnderPathWithDeterministicSemantics>
 
     <!-- Find all files in the intermediate output directory. -->
-    <FindUnderPathWithDeterministicSemantics Path="$(IntermediateOutputPath)"    Files="@(_CleanPriorFileWrites)">
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs="" Path="$(IntermediateOutputPath)"    Files="@(_CleanPriorFileWrites)">
       <Output TaskParameter="InPath" ItemName="_CleanPriorFileWritesInIntermediate"/>
     </FindUnderPathWithDeterministicSemantics>
 
@@ -6217,7 +6217,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <_CleanRecordPriorFileWrites Include="@(_CleanUnfilteredPriorFileWrites)" Exclude="@(_CleanRecordResolvedFilesAbsolute)" />
     </ItemGroup>
 
-    <FindUnderPathWithDeterministicSemantics
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs=""
         Condition="'$(MSBuildHardenedGraph)' == 'true' and !$(TrackFileWritesShareableOutsideOfProjectDirectory)"
         Path="$(MSBuildProjectDirectory)"
         Files="@(FileWritesShareable)"
@@ -6225,7 +6225,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <Output TaskParameter="InPath" ItemName="_CleanRecordFileWritesShareableInProject" />
     </FindUnderPathWithDeterministicSemantics>
 
-    <FindUnderPathWithDeterministicSemantics
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs=""
         Condition="'$(MSBuildHardenedGraph)' == 'true' and !$(TrackFileWritesShareableOutsideOfProjectDirectory)"
         Path="$(OutDir)"
         Files="@(FileWrites);@(_CleanRecordFileWritesShareableInProject)"
@@ -6233,7 +6233,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <Output TaskParameter="InPath" ItemName="_CleanRecordCurrentFileWritesInOutput" />
     </FindUnderPathWithDeterministicSemantics>
 
-    <FindUnderPathWithDeterministicSemantics
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs=""
         Condition="'$(MSBuildHardenedGraph)' == 'true' and $(TrackFileWritesShareableOutsideOfProjectDirectory)"
         Path="$(OutDir)"
         Files="@(FileWrites);@(FileWritesShareable)"
@@ -6241,7 +6241,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <Output TaskParameter="InPath" ItemName="_CleanRecordCurrentFileWritesInOutput" />
     </FindUnderPathWithDeterministicSemantics>
 
-    <FindUnderPathWithDeterministicSemantics
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs=""
         Condition="'$(MSBuildHardenedGraph)' == 'true' and !$(TrackFileWritesShareableOutsideOfProjectDirectory)"
         Path="$(IntermediateOutputPath)"
         Files="@(FileWrites);@(_CleanRecordFileWritesShareableInProject)"
@@ -6249,7 +6249,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       <Output TaskParameter="InPath" ItemName="_CleanRecordCurrentFileWritesInIntermediate" />
     </FindUnderPathWithDeterministicSemantics>
 
-    <FindUnderPathWithDeterministicSemantics
+    <FindUnderPathWithDeterministicSemantics DeclaredInputs="" DeclaredOutputs=""
         Condition="'$(MSBuildHardenedGraph)' == 'true' and $(TrackFileWritesShareableOutsideOfProjectDirectory)"
         Path="$(IntermediateOutputPath)"
         Files="@(FileWrites);@(FileWritesShareable)"
@@ -6267,13 +6267,13 @@ Copyright (C) Microsoft Corporation. All rights reserved.
         Merge list of files from prior builds with the current build and then
         remove duplicates.
         -->
-    <RemoveDuplicates
+    <RemoveDuplicates DeclaredInputs="" DeclaredOutputs=""
         Condition="'$(MSBuildHardenedGraph)' != 'true'"
         Inputs="@(_CleanPriorFileWrites);@(_CleanCurrentFileWrites)">
       <Output TaskParameter="Filtered" ItemName="_CleanUniqueFileWrites"/>
     </RemoveDuplicates>
 
-    <RemoveDuplicates
+    <RemoveDuplicates DeclaredInputs="" DeclaredOutputs=""
         Condition="'$(MSBuildHardenedGraph)' == 'true'"
         Inputs="@(_CleanRecordPriorFileWrites);@(_CleanRecordCurrentFileWritesWithNoReferences)">
       <Output TaskParameter="Filtered" ItemName="_CleanUniqueFileWrites"/>
@@ -6893,7 +6893,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       Returns="@(SourceFilesProjectOutputGroupOutput)"
       DependsOnTargets="$(SourceFilesProjectOutputGroupDependsOn)">
 
-    <AssignTargetPathWithProjectDirectory Files="@(Compile)" RootFolder="$(MSBuildProjectDirectory)">
+    <AssignTargetPathWithProjectDirectory DeclaredInputs="" DeclaredOutputs="" Files="@(Compile)" RootFolder="$(MSBuildProjectDirectory)">
       <Output TaskParameter="AssignedFiles" ItemName="_CompileWithTargetPath" />
     </AssignTargetPathWithProjectDirectory>
 

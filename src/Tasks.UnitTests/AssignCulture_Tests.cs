@@ -15,15 +15,15 @@ namespace Microsoft.Build.UnitTests
     public sealed class AssignCulture_Tests
     {
         [Fact]
-        public void OnlyDeterministicVariantIsMarkedPure()
+        public void OnlyDeterministicVariantIsMarkedDeclaredIO()
         {
             Attribute.IsDefined(
                 typeof(AssignCultureWithDeterministicSemantics),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeTrue();
             Attribute.IsDefined(
                 typeof(AssignCulture),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeFalse();
         }
 

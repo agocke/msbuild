@@ -155,30 +155,26 @@ namespace Microsoft.Build.Tasks
     }
 
     /// <summary>
-    /// Finds items under a path using the engine-supplied Pure task environment and host path semantics.
+    /// Finds items under a path using the engine-supplied task environment and host path semantics.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    [MSBuildPureTask]
-    public sealed class FindUnderPathWithDeterministicSemantics : FindUnderPath, IPureTask
+    [MSBuildDeclaredIOTask]
+    public sealed class FindUnderPathWithDeterministicSemantics : FindUnderPath
     {
-        private PureTaskEnvironment _pureTaskEnvironment;
+        /// <summary>
+        /// Gets or sets the declared file inputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; } = [];
 
-        /// <inheritdoc />
-        public PureTaskEnvironment PureTaskEnvironment
-        {
-            get => _pureTaskEnvironment ??= Microsoft.Build.Framework.PureTaskEnvironment.Fallback;
-            set => _pureTaskEnvironment = value;
-        }
-
-        private protected override AbsolutePath GetProjectDirectory()
-        {
-            return PureTaskEnvironment.ProjectDirectory;
-        }
+        /// <summary>
+        /// Gets or sets the declared file outputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; } = [];
 
         private protected override bool UseCanonicalPathSemantics => true;
 
         private protected override StringComparison PathComparison
-            => PureTaskEnvironment.UsesWindowsPathSemantics
+            => NativeMethodsShared.IsWindows
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
 

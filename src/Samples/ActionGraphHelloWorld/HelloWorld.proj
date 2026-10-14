@@ -1,0 +1,39 @@
+<Project DefaultTargets="Build">
+  <PropertyGroup>
+    <CompilerTaskAssembly Condition="'$(CompilerTaskAssembly)' == ''">$(MSBuildThisFileDirectory)../../../artifacts/bin/MSBuild.ActionTaskHost.UnitTests/Release/net11.0/MSBuild.ActionTaskHost.UnitTests.dll</CompilerTaskAssembly>
+    <HelloWorldSource Condition="'$(HelloWorldSource)' == ''">$(MSBuildThisFileDirectory)Program.cs</HelloWorldSource>
+    <OutputDirectory Condition="'$(OutputDirectory)' == ''">$([System.IO.Path]::GetDirectoryName('$(MSBuildEmitActionGraph)'))</OutputDirectory>
+    <DotNetDirectory Condition="'$(MSBuildActionDotNetHost)' != ''">$([System.IO.Path]::GetDirectoryName('$(MSBuildActionDotNetHost)'))</DotNetDirectory>
+    <HelloWorldAssembly>$(OutputDirectory)/HelloWorld.dll</HelloWorldAssembly>
+    <HelloWorldRuntimeConfig>$(OutputDirectory)/HelloWorld.runtimeconfig.json</HelloWorldRuntimeConfig>
+  </PropertyGroup>
+
+  <UsingTask TaskName="GraphCSharpCompileTask" AssemblyFile="$(CompilerTaskAssembly)" />
+
+  <ItemGroup>
+    <Source Include="$(HelloWorldSource)" />
+    <Reference Include="$(ReferenceAssemblyDirectory)/*.dll" Condition="'$(ReferenceAssemblyDirectory)' != ''" />
+    <CompilerInput Include="$(CompilerDirectory)/**/*" Condition="'$(CompilerDirectory)' != ''" />
+    <RuntimeInput Include="$(RuntimeDirectory)/*" Condition="'$(RuntimeDirectory)' != ''" />
+    <HostInput Include="$(DotNetDirectory)/host/fxr/**/*.so" Condition="'$(DotNetDirectory)' != ''" />
+  </ItemGroup>
+
+  <Target Name="Build">
+    <GraphCSharpCompileTask
+        Sources="@(Source)"
+        References="@(Reference)"
+        CompilerAssembly="$(CompilerDirectory)/csc.dll"
+        DotNetHost="$(MSBuildActionDotNetHost)"
+        OutputAssembly="$(HelloWorldAssembly)"
+        DeclaredInputs="@(Source);@(Reference);@(CompilerInput);@(RuntimeInput);@(HostInput);$(MSBuildActionDotNetHost)"
+        DeclaredOutputs="$(HelloWorldAssembly)" />
+
+    <WriteLinesToFile
+        File="$(HelloWorldRuntimeConfig)"
+        Lines="{ &quot;runtimeOptions&quot;: { &quot;tfm&quot;: &quot;net11.0&quot;, &quot;framework&quot;: { &quot;name&quot;: &quot;Microsoft.NETCore.App&quot;, &quot;version&quot;: &quot;$(RuntimeVersion)&quot; } } }"
+        Overwrite="true"
+        WriteOnlyWhenDifferent="true"
+        DeclaredInputs=""
+        DeclaredOutputs="$(HelloWorldRuntimeConfig)" />
+  </Target>
+</Project>

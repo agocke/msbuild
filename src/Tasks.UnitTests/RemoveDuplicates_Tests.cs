@@ -15,11 +15,11 @@ namespace Microsoft.Build.UnitTests
     public sealed class RemoveDuplicates_Tests
     {
         [Fact]
-        public void RemoveDuplicatesIsMarkedPure()
+        public void RemoveDuplicatesIsMarkedDeclaredIO()
         {
             Attribute.IsDefined(
                 typeof(RemoveDuplicates),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeTrue();
         }
 

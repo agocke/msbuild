@@ -13,7 +13,7 @@ using Microsoft.Build.Shared;
 
 namespace Microsoft.Build.Graph.Hardened;
 
-internal delegate void HardenedPureTaskExecutor(
+internal delegate void HardenedConstructionTaskExecutor(
     ProjectTargetInstance target,
     ProjectTaskInstance task,
     Lookup lookup);
@@ -24,8 +24,10 @@ internal delegate HardenedTaskDescriptor HardenedTaskClassifier(
 
 internal sealed class HardenedTaskDescriptor
 {
-    internal static readonly HardenedTaskDescriptor Pure =
-        new(HardenedTaskClassification.Pure);
+    internal static readonly HardenedTaskDescriptor DeclaredIO =
+        new(HardenedTaskClassification.DeclaredIO,
+            inputPathParameters: ["DeclaredInputs"],
+            outputPathParameters: ["DeclaredOutputs"]);
 
     internal static readonly HardenedTaskDescriptor Unaudited =
         new(HardenedTaskClassification.Unaudited);
@@ -53,7 +55,7 @@ internal sealed class HardenedTaskDescriptor
     internal static HardenedTaskDescriptor FromClassification(HardenedTaskClassification classification)
         => classification switch
         {
-            HardenedTaskClassification.Pure => Pure,
+            HardenedTaskClassification.DeclaredIO => DeclaredIO,
             HardenedTaskClassification.Unaudited => Unaudited,
             _ => new HardenedTaskDescriptor(classification),
         };
@@ -110,11 +112,6 @@ internal static class HardenedTaskClassificationResolver
 
     private static HardenedTaskDescriptor CreateDescriptor(LoadedType loadedType)
     {
-        if (loadedType.HasMSBuildPureTaskAttribute)
-        {
-            return HardenedTaskDescriptor.Pure;
-        }
-
         if (!loadedType.HasMSBuildDeclaredIOTaskAttribute ||
             !loadedType.HasValidMSBuildDeclaredIOAttributes)
         {

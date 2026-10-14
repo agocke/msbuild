@@ -14,9 +14,19 @@ namespace Microsoft.Build.Tasks
     /// Given a list of items, remove duplicate items. Attributes are not considered. Case insensitive.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    [MSBuildPureTask]
+    [MSBuildDeclaredIOTask]
     public class RemoveDuplicates : TaskExtension
     {
+        /// <summary>
+        /// Gets or sets the declared file inputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; } = [];
+
+        /// <summary>
+        /// Gets or sets the declared file outputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; } = [];
+
         /// <summary>
         /// The left-hand set of items to be RemoveDuplicatesed from.
         /// </summary>

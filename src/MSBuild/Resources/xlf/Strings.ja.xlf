@@ -316,20 +316,26 @@
       </trans-unit>
       <trans-unit id="HelpMessage_53_HardenedGraphSwitch">
         <source>  -hardenedGraph[:True|False]
-                     Enables experimental hardened static graph validation.
-                     Invalid or unsupported graph-construction constructs fail
-                     before target task execution. Initially requires a
-                     single in-process node. (Alias: --hardened-graph)
+                     Constructs an experimental standalone Ninja action graph.
+                     Requires the global properties MSBuildEmitActionGraph,
+                     MSBuildActionTaskHost, and MSBuildActionDotNetHost.
+                     File-I/O tasks are emitted, not executed. Restore must
+                     run separately. Requires a single in-process node.
+                     (Alias: --hardened-graph)
     </source>
         <target state="new">  -hardenedGraph[:True|False]
-                     Enables experimental hardened static graph validation.
-                     Invalid or unsupported graph-construction constructs fail
-                     before target task execution. Initially requires a
-                     single in-process node. (Alias: --hardened-graph)
+                     Constructs an experimental standalone Ninja action graph.
+                     Requires the global properties MSBuildEmitActionGraph,
+                     MSBuildActionTaskHost, and MSBuildActionDotNetHost.
+                     File-I/O tasks are emitted, not executed. Restore must
+                     run separately. Requires a single in-process node.
+                     (Alias: --hardened-graph)
     </target>
         <note>
       LOCALIZATION: None of the lines should be longer than a standard width console window, eg 80 chars.
       The switch names "hardenedGraph" and "--hardened-graph" should not be localized.
+      The property names "MSBuildEmitActionGraph", "MSBuildActionTaskHost",
+      and "MSBuildActionDotNetHost" should not be localized.
     </note>
       </trans-unit>
       <trans-unit id="InvalidHardenedGraphValue">

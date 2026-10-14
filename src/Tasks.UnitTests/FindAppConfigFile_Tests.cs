@@ -2,7 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
-using System.IO;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Tasks;
@@ -17,15 +16,15 @@ namespace Microsoft.Build.UnitTests
     public class FindAppConfigFile_Tests
     {
         [Fact]
-        public void OnlyDeterministicVariantIsMarkedPure()
+        public void OnlyDeterministicVariantIsMarkedDeclaredIO()
         {
             Attribute.IsDefined(
                 typeof(FindAppConfigFileWithDeterministicSemantics),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeTrue();
             Attribute.IsDefined(
                 typeof(FindAppConfigFile),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeFalse();
         }
 
@@ -111,29 +110,32 @@ namespace Microsoft.Build.UnitTests
             Assert.Equal(item2.GetMetadata("id"), f.AppConfigFile.GetMetadata("id"));
         }
 
-        [Theory]
-        [InlineData("foo/app.config", "Unix", true)]
-        [InlineData("foo/app.config", "Windows_NT", true)]
-        [InlineData(@"foo\app.config", "Unix", false)]
-        [InlineData(@"foo\app.config", "Windows_NT", true)]
-        public void DeterministicVariantUsesExplicitPathSemantics(
-            string itemSpec,
-            string hostOS,
-            bool shouldFind)
+        [Fact]
+        public void DeterministicVariantRecognizesForwardSlashOnLocalHost()
         {
-            bool usesWindowsPathSemantics = String.Equals(
-                hostOS,
-                "Windows_NT",
-                StringComparison.OrdinalIgnoreCase);
+            VerifyDeterministicHostPathSemantics("foo/app.config", shouldFind: true);
+        }
+
+        [WindowsOnlyFact]
+        public void DeterministicVariantRecognizesBackslashOnWindows()
+        {
+            VerifyDeterministicHostPathSemantics(@"foo\app.config", shouldFind: true);
+        }
+
+        [UnixOnlyFact]
+        public void DeterministicVariantTreatsBackslashAsFileNameCharacterOnUnix()
+        {
+            VerifyDeterministicHostPathSemantics(@"foo\app.config", shouldFind: false);
+        }
+
+        private static void VerifyDeterministicHostPathSemantics(string itemSpec, bool shouldFind)
+        {
             FindAppConfigFileWithDeterministicSemantics task = new()
             {
                 BuildEngine = new MockEngine(),
                 PrimaryList = [new TaskItem(itemSpec, treatAsFilePath: false)],
                 SecondaryList = [],
                 TargetPath = "targetpath",
-                PureTaskEnvironment = PureTaskEnvironment.Create(
-                    new AbsolutePath(Path.GetTempPath()),
-                    usesWindowsPathSemantics),
             };
 
             task.Execute().ShouldBeTrue();
@@ -159,7 +161,6 @@ namespace Microsoft.Build.UnitTests
                 PrimaryList = [input],
                 SecondaryList = [],
                 TargetPath = "targetpath",
-                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(Path.GetTempPath()),
             };
 
             task.Execute().ShouldBeTrue();

@@ -34,12 +34,6 @@ namespace Microsoft.Build.UnitTests.BackEnd
         }
     }
 
-    [MSBuildPureTask]
-    public class PureTestTask : Task
-    {
-        public override bool Execute() => true;
-    }
-
     [MSBuildDeclaredIOTask]
     [MSBuildDeclaredIORequiresUnset("LegacyDirectory")]
     public class DeclaredIOTestTask : Task
@@ -106,29 +100,6 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
         #region UsingTaskTests
         [Fact]
-        public void MetadataResolutionFindsPureAttributeWithoutExecutionLoading()
-        {
-            ProjectRootElement project = ProjectRootElement.Create();
-            ProjectUsingTaskElement element = project.AddUsingTask(
-                nameof(PureTestTask),
-                _testTaskLocation,
-                null);
-            TaskRegistry registry = CreateTaskRegistryAndRegisterTasks([element]);
-
-            bool resolved = registry.TryGetRegisteredTaskTypeForMetadata(
-                nameof(PureTestTask),
-                TaskHostParameters.Empty,
-                exactMatchRequired: true,
-                _targetLoggingContext,
-                out LoadedType loadedType);
-
-            resolved.ShouldBeTrue();
-            loadedType.ShouldNotBeNull();
-            loadedType.LoadedViaMetadataLoadContext.ShouldBeTrue();
-            loadedType.HasMSBuildPureTaskAttribute.ShouldBeTrue();
-        }
-
-        [Fact]
         public void MetadataResolutionFindsDeclaredIOAttributesWithoutExecutionLoading()
         {
             ProjectRootElement project = ProjectRootElement.Create();
@@ -172,11 +143,11 @@ namespace Microsoft.Build.UnitTests.BackEnd
 
             resolved.ShouldBeTrue();
             loadedType.ShouldNotBeNull();
-            loadedType.HasMSBuildPureTaskAttribute.ShouldBeFalse();
+            loadedType.HasMSBuildDeclaredIOTaskAttribute.ShouldBeFalse();
         }
 
         [Fact]
-        public void MetadataResolutionFindsPureAttributeInBuiltInAssemblyByName()
+        public void MetadataResolutionFindsDeclaredIOAttributeInBuiltInAssemblyByName()
         {
             Type taskType = typeof(Microsoft.Build.Tasks.AssignTargetPathWithProjectDirectory);
             ProjectRootElement project = ProjectRootElement.Create();
@@ -196,7 +167,7 @@ namespace Microsoft.Build.UnitTests.BackEnd
             resolved.ShouldBeTrue();
             loadedType.ShouldNotBeNull();
             loadedType.LoadedViaMetadataLoadContext.ShouldBeTrue();
-            loadedType.HasMSBuildPureTaskAttribute.ShouldBeTrue();
+            loadedType.HasMSBuildDeclaredIOTaskAttribute.ShouldBeTrue();
         }
 
         [Fact]

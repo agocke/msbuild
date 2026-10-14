@@ -27,16 +27,16 @@ namespace Microsoft.Build.UnitTests
         }
 
         [Fact]
-        public void AssignLinkMetadataIsMarkedPure()
+        public void AssignLinkMetadataIsMarkedDeclaredIO()
         {
             Attribute.IsDefined(
                 typeof(AssignLinkMetadata),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeTrue();
         }
 
         [Fact]
-        public void PureTaskEnvironmentControlsRelativePathsAndOutputIsCloned()
+        public void TaskEnvironmentControlsRelativePathsAndOutputIsCloned()
         {
             using TestEnvironment env = TestEnvironment.Create(_output);
             TransientTestFolder projectDirectory = env.CreateFolder();
@@ -52,7 +52,7 @@ namespace Microsoft.Build.UnitTests
             {
                 BuildEngine = new MockEngine(),
                 Items = [input],
-                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(projectDirectory.Path),
+                TaskEnvironment = TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(projectDirectory.Path),
             };
 
             task.Execute().ShouldBeTrue();
@@ -65,13 +65,13 @@ namespace Microsoft.Build.UnitTests
         }
 
         [Fact]
-        public void PureTaskAcceptsMissingDefiningProject()
+        public void DeclaredIOTaskAcceptsMissingDefiningProject()
         {
             AssignLinkMetadata task = new()
             {
                 BuildEngine = new MockEngine(),
                 Items = [new TaskItem(Path.Combine("SubFolder", "a.cs"), treatAsFilePath: false)],
-                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(Path.GetTempPath()),
+                TaskEnvironment = TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(Path.GetTempPath()),
             };
 
             task.Execute().ShouldBeTrue();
@@ -79,7 +79,7 @@ namespace Microsoft.Build.UnitTests
         }
 
         [Fact]
-        public void PureTaskIgnoresInvalidItemPath()
+        public void DeclaredIOTaskIgnoresInvalidItemPath()
         {
             AssignLinkMetadata task = new()
             {
@@ -91,7 +91,7 @@ namespace Microsoft.Build.UnitTests
                             "invalid\0path",
                             projectFullPath: Path.Combine(Path.GetTempPath(), "Items.props")))
                 ],
-                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(Path.GetTempPath()),
+                TaskEnvironment = TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(Path.GetTempPath()),
             };
 
             task.Execute().ShouldBeTrue();

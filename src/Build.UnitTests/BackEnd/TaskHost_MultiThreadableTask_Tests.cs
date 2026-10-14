@@ -108,26 +108,27 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         [InlineData(true, true, true)]
         [InlineData(false, false, false)]
         [InlineData(true, false, false)]
-        public void PureTaskReceivesProjectScopedEnvironment(
+        public void TaskEnvironmentUsesProjectOrProcessDirectoryAccordingToExecutionMode(
             bool useTaskHost,
             bool multiThreaded,
             bool saveOperatingEnvironment)
         {
-            _env.SetCurrentDirectory(_env.CreateFolder().Path);
+            string processDirectory = _env.CreateFolder().Path;
+            _env.SetCurrentDirectory(processDirectory);
 
             string taskFactoryAttribute = useTaskHost ? """ TaskFactory="TaskHostFactory" """ : string.Empty;
             string projectContent = $"""
                 <Project>
-                    <UsingTask TaskName="PureEnvironmentTask"
+                    <UsingTask TaskName="ScopedEnvironmentTask"
                                AssemblyFile="{Assembly.GetExecutingAssembly().Location}"{taskFactoryAttribute} />
 
                     <Target Name="TestTarget">
-                        <PureEnvironmentTask />
+                        <ScopedEnvironmentTask />
                     </Target>
                 </Project>
                 """;
 
-            string projectFile = Path.Combine(_testProjectsDir, $"PureEnvironment_{useTaskHost}.proj");
+            string projectFile = Path.Combine(_testProjectsDir, $"ScopedEnvironment_{useTaskHost}.proj");
             File.WriteAllText(projectFile, projectContent);
 
             MockLogger logger = new(_output);
@@ -150,11 +151,14 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
 
             _output.WriteLine(logger.FullLog);
             result.OverallResult.ShouldBe(BuildResultCode.Success);
-            logger.FullLog.ShouldContain($"PureTaskEnvironment.ProjectDirectory={_testProjectsDir}");
+            string expectedDirectory = multiThreaded || saveOperatingEnvironment
+                ? _testProjectsDir
+                : processDirectory;
+            logger.FullLog.ShouldContain($"TaskEnvironment.ProjectDirectory={expectedDirectory}");
 
             if (useTaskHost)
             {
-                TaskRouterTestHelper.AssertTaskUsedTaskHost(logger, "PureEnvironmentTask");
+                TaskRouterTestHelper.AssertTaskUsedTaskHost(logger, "ScopedEnvironmentTask");
             }
         }
     }
@@ -177,17 +181,16 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
 #pragma warning disable CS0436 // Type conflicts with imported type - intentional for routing detection.
     [MSBuildMultiThreadableTask]
 #pragma warning restore CS0436
-    [MSBuildPureTask]
-    public sealed class PureEnvironmentTask : Task, IPureTask
+    public sealed class ScopedEnvironmentTask : Task, IMultiThreadableTask
     {
-        public PureTaskEnvironment PureTaskEnvironment { get; set; } = null!;
+        public TaskEnvironment TaskEnvironment { get; set; } = TaskEnvironment.Fallback;
 
         public override bool Execute()
         {
-            PureTaskEnvironment.ShouldNotBeNull();
+            TaskEnvironment.ShouldNotBeNull();
             Log.LogMessage(
                 MessageImportance.High,
-                $"PureTaskEnvironment.ProjectDirectory={PureTaskEnvironment.ProjectDirectory}");
+                $"TaskEnvironment.ProjectDirectory={TaskEnvironment.ProjectDirectory}");
             return true;
         }
     }

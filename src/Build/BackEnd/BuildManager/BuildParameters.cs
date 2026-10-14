@@ -870,7 +870,8 @@ namespace Microsoft.Build.Execution
         public ProjectIsolationMode ProjectIsolationMode { get => _projectIsolationMode; set => _projectIsolationMode = value; }
 
         /// <summary>
-        /// Gets or sets whether hardened static graph validation is enabled.
+        /// Gets or sets whether hardened action graph construction is enabled.
+        /// Graph and standalone task-host configuration must be supplied as global properties.
         /// </summary>
         public bool HardenedGraphValidation
         {

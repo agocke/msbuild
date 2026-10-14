@@ -26,6 +26,8 @@ internal sealed class HardenedActionGraph
         "EnsureTrailingSlash", "ValueOrDefault", "NormalizePath", "NormalizeDirectory",
         "VersionEquals", "VersionNotEquals", "VersionGreaterThan", "VersionGreaterThanOrEquals",
         "VersionLessThan", "VersionLessThanOrEquals",
+        "GetTargetFrameworkIdentifier", "GetTargetFrameworkVersion", "IsTargetFrameworkCompatible",
+        "GetTargetPlatformIdentifier", "GetTargetPlatformVersion", "FilterTargetFrameworks",
     };
 
     internal static bool IsAllowedFunction(Type receiver, string member)
@@ -47,7 +49,7 @@ internal sealed class HardenedActionGraph
     private readonly string _host;
     private readonly string _dotnet;
     private readonly string _directory;
-    private readonly IReadOnlyDictionary<string, string> _environment;
+    private readonly Dictionary<string, string> _environment;
     private readonly List<ActionInvocation> _actions = [];
     private readonly ElementLocation _location;
 
@@ -75,6 +77,10 @@ internal sealed class HardenedActionGraph
         Require(Path.IsPathRooted(_host) && File.Exists(_host), "a missing or nonabsolute MSBuildActionTaskHost");
         Require(Path.IsPathRooted(_dotnet) && File.Exists(_dotnet), "a missing or nonabsolute MSBuildActionDotNetHost");
     }
+
+    internal TaskEnvironment CreateConstructionEnvironment()
+        => TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(
+            _directory, _environment);
 
     // True means the invocation was recorded, not executed.
     internal bool Record(ITask task, Dictionary<string, object> parameters, ProjectTaskInstance node)

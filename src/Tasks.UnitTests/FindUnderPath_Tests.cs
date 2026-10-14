@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System;
 using System.IO;
 
 using Microsoft.Build.Framework;
@@ -19,6 +20,19 @@ namespace Microsoft.Build.UnitTests
 {
     public sealed class FindUnderPath_Tests
     {
+        [Fact]
+        public void OnlyDeterministicVariantIsMarkedDeclaredIO()
+        {
+            Attribute.IsDefined(
+                typeof(FindUnderPathWithDeterministicSemantics),
+                typeof(MSBuildDeclaredIOTaskAttribute),
+                inherit: false).ShouldBeTrue();
+            Attribute.IsDefined(
+                typeof(FindUnderPath),
+                typeof(MSBuildDeclaredIOTaskAttribute),
+                inherit: false).ShouldBeFalse();
+        }
+
         [Fact]
         public void BasicFilter()
         {
@@ -173,7 +187,7 @@ namespace Microsoft.Build.UnitTests
                 BuildEngine = new MockEngine(),
                 Path = new TaskItem("Root"),
                 Files = [new TaskItem("root/file.txt")],
-                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(ObjectModelHelpers.TempProjectDir),
+                TaskEnvironment = TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(ObjectModelHelpers.TempProjectDir),
             };
 
             task.Execute().ShouldBeTrue();
@@ -200,7 +214,7 @@ namespace Microsoft.Build.UnitTests
                 Path = new TaskItem("."),
                 Files = [input],
                 UpdateToAbsolutePaths = true,
-                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(ObjectModelHelpers.TempProjectDir),
+                TaskEnvironment = TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(ObjectModelHelpers.TempProjectDir),
             };
 
             task.Execute().ShouldBeTrue();

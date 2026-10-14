@@ -31,7 +31,7 @@ internal static class TaskParameterBinder
                 property.SetMethod is not { IsPublic: true } ||
                 property.GetIndexParameters().Length != 0 ||
                 property.Name is nameof(ITask.BuildEngine) or nameof(ITask.HostObject)
-                    or nameof(IMultiThreadableTask.TaskEnvironment) or nameof(IPureTask.PureTaskEnvironment))
+                    or nameof(IMultiThreadableTask.TaskEnvironment))
             {
                 throw new InvalidDataException(HostResources.Format("InvalidParameter", parameter.Key, taskType.FullName));
             }

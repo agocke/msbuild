@@ -17,15 +17,15 @@ namespace Microsoft.Build.UnitTests
     public sealed class AssignTargetPath_Tests
     {
         [Fact]
-        public void OnlyProjectDirectoryVariantIsMarkedPure()
+        public void OnlyProjectDirectoryVariantIsMarkedDeclaredIO()
         {
             Attribute.IsDefined(
                 typeof(AssignTargetPathWithProjectDirectory),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeTrue();
             Attribute.IsDefined(
                 typeof(AssignTargetPath),
-                typeof(MSBuildPureTaskAttribute),
+                typeof(MSBuildDeclaredIOTaskAttribute),
                 inherit: false).ShouldBeFalse();
         }
 
@@ -133,7 +133,7 @@ namespace Microsoft.Build.UnitTests
             string explicitProjectDirectory = NativeMethodsShared.IsWindows ? @"c:\project" : "/project";
             AssignTargetPathWithProjectDirectory task = new()
             {
-                PureTaskEnvironment = PureTaskEnvironment.CreateWithProjectDirectory(explicitProjectDirectory),
+                TaskEnvironment = TaskEnvironment.CreateWithProjectDirectoryAndEnvironment(explicitProjectDirectory),
                 BuildEngine = new MockEngine(),
                 Files = [new TaskItem(Path.Combine("subdirectory", "file.txt"))],
                 RootFolder = explicitProjectDirectory,

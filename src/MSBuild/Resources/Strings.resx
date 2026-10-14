@@ -1050,14 +1050,18 @@
   </data>
   <data name="HelpMessage_53_HardenedGraphSwitch" Visibility="Public">
     <value>  -hardenedGraph[:True|False]
-                     Enables experimental hardened static graph validation.
-                     Invalid or unsupported graph-construction constructs fail
-                     before target task execution. Initially requires a
-                     single in-process node. (Alias: --hardened-graph)
+                     Constructs an experimental standalone Ninja action graph.
+                     Requires the global properties MSBuildEmitActionGraph,
+                     MSBuildActionTaskHost, and MSBuildActionDotNetHost.
+                     File-I/O tasks are emitted, not executed. Restore must
+                     run separately. Requires a single in-process node.
+                     (Alias: --hardened-graph)
     </value>
     <comment>
       LOCALIZATION: None of the lines should be longer than a standard width console window, eg 80 chars.
       The switch names "hardenedGraph" and "--hardened-graph" should not be localized.
+      The property names "MSBuildEmitActionGraph", "MSBuildActionTaskHost",
+      and "MSBuildActionDotNetHost" should not be localized.
     </comment>
   </data>
   <data name="HelpMessage_48_TerminalLoggerParametersSwitch" Visibility="Public">

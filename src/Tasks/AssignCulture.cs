@@ -238,9 +238,19 @@ namespace Microsoft.Build.Tasks
     /// Assigns culture metadata using a fixed culture-name set and host-independent path semantics.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    [MSBuildPureTask]
+    [MSBuildDeclaredIOTask]
     public sealed class AssignCultureWithDeterministicSemantics : AssignCulture
     {
+        /// <summary>
+        /// Gets or sets the declared file inputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredInputs { get; set; } = [];
+
+        /// <summary>
+        /// Gets or sets the declared file outputs, which are empty for this zero-I/O task.
+        /// </summary>
+        public ITaskItem[] DeclaredOutputs { get; set; } = [];
+
         private protected override Culture.ItemCultureInfo GetItemCultureInfo(
             string name,
             string dependentUponFilename,
