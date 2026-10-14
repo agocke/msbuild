@@ -13,6 +13,9 @@ hosts. This roadmap describes planned work, not implemented behavior.
 - `RequestBuilder` currently validates and then enters ordinary `BuildTargets`.
 - `TaskExecutionHost` depends on project, batching, and engine logging state.
 - Existing composite SDK overlays provide a starting point for compilation.
+- `MSBuild.ActionTaskHost` executes a hand-authored JSON invocation in a fresh
+  process without the engine. It binds scalars, arrays, and items with custom
+  metadata; applies explicit context; and checks required declared files.
 
 Reuse these pieces without introducing another target interpreter. Keep
 ordinary builds and existing validation behavior unchanged outside the new
@@ -31,6 +34,9 @@ hosting. Reuse small binding helpers, not the whole `TaskExecutionHost`.
 `Microsoft.Build`. False results, exceptions, logged errors, and missing
 required outputs fail with useful diagnostics. Parameter checks cover item
 order, metadata, escaping, and unset versus empty values.
+
+This first slice is implemented with process-level tests. Graph emission and
+the Pure-to-DeclaredIO migration remain separate milestones.
 
 ## 2. Unify construction-time tasks under Declared-IO
 

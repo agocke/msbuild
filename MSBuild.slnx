@@ -86,6 +86,8 @@
     <Platform Solution="*|ARM64" Project="arm64" />
     <Platform Solution="*|x64" Project="x64" />
   </Project>
+  <Project Path="src/MSBuild.ActionTaskHost/MSBuild.ActionTaskHost.csproj" />
+  <Project Path="src/MSBuild.ActionTaskHost.UnitTests/MSBuild.ActionTaskHost.UnitTests.csproj" />
   <Project Path="src/MSBuild.EndToEnd.Tests/Microsoft.Build.EndToEnd.Tests.csproj">
     <Platform Solution="*|x64" Project="x64" />
   </Project>

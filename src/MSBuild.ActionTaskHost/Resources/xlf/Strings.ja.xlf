@@ -1,0 +1,142 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="1.2" xsi:schemaLocation="urn:oasis:names:tc:xliff:document:1.2 xliff-core-1.2-transitional.xsd">
+  <file datatype="xml" source-language="en" target-language="ja" original="../Strings.resx">
+    <body>
+      <trans-unit id="AbsolutePathRequired">
+        <source>The path "{0}" must be absolute. Write an absolute task assembly or working directory path in the invocation file.</source>
+        <target state="new">The path "{0}" must be absolute. Write an absolute task assembly or working directory path in the invocation file.</target>
+        <note>{0} is a path supplied by the invocation.</note>
+      </trans-unit>
+      <trans-unit id="ConflictingPath">
+        <source>The declared path "{0}" has conflicting input/output ownership. Duplicate outputs and in-place updates are not supported.</source>
+        <target state="new">The declared path "{0}" has conflicting input/output ownership. Duplicate outputs and in-place updates are not supported.</target>
+        <note>{0} is a declared file path.</note>
+      </trans-unit>
+      <trans-unit id="DuplicateParameter">
+        <source>The name "{0}" occurs more than once. Parameter and metadata names must be unique ignoring case.</source>
+        <target state="new">The name "{0}" occurs more than once. Parameter and metadata names must be unique ignoring case.</target>
+        <note>{0} is a parameter or metadata name.</note>
+      </trans-unit>
+      <trans-unit id="EngineDependencyNotSupported">
+        <source>The task assembly "{0}" requires Microsoft.Build. Standalone actions cannot load the MSBuild engine.</source>
+        <target state="new">The task assembly "{0}" requires Microsoft.Build. Standalone actions cannot load the MSBuild engine.</target>
+        <note>{0} is the task assembly path. Do not translate Microsoft.Build.</note>
+      </trans-unit>
+      <trans-unit id="ErrorEvent">
+        <source>{0}({1},{2}): error {3}: {4}</source>
+        <target state="new">{0}({1},{2}): error {3}: {4}</target>
+        <note>Diagnostic format: {0} file, {1} line, {2} column, {3} error code, {4} message. Preserve the diagnostic keyword "error".</note>
+      </trans-unit>
+      <trans-unit id="ExactPathRequired">
+        <source>The declared path "{0}" contains a wildcard. Supply exact, enumerated file paths.</source>
+        <target state="new">The declared path "{0}" contains a wildcard. Supply exact, enumerated file paths.</target>
+        <note>{0} is a declared file path.</note>
+      </trans-unit>
+      <trans-unit id="InvalidContract">
+        <source>The task "{0}" has an invalid DeclaredIO annotation. MSBuildDeclaredIORequiresUnsetAttribute must specify one parameter name.</source>
+        <target state="new">The task "{0}" has an invalid DeclaredIO annotation. MSBuildDeclaredIORequiresUnsetAttribute must specify one parameter name.</target>
+        <note>{0} is the task type. Do not translate DeclaredIO or MSBuildDeclaredIORequiresUnsetAttribute.</note>
+      </trans-unit>
+      <trans-unit id="InvalidEnvironmentValue">
+        <source>The environment variable "{0}" has a null value. Supply a string value or omit the variable.</source>
+        <target state="new">The environment variable "{0}" has a null value. Supply a string value or omit the variable.</target>
+        <note>{0} is an environment variable name.</note>
+      </trans-unit>
+      <trans-unit id="InvalidInvocation">
+        <source>The invocation file "{0}" must contain a JSON invocation object.</source>
+        <target state="new">The invocation file "{0}" must contain a JSON invocation object.</target>
+        <note>{0} is the invocation file path.</note>
+      </trans-unit>
+      <trans-unit id="InvalidParameter">
+        <source>The parameter "{0}" is not a writable task parameter of "{1}". Supply a public task parameter, not a host service.</source>
+        <target state="new">The parameter "{0}" is not a writable task parameter of "{1}". Supply a public task parameter, not a host service.</target>
+        <note>{0} is a parameter name; {1} is the task type.</note>
+      </trans-unit>
+      <trans-unit id="InvalidParameterValue">
+        <source>The value for parameter "{0}" cannot be bound to "{1}". Supply a supported scalar, array, or item value.</source>
+        <target state="new">The value for parameter "{0}" cannot be bound to "{1}". Supply a supported scalar, array, or item value.</target>
+        <note>{0} is a parameter name; {1} is its expected .NET type.</note>
+      </trans-unit>
+      <trans-unit id="InvalidSourceLocation">
+        <source>Invocation lineNumber and columnNumber must not be negative.</source>
+        <target state="new">Invocation lineNumber and columnNumber must not be negative.</target>
+        <note>Do not translate the JSON property names lineNumber and columnNumber.</note>
+      </trans-unit>
+      <trans-unit id="InvalidTaskType">
+        <source>The type "{0}" must be a public, concrete ITask implementation.</source>
+        <target state="new">The type "{0}" must be a public, concrete ITask implementation.</target>
+        <note>{0} is the task type. Do not translate ITask.</note>
+      </trans-unit>
+      <trans-unit id="InvocationFailed">
+        <source>Task invocation "{0}" failed: {1}</source>
+        <target state="new">Task invocation "{0}" failed: {1}</target>
+        <note>{0} is the invocation file path; {1} is the exception, including its details.</note>
+      </trans-unit>
+      <trans-unit id="MissingContract">
+        <source>The task "{0}" has no DeclaredIO contract. Use a task annotated with MSBuildDeclaredIOTaskAttribute.</source>
+        <target state="new">The task "{0}" has no DeclaredIO contract. Use a task annotated with MSBuildDeclaredIOTaskAttribute.</target>
+        <note>{0} is the task type. Do not translate DeclaredIO or MSBuildDeclaredIOTaskAttribute.</note>
+      </trans-unit>
+      <trans-unit id="MissingDeclarations">
+        <source>The task "{0}" must explicitly bind both DeclaredInputs and DeclaredOutputs as item arrays.</source>
+        <target state="new">The task "{0}" must explicitly bind both DeclaredInputs and DeclaredOutputs as item arrays.</target>
+        <note>{0} is the task type. Do not translate DeclaredInputs or DeclaredOutputs.</note>
+      </trans-unit>
+      <trans-unit id="NestedBuildNotSupported">
+        <source>BuildProjectFile is not supported by standalone task hosts. Expand child builds during graph construction.</source>
+        <target state="new">BuildProjectFile is not supported by standalone task hosts. Expand child builds during graph construction.</target>
+        <note>Do not translate BuildProjectFile.</note>
+      </trans-unit>
+      <trans-unit id="ParameterMustBeUnset">
+        <source>The parameter "{0}" must be unset or empty for this task's DeclaredIO contract.</source>
+        <target state="new">The parameter "{0}" must be unset or empty for this task's DeclaredIO contract.</target>
+        <note>{0} is a parameter name. Do not translate DeclaredIO.</note>
+      </trans-unit>
+      <trans-unit id="PersistentOutputRequired">
+        <source>The action "{0}" must declare a persistent regular-file output. Zero-I/O invocations belong in graph construction.</source>
+        <target state="new">The action "{0}" must declare a persistent regular-file output. Zero-I/O invocations belong in graph construction.</target>
+        <note>{0} is the task type.</note>
+      </trans-unit>
+      <trans-unit id="RegularFileRequired">
+        <source>The required declared file "{0}" is missing or is not a regular file. Check the invocation's inputs and outputs.</source>
+        <target state="new">The required declared file "{0}" is missing or is not a regular file. Check the invocation's inputs and outputs.</target>
+        <note>{0} is a declared file path.</note>
+      </trans-unit>
+      <trans-unit id="RequiredParameter">
+        <source>The required parameter "{0}" was not supplied for task "{1}". Add it to the invocation parameters.</source>
+        <target state="new">The required parameter "{0}" was not supplied for task "{1}". Add it to the invocation parameters.</target>
+        <note>{0} is a parameter name; {1} is the task type.</note>
+      </trans-unit>
+      <trans-unit id="TaskFailed">
+        <source>The task "{0}" returned false without logging an error.</source>
+        <target state="new">The task "{0}" returned false without logging an error.</target>
+        <note>{0} is the task type.</note>
+      </trans-unit>
+      <trans-unit id="UnsupportedParameterType">
+        <source>The parameter type "{0}" is not supported by the standalone host.</source>
+        <target state="new">The parameter type "{0}" is not supported by the standalone host.</target>
+        <note>{0} is a .NET type name.</note>
+      </trans-unit>
+      <trans-unit id="UnsupportedTaskHosting">
+        <source>The task "{0}" requires "{1}", which is not supported by the standalone host.</source>
+        <target state="new">The task "{0}" requires "{1}", which is not supported by the standalone host.</target>
+        <note>{0} is a task type; {1} is a task-hosting attribute type.</note>
+      </trans-unit>
+      <trans-unit id="UnsupportedVersion">
+        <source>The invocation version "{0}" is unsupported. Write a version 1 invocation file.</source>
+        <target state="new">The invocation version "{0}" is unsupported. Write a version 1 invocation file.</target>
+        <note>{0} is the invocation format version.</note>
+      </trans-unit>
+      <trans-unit id="Usage">
+        <source>Usage: MSBuild.ActionTaskHost --invocation &lt;invocation.json&gt;</source>
+        <target state="new">Usage: MSBuild.ActionTaskHost --invocation &lt;invocation.json&gt;</target>
+        <note>Do not translate the executable name or the --invocation option.</note>
+      </trans-unit>
+      <trans-unit id="WarningEvent">
+        <source>{0}({1},{2}): warning {3}: {4}</source>
+        <target state="new">{0}({1},{2}): warning {3}: {4}</target>
+        <note>Diagnostic format: {0} file, {1} line, {2} column, {3} warning code, {4} message. Preserve the diagnostic keyword "warning".</note>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>

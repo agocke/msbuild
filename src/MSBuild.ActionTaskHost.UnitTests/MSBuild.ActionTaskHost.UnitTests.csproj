@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>$(LatestDotNetCoreForMSBuild)</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Microsoft.Build.ActionTaskHost.UnitTests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Shouldly" />
+    <ProjectReference Include="..\MSBuild.ActionTaskHost\MSBuild.ActionTaskHost.csproj" />
+    <ProjectReference Include="..\Tasks\Microsoft.Build.Tasks.csproj" />
+    <ProjectReference Include="..\UnitTests.Shared\Microsoft.Build.UnitTests.Shared.csproj" />
+  </ItemGroup>
+</Project>

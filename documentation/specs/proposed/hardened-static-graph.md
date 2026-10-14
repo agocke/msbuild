@@ -128,6 +128,44 @@ their invocation-specific execution directories.
 
 ## Standalone task hosts
 
+The first host, `MSBuild.ActionTaskHost`, accepts `--invocation <file.json>`.
+Version 1 uses JSON values rather than command-line task expressions:
+
+```json
+{
+  "version": 1,
+  "taskAssembly": "/tools/Microsoft.Build.Tasks.Core.dll",
+  "taskType": "Microsoft.Build.Tasks.WriteLinesToFile",
+  "workingDirectory": "/workspace",
+  "environment": {},
+  "parameters": {
+    "File": "obj/generated.txt",
+    "Lines": ["first line", "second line"],
+    "Overwrite": true,
+    "DeclaredInputs": [],
+    "DeclaredOutputs": ["obj/generated.txt"]
+  }
+}
+```
+
+Assembly and working-directory paths are absolute; task paths are relative
+to that directory. Scalars use JSON strings, numbers, or booleans; the host
+converts them to the task's declared parameter types using invariant MSBuild
+conversions. Arrays are explicit JSON arrays, never semicolon-delimited text.
+An item is either a literal string or
+`{"itemSpec":"file.cs","metadata":{"Tag":"value"}}`. Item text and metadata
+are literal, not MSBuild-escaped or expression-expanded. Custom metadata is
+supported; derived item metadata is calculated by the task-item implementation.
+Omitted parameters keep task defaults, empty strings/arrays remain empty,
+and null values are rejected.
+
+The environment replaces inherited task environment variables and defaults to
+empty; culture is invariant. Optional `projectFile`, `lineNumber`, and
+`columnNumber` supply diagnostic locations. Unknown fields, unsupported
+versions/types, duplicate parameter names ignoring case, and missing required
+parameters fail explicitly. This file format is experimental, not a public
+serialization API.
+
 Start with one reusable console application, launched in a fresh process for
 each action. It loads a pinned managed task, binds supported parameter types,
 reconstructs items and metadata, applies explicit execution context, and

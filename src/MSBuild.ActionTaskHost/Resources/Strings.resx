@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms</value></resheader>
+  <data name="AbsolutePathRequired" xml:space="preserve">
+    <value>The path "{0}" must be absolute. Write an absolute task assembly or working directory path in the invocation file.</value>
+    <comment>{0} is a path supplied by the invocation.</comment>
+  </data>
+  <data name="ConflictingPath" xml:space="preserve">
+    <value>The declared path "{0}" has conflicting input/output ownership. Duplicate outputs and in-place updates are not supported.</value>
+    <comment>{0} is a declared file path.</comment>
+  </data>
+  <data name="DuplicateParameter" xml:space="preserve">
+    <value>The name "{0}" occurs more than once. Parameter and metadata names must be unique ignoring case.</value>
+    <comment>{0} is a parameter or metadata name.</comment>
+  </data>
+  <data name="EngineDependencyNotSupported" xml:space="preserve">
+    <value>The task assembly "{0}" requires Microsoft.Build. Standalone actions cannot load the MSBuild engine.</value>
+    <comment>{0} is the task assembly path. Do not translate Microsoft.Build.</comment>
+  </data>
+  <data name="ErrorEvent" xml:space="preserve">
+    <value>{0}({1},{2}): error {3}: {4}</value>
+    <comment>Diagnostic format: {0} file, {1} line, {2} column, {3} error code, {4} message. Preserve the diagnostic keyword "error".</comment>
+  </data>
+  <data name="ExactPathRequired" xml:space="preserve">
+    <value>The declared path "{0}" contains a wildcard. Supply exact, enumerated file paths.</value>
+    <comment>{0} is a declared file path.</comment>
+  </data>
+  <data name="InvalidInvocation" xml:space="preserve">
+    <value>The invocation file "{0}" must contain a JSON invocation object.</value>
+    <comment>{0} is the invocation file path.</comment>
+  </data>
+  <data name="InvalidEnvironmentValue" xml:space="preserve">
+    <value>The environment variable "{0}" has a null value. Supply a string value or omit the variable.</value>
+    <comment>{0} is an environment variable name.</comment>
+  </data>
+  <data name="InvalidContract" xml:space="preserve">
+    <value>The task "{0}" has an invalid DeclaredIO annotation. MSBuildDeclaredIORequiresUnsetAttribute must specify one parameter name.</value>
+    <comment>{0} is the task type. Do not translate DeclaredIO or MSBuildDeclaredIORequiresUnsetAttribute.</comment>
+  </data>
+  <data name="InvalidParameter" xml:space="preserve">
+    <value>The parameter "{0}" is not a writable task parameter of "{1}". Supply a public task parameter, not a host service.</value>
+    <comment>{0} is a parameter name; {1} is the task type.</comment>
+  </data>
+  <data name="InvalidParameterValue" xml:space="preserve">
+    <value>The value for parameter "{0}" cannot be bound to "{1}". Supply a supported scalar, array, or item value.</value>
+    <comment>{0} is a parameter name; {1} is its expected .NET type.</comment>
+  </data>
+  <data name="InvalidSourceLocation" xml:space="preserve">
+    <value>Invocation lineNumber and columnNumber must not be negative.</value>
+    <comment>Do not translate the JSON property names lineNumber and columnNumber.</comment>
+  </data>
+  <data name="InvalidTaskType" xml:space="preserve">
+    <value>The type "{0}" must be a public, concrete ITask implementation.</value>
+    <comment>{0} is the task type. Do not translate ITask.</comment>
+  </data>
+  <data name="InvocationFailed" xml:space="preserve">
+    <value>Task invocation "{0}" failed: {1}</value>
+    <comment>{0} is the invocation file path; {1} is the exception, including its details.</comment>
+  </data>
+  <data name="MissingContract" xml:space="preserve">
+    <value>The task "{0}" has no DeclaredIO contract. Use a task annotated with MSBuildDeclaredIOTaskAttribute.</value>
+    <comment>{0} is the task type. Do not translate DeclaredIO or MSBuildDeclaredIOTaskAttribute.</comment>
+  </data>
+  <data name="MissingDeclarations" xml:space="preserve">
+    <value>The task "{0}" must explicitly bind both DeclaredInputs and DeclaredOutputs as item arrays.</value>
+    <comment>{0} is the task type. Do not translate DeclaredInputs or DeclaredOutputs.</comment>
+  </data>
+  <data name="NestedBuildNotSupported" xml:space="preserve">
+    <value>BuildProjectFile is not supported by standalone task hosts. Expand child builds during graph construction.</value>
+    <comment>Do not translate BuildProjectFile.</comment>
+  </data>
+  <data name="ParameterMustBeUnset" xml:space="preserve">
+    <value>The parameter "{0}" must be unset or empty for this task's DeclaredIO contract.</value>
+    <comment>{0} is a parameter name. Do not translate DeclaredIO.</comment>
+  </data>
+  <data name="PersistentOutputRequired" xml:space="preserve">
+    <value>The action "{0}" must declare a persistent regular-file output. Zero-I/O invocations belong in graph construction.</value>
+    <comment>{0} is the task type.</comment>
+  </data>
+  <data name="RegularFileRequired" xml:space="preserve">
+    <value>The required declared file "{0}" is missing or is not a regular file. Check the invocation's inputs and outputs.</value>
+    <comment>{0} is a declared file path.</comment>
+  </data>
+  <data name="RequiredParameter" xml:space="preserve">
+    <value>The required parameter "{0}" was not supplied for task "{1}". Add it to the invocation parameters.</value>
+    <comment>{0} is a parameter name; {1} is the task type.</comment>
+  </data>
+  <data name="TaskFailed" xml:space="preserve">
+    <value>The task "{0}" returned false without logging an error.</value>
+    <comment>{0} is the task type.</comment>
+  </data>
+  <data name="UnsupportedParameterType" xml:space="preserve">
+    <value>The parameter type "{0}" is not supported by the standalone host.</value>
+    <comment>{0} is a .NET type name.</comment>
+  </data>
+  <data name="UnsupportedTaskHosting" xml:space="preserve">
+    <value>The task "{0}" requires "{1}", which is not supported by the standalone host.</value>
+    <comment>{0} is a task type; {1} is a task-hosting attribute type.</comment>
+  </data>
+  <data name="UnsupportedVersion" xml:space="preserve">
+    <value>The invocation version "{0}" is unsupported. Write a version 1 invocation file.</value>
+    <comment>{0} is the invocation format version.</comment>
+  </data>
+  <data name="Usage" xml:space="preserve">
+    <value>Usage: MSBuild.ActionTaskHost --invocation &lt;invocation.json&gt;</value>
+    <comment>Do not translate the executable name or the --invocation option.</comment>
+  </data>
+  <data name="WarningEvent" xml:space="preserve">
+    <value>{0}({1},{2}): warning {3}: {4}</value>
+    <comment>Diagnostic format: {0} file, {1} line, {2} column, {3} warning code, {4} message. Preserve the diagnostic keyword "warning".</comment>
+  </data>
+</root>
