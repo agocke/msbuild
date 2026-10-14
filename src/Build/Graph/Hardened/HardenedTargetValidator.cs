@@ -566,6 +566,14 @@ internal sealed class HardenedTargetValidator
             return;
         }
 
+        if (MSBuildNameIgnoreCaseComparer.Default.Equals(property.Name, HardenedActionGraph.HostOSProperty))
+        {
+            ReportUnsupported(property.Location,
+                $"assignment to immutable construction input '{property.Name}'",
+                "action graph construction");
+            return;
+        }
+
         ExpressionValidationResult valueResult = ValidateExpression(
             property,
             property.Value,
@@ -972,6 +980,15 @@ internal sealed class HardenedTargetValidator
 
             if (destination is null)
             {
+                continue;
+            }
+
+            if (output is ProjectTaskOutputPropertyInstance &&
+                MSBuildNameIgnoreCaseComparer.Default.Equals(destination, HardenedActionGraph.HostOSProperty))
+            {
+                ReportUnsupported(output.Location,
+                    $"task output to immutable construction input '{destination}'",
+                    "action graph construction");
                 continue;
             }
 

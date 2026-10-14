@@ -708,6 +708,13 @@ namespace Microsoft.Build.Evaluation
                     {
                         SetBuiltInProperty(ReservedPropertyNames.hardenedGraph, "true");
                     }
+
+                    if (!string.IsNullOrEmpty(_data.GetProperty("MSBuildEmitActionGraph")?.EvaluatedValue))
+                    {
+                        Graph.Hardened.HardenedActionGraph.GetHostOS(
+                            _data.GlobalPropertiesDictionary.GetProperty(Graph.Hardened.HardenedActionGraph.HostOSProperty)?.EvaluatedValue,
+                            _projectRootElement.ProjectFileLocation);
+                    }
                 }
 
                 Assumed.NotEqual(_data.EvaluationId, BuildEventContext.InvalidEvaluationId, "Evaluation should produce an evaluation ID");
@@ -970,6 +977,13 @@ namespace Microsoft.Build.Evaluation
                     foreach (string propertyName in _expander.ExpandIntoStringListLeaveEscaped(currentProjectOrImport.TreatAsLocalProperty, ExpanderOptions.ExpandProperties, currentProjectOrImport.TreatAsLocalPropertyLocation))
                     {
                         XmlUtilities.VerifyThrowProjectValidElementName(propertyName, currentProjectOrImport.Location);
+                        ProjectErrorUtilities.VerifyThrowInvalidProject(
+                            string.IsNullOrEmpty(_data.GetProperty("MSBuildEmitActionGraph")?.EvaluatedValue) ||
+                            !MSBuildNameIgnoreCaseComparer.Default.Equals(propertyName, Graph.Hardened.HardenedActionGraph.HostOSProperty),
+                            currentProjectOrImport.TreatAsLocalPropertyLocation,
+                            "HardenedGraphUnsupportedConstruct",
+                            $"TreatAsLocalProperty for immutable construction input '{propertyName}'",
+                            "action graph construction");
                         _data.GlobalPropertiesToTreatAsLocal.Add(propertyName);
                     }
                 }

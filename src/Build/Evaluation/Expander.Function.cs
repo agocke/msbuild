@@ -366,7 +366,8 @@ internal partial class Expander<P, I>
             Justification = "_bindingFlags is masked to AllowedBindingFlags at construction, so it never carries BindingFlags.NonPublic; GetMethods(_bindingFlags) therefore binds only public methods of the property-function allowlist receiver, whose public members are preserved for trimming.")]
         internal object Execute(object objectInstance, IPropertyProvider<P> properties, ExpanderOptions options, IElementLocation elementLocation)
         {
-            if (!string.IsNullOrEmpty(properties.GetProperty("MSBuildEmitActionGraph")?.EvaluatedValue) &&
+            bool constructingGraph = !string.IsNullOrEmpty(properties.GetProperty("MSBuildEmitActionGraph")?.EvaluatedValue);
+            if (constructingGraph &&
                 !Graph.Hardened.HardenedActionGraph.IsAllowedFunction(_receiverType, _methodMethodName))
             {
                 ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "HardenedGraphProhibitedFunction",
@@ -513,7 +514,23 @@ internal partial class Expander<P, I>
                     {
                         // First attempt to recognize some well-known functions to avoid binding
                         // and potential first-chance MissingMethodExceptions.
-                        wellKnownFunctionSuccess = WellKnownFunctions.TryExecuteWellKnownFunction(_methodMethodName, _receiverType, _fileSystem, out functionResult, objectInstance, args);
+                        if (constructingGraph &&
+                            _receiverType == typeof(IntrinsicFunctions) &&
+                            string.Equals(_methodMethodName, nameof(IntrinsicFunctions.IsOSPlatform), StringComparison.OrdinalIgnoreCase))
+                        {
+                            ProjectErrorUtilities.VerifyThrowInvalidProject(
+                                ParseArgs.TryGetArg(args, out string platform) && !string.IsNullOrEmpty(platform),
+                                elementLocation, "InvalidFunctionMethodUnavailable", _methodMethodName, _receiverType.FullName);
+                            string hostOS = Graph.Hardened.HardenedActionGraph.GetHostOS(
+                                properties.GetProperty(Graph.Hardened.HardenedActionGraph.HostOSProperty)?.EvaluatedValue,
+                                elementLocation);
+                            functionResult = string.Equals(hostOS, platform, StringComparison.OrdinalIgnoreCase);
+                            wellKnownFunctionSuccess = true;
+                        }
+                        else
+                        {
+                            wellKnownFunctionSuccess = WellKnownFunctions.TryExecuteWellKnownFunction(_methodMethodName, _receiverType, _fileSystem, out functionResult, objectInstance, args);
+                        }
 
                         if (!wellKnownFunctionSuccess)
                         {

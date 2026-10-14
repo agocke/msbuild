@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 using System.Text.Json;
@@ -2703,6 +2704,15 @@ namespace Microsoft.Build.CommandLine
 
                         cpuCount = 1;
                         multiThreaded = false;
+                        if (!globalProperties.ContainsKey("MSBuildGraphHostOS"))
+                        {
+                            globalProperties.Add("MSBuildGraphHostOS",
+                                NativeMethodsShared.IsWindows ? "windows" :
+                                NativeMethodsShared.IsOSX ? "osx" :
+                                NativeMethodsShared.IsLinux ? "linux" :
+                                RuntimeInformation.IsOSPlatform(OSPlatform.Create("FREEBSD")) ? "freebsd" :
+                                "unknown");
+                        }
                     }
 
                     if (commandLineSwitches.IsParameterizedSwitchSet(CommandLineSwitches.ParameterizedSwitch.IsolateProjects))

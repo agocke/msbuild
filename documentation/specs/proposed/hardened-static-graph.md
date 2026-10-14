@@ -77,6 +77,30 @@ properties and passed to both generator and compiler. Construction knows the
 path; execution supplies the contents. Only zero-I/O invocations may use
 `<Output>` mappings.
 
+### Captured construction platform
+
+The command-line launcher captures the host OS once as the global property
+`MSBuildGraphHostOS`. It defaults to the launcher's OS and may be supplied
+explicitly with `-p:MSBuildGraphHostOS=linux`; supported values are `windows`,
+`linux`, `osx`, and `freebsd`, case-insensitively. Programmatic callers must
+supply this global input before evaluating a graph-emission project.
+Environment and project properties do not replace the global input.
+`TreatAsLocalProperty`, target assignments, and task output mappings cannot
+make it mutable.
+
+During hardened evaluation and target construction, `[MSBuild]::IsOSPlatform`
+compares its argument with this captured value instead of querying the OS.
+Ordinary builds retain the existing runtime query. The emitter records the
+canonical value as `msbuild_construction_host_os` in the Ninja file, so changing
+it changes graph identity even when no action parameter depends on it. Future
+construction-cache keys must include this input; no such cache is implemented
+yet.
+
+This is the construction host, not the action execution platform or the
+artifact's target platform. An override does not virtualize filesystem/path
+semantics, change executors, or supply a different toolchain. Remote execution
+and cross-platform toolchain selection remain separate configuration work.
+
 ## Graph construction
 
 Reuse MSBuild's target ordering, expression expansion, batching, and

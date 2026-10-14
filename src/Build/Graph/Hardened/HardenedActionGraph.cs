@@ -19,6 +19,8 @@ namespace Microsoft.Build.Graph.Hardened;
 
 internal sealed class HardenedActionGraph
 {
+    internal const string HostOSProperty = "MSBuildGraphHostOS";
+
     private static readonly HashSet<string> s_intrinsicFunctions = new(StringComparer.OrdinalIgnoreCase)
     {
         "Add", "Subtract", "Multiply", "Divide", "Modulo", "BitwiseAnd", "BitwiseOr",
@@ -28,7 +30,27 @@ internal sealed class HardenedActionGraph
         "VersionLessThan", "VersionLessThanOrEquals",
         "GetTargetFrameworkIdentifier", "GetTargetFrameworkVersion", "IsTargetFrameworkCompatible",
         "GetTargetPlatformIdentifier", "GetTargetPlatformVersion", "FilterTargetFrameworks",
+        nameof(IntrinsicFunctions.IsOSPlatform),
     };
+
+    internal static string GetHostOS(string? value, IElementLocation location)
+    {
+        string hostOS =
+            string.Equals(value, "windows", StringComparison.OrdinalIgnoreCase) ? "windows" :
+            string.Equals(value, "linux", StringComparison.OrdinalIgnoreCase) ? "linux" :
+            string.Equals(value, "osx", StringComparison.OrdinalIgnoreCase) ? "osx" :
+            string.Equals(value, "freebsd", StringComparison.OrdinalIgnoreCase) ? "freebsd" :
+            string.Empty;
+        if (hostOS.Length == 0)
+        {
+            ProjectErrorUtilities.ThrowInvalidProject(
+                location, "HardenedGraphUnsupportedConstruct",
+                "missing or unsupported global MSBuildGraphHostOS; supply windows, linux, osx, or freebsd",
+                "action graph construction");
+        }
+
+        return hostOS;
+    }
 
     internal static bool IsAllowedFunction(Type receiver, string member)
     {
@@ -49,6 +71,7 @@ internal sealed class HardenedActionGraph
     private readonly string _host;
     private readonly string _dotnet;
     private readonly string _directory;
+    private readonly string _hostOS;
     private readonly Dictionary<string, string> _environment;
     private readonly List<ActionInvocation> _actions = [];
     private readonly ElementLocation _location;
@@ -57,6 +80,9 @@ internal sealed class HardenedActionGraph
     {
         _location = project.ProjectFileLocation;
         _directory = project.Directory;
+        Require(project.GlobalProperties.ContainsKey(HostOSProperty),
+            $"{HostOSProperty} not supplied as a global construction input");
+        _hostOS = GetHostOS(project.GlobalProperties[HostOSProperty], _location);
         Require(project.GlobalProperties.ContainsKey("MSBuildEmitActionGraph"),
             "MSBuildEmitActionGraph set inside a project instead of as a global property");
         Require(Path.IsPathRooted(project.GetPropertyValue("MSBuildEmitActionGraph")),
@@ -173,7 +199,8 @@ internal sealed class HardenedActionGraph
         }
 
         string manifestDirectory = _destination + ".actions";
-        StringBuilder ninja = new("ninja_required_version = 1.10\n\n");
+        StringBuilder ninja = new("ninja_required_version = 1.10\n");
+        ninja.Append("msbuild_construction_host_os = ").Append(_hostOS).Append("\n\n");
         List<string> previousOutputs = [];
         List<string> allOutputs = [];
         List<(string Path, byte[] Contents)> manifests = [];

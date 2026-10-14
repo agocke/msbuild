@@ -101,6 +101,136 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
     }
 
     [UnixOnlyTheory]
+    [InlineData("windows", "WINDOWS", "True")]
+    [InlineData("linux", "OsX", "False")]
+    [InlineData("osx", "oSx", "True")]
+    [InlineData("freebsd", "WINDOWS", "False")]
+    [InlineData("LINUX", "linux", "True")]
+    public void UsesCapturedHostOSDuringEvaluationAndConstruction(string hostOS, string query, string expected)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        string contents = File.ReadAllText(project).Replace("<Target Name=\"Build\"", $$"""
+            <PropertyGroup>
+              <MSBuildGraphHostOS>ignored-project-value</MSBuildGraphHostOS>
+              <RequestedOS>{{query}}</RequestedOS>
+              <Evaluated>$([MSBuild]::IsOSPlatform('$(RequestedOS)'))</Evaluated>
+            </PropertyGroup>
+            <Target Name="Build"
+            """);
+        contents = contents.Replace("<GraphValueTask", """
+            <PropertyGroup>
+              <Constructed>$([MSBuild]::IsOSPlatform('$(RequestedOS)'))</Constructed>
+            </PropertyGroup>
+            <GraphValueTask
+            """);
+        contents = contents.Replace("</GraphValueTask>", """
+            </GraphValueTask>
+            <ItemGroup>
+              <Values>
+                <Tag>$(Evaluated)|$(Constructed)|$(MSBuildGraphHostOS)</Tag>
+              </Values>
+            </ItemGroup>
+            """);
+        File.WriteAllText(project, contents);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph, $"-p:MSBuildGraphHostOS={hostOS}").ShouldBeTrue();
+        File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
+        File.ReadAllText(graph).ShouldContain("msbuild_construction_host_os = " + hostOS.ToLowerInvariant());
+        Ninja(graph, out bool success);
+
+        success.ShouldBeTrue();
+        File.ReadAllText(Path.Combine(directory, "first.txt")).ShouldBe($"literal%3B;value|{expected}|{expected}|{hostOS}");
+    }
+
+    [UnixOnlyFact]
+    public void CapturedHostOSParticipatesInGraphIdentity()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph).ShouldBeTrue();
+        string detectedHostOS = OperatingSystem.IsMacOS() ? "osx" :
+            OperatingSystem.IsFreeBSD() ? "freebsd" : "linux";
+        File.ReadAllText(graph).ShouldContain("msbuild_construction_host_os = " + detectedHostOS);
+        Generate(project, graph, "-p:MSBuildGraphHostOS=osx").ShouldBeTrue();
+        string firstGraph = File.ReadAllText(graph);
+        firstGraph.ShouldContain("msbuild_construction_host_os = osx");
+        Generate(project, graph, "-p:MSBuildGraphHostOS=windows").ShouldBeTrue();
+
+        string secondGraph = File.ReadAllText(graph);
+        secondGraph.ShouldNotBe(firstGraph);
+        secondGraph.ShouldContain("msbuild_construction_host_os = windows");
+        File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
+    }
+
+    [UnixOnlyTheory]
+    [InlineData("Empty")]
+    [InlineData("Unknown")]
+    [InlineData("TreatAsLocal")]
+    [InlineData("TargetProperty")]
+    [InlineData("TaskOutput")]
+    [InlineData("NoArguments")]
+    [InlineData("EmptyArgument")]
+    [InlineData("ExtraArgument")]
+    public void RejectsInvalidOrMutableHostConfiguration(string invalid)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        string contents = File.ReadAllText(project);
+        contents = invalid switch
+        {
+            "TreatAsLocal" => contents.Replace("<Project>", "<Project TreatAsLocalProperty=\"msbuildgraphhostos\">"),
+            "TargetProperty" => contents.Replace("<GraphValueTask", "<PropertyGroup><MSBuildGraphHostOS>windows</MSBuildGraphHostOS></PropertyGroup><GraphValueTask"),
+            "TaskOutput" => contents.Replace("ItemName=\"Values\"", "PropertyName=\"MSBuildGraphHostOS\""),
+            "NoArguments" => contents.Replace("<Target Name=\"Build\"", "<PropertyGroup><Bad>$([MSBuild]::IsOSPlatform())</Bad></PropertyGroup><Target Name=\"Build\""),
+            "EmptyArgument" => contents.Replace("<Target Name=\"Build\"", "<PropertyGroup><Bad>$([MSBuild]::IsOSPlatform(''))</Bad></PropertyGroup><Target Name=\"Build\""),
+            "ExtraArgument" => contents.Replace("<Target Name=\"Build\"", "<PropertyGroup><Bad>$([MSBuild]::IsOSPlatform('osx', 'linux'))</Bad></PropertyGroup><Target Name=\"Build\""),
+            _ => contents,
+        };
+        File.WriteAllText(project, contents);
+        string graph = Path.Combine(directory, "build.ninja");
+        string arguments = invalid switch
+        {
+            "Empty" => "-p:MSBuildGraphHostOS=",
+            "Unknown" => "-p:MSBuildGraphHostOS=unknown",
+            _ => "-p:MSBuildGraphHostOS=osx",
+        };
+
+        Generate(project, graph, arguments).ShouldBeFalse();
+
+        File.Exists(graph).ShouldBeFalse();
+        Directory.Exists(graph + ".actions").ShouldBeFalse();
+        File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
+    }
+
+    [UnixOnlyFact]
+    public void OrdinaryEvaluationStillQueriesTheActualHostOS()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string project = env.CreateFile(".proj").Path;
+        File.WriteAllText(project, """
+            <Project>
+              <PropertyGroup>
+                <ActualHostWindows>$([MSBuild]::IsOSPlatform('WINDOWS'))</ActualHostWindows>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        string output = RunnerUtilities.ExecBootstrapedMSBuild(
+            $"\"{project}\" --hardened-graph:false -p:MSBuildGraphHostOS=windows -getProperty:ActualHostWindows -nr:false",
+            out bool success, outputHelper: _output);
+
+        success.ShouldBeTrue();
+        output.ShouldContain("False");
+    }
+
+    [UnixOnlyTheory]
     [InlineData("$([MSBuild]::GetTargetFrameworkIdentifier('net11.0'))", ".NETCoreApp")]
     [InlineData("$([MSBuild]::GetTargetFrameworkVersion('net11.0'))", "11.0")]
     [InlineData("$([MSBuild]::IsTargetFrameworkCompatible('net11.0', 'netstandard2.0'))", "True")]
