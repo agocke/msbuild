@@ -11,8 +11,13 @@ namespace Microsoft.Build.Tasks
     /// This task is intended to be called from internal targets only.
     /// </summary>
     [MSBuildMultiThreadableTask]
+    [MSBuildDeclaredIOTask]
     public sealed class MSBuildInternalMessage : TaskExtension
     {
+        public ITaskItem[] DeclaredInputs { get; set; } = [];
+
+        public ITaskItem[] DeclaredOutputs { get; set; } = [];
+
         private enum BuildMessageSeverity
         {
             /// <summary>

@@ -156,12 +156,28 @@ construction, including Roslyn's language-version expression
 computed indices, chained string operations, character arrays, invalid
 indices, and rejection of unapproved array methods.
 
-The next observed evaluation blocker is
-`ToolLocationHelper.GetPlatformSDKLocation` in
-`Microsoft.Common.CurrentVersion.targets`, which discovers installed platform
-SDKs through default disk/registry locations. That discovery needs explicit
-configuration or a fetch-stage result, not another pure-function allowance.
-The stock Roslyn task also lacks DeclaredIO annotations. SDK `Build` is still
+Platform SDK discovery is now a
+[Restore-stage input](hardened-static-graph.md#restore-time-platform-sdk-discovery),
+not another pure-function allowance:
+
+```sh
+dotnet restore src/Samples/ActionGraphHelloWorld/HelloWorld.csproj \
+  -p:MSBuildRestorePlatformSDK=true
+```
+
+`Microsoft.Common.PlatformSDK.targets` preserves the shared property logic
+while substituting saved results only for machine searches and path probes.
+The import records absent SDKs and validates discovery inputs; it does not
+freeze final SDK properties. Process tests cover both metadata layouts,
+construction after removing the discovered directories, independently
+changing pure overrides, missing/stale imports, and per-framework Restore.
+Writer tests cover literal escaping and unchanged-file timestamps.
+
+The SDK trial now passes platform discovery and reaches
+`System.IO.Path.GetFullPath` in `Microsoft.Common.CurrentVersion.targets`
+(computing `TargetDir` from the project directory and `OutDir`). The current
+allowlist rejects that API because its general form can use ambient state.
+The stock Roslyn task also lacks DeclaredIO annotations. SDK `Build` remains
 unsupported; ambient discovery has not been allowed as a fallback.
 
 Use existing SDK overlays for a single-framework C# hello-world profile:

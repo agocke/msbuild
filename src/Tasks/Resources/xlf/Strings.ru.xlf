@@ -209,6 +209,11 @@
         <target state="translated">MSB9904: если включен PreferNativeArm64, установите для платформы значение AnyCPU. Текущая платформа: {0}.</target>
         <note>{StrBegin="MSB9904: "}</note>
       </trans-unit>
+      <trans-unit id="CommonSdk.PlatformSDKRestoreConfigurationChanged">
+        <source>MSB3668: The platform SDK restore file "{0}" does not match the current "{1}" configuration. Run Restore with MSBuildRestorePlatformSDK=true for this configuration before generating the action graph.</source>
+        <target state="new">MSB3668: The platform SDK restore file "{0}" does not match the current "{1}" configuration. Run Restore with MSBuildRestorePlatformSDK=true for this configuration before generating the action graph.</target>
+        <note>{StrBegin="MSB3668: "}{0} is a generated MSBuild props file path. {1} is the configuration input name. Restore and MSBuildRestorePlatformSDK=true are not localized.</note>
+      </trans-unit>
       <trans-unit id="CommonSdk.Prefer32BitAndPreferNativeArm64Enabled">
         <source>MSB9902: Prefer32Bit and PreferNativeArm64 options are mutually exclusive. Please enable only one.</source>
         <target state="translated">MSB9902: параметры Prefer32Bit и PreferNativeArm64 являются взаимоисключающими. Включите только один.</target>

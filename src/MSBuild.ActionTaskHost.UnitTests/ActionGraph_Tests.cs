@@ -20,6 +20,105 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
     private readonly ITestOutputHelper _output = output;
 
     [UnixOnlyTheory]
+    [InlineData("Windows Metadata")]
+    [InlineData("References/CommonConfiguration/Neutral")]
+    public void RestoreCapturesSDKIOButLeavesPropertyDerivationInGraphConstruction(string metadataSubdirectory)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string sdk = Path.Combine(directory, "sdk & space'quote");
+        string metadata = Path.Combine(sdk, metadataSubdirectory);
+        Directory.CreateDirectory(metadata);
+        string project = WritePlatformSDKProject(directory, sdk);
+        RestorePlatformSDK(project).ShouldBeTrue();
+        string snapshot = Path.Combine(directory, "sdk.props");
+        string contents = File.ReadAllText(snapshot);
+        contents.ShouldContain("<_PlatformSDKPathExists>true</_PlatformSDKPathExists>");
+        contents.ShouldNotContain("<TargetPlatformSdkPath>");
+        contents.ShouldNotContain("<TargetPlatformWinMDLocation>");
+        File.SetLastWriteTimeUtc(snapshot, DateTime.UtcNow.AddMinutes(-10));
+        DateTime written = File.GetLastWriteTimeUtc(snapshot);
+        RestorePlatformSDK(project).ShouldBeTrue();
+        File.GetLastWriteTimeUtc(snapshot).ShouldBe(written);
+        Directory.Move(sdk, sdk + ".moved");
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph,
+            "-p:TargetPlatformWinMDLocation=explicit-winmd -p:TargetPlatformDisplayName=explicit-display").ShouldBeTrue();
+        File.Exists(Path.Combine(directory, "result.txt")).ShouldBeFalse();
+        Ninja(graph, out bool succeeded);
+
+        succeeded.ShouldBeTrue();
+        File.ReadAllText(Path.Combine(directory, "result.txt")).Replace('\\', '/')
+            .ShouldBe(metadata.Replace('\\', '/') + "|explicit-winmd|GraphMissingSDK,Version=1.0|explicit-display|");
+    }
+
+    [UnixOnlyFact]
+    public void RestoreRecordsAnAbsentSDKWithoutRepeatingMachineDiscovery()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WritePlatformSDKProject(directory);
+        RestorePlatformSDK(project).ShouldBeTrue();
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph).ShouldBeTrue();
+        Ninja(graph, out bool succeeded);
+
+        succeeded.ShouldBeTrue();
+        File.ReadAllText(Path.Combine(directory, "result.txt"))
+            .ShouldBe("||GraphMissingSDK,Version=1.0|GraphMissingSDK 1.0|");
+    }
+
+    [UnixOnlyTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RejectsMissingOrMismatchedPlatformSDKDiscovery(bool restore)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WritePlatformSDKProject(directory);
+        if (restore)
+        {
+            RestorePlatformSDK(project).ShouldBeTrue();
+        }
+
+        string graph = Path.Combine(directory, "build.ninja");
+        Generate(project, graph, out string log, "-p:TargetPlatformVersion=2.0").ShouldBeFalse();
+
+        log.ShouldContain(restore ? "MSB3668" : "MSB4019");
+        File.Exists(graph).ShouldBeFalse();
+        Directory.Exists(graph + ".actions").ShouldBeFalse();
+    }
+
+    [UnixOnlyFact]
+    public void RestoreCapturesPlatformSDKDiscoveryForEachFramework()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WritePlatformSDKProject(directory);
+        string contents = File.ReadAllText(project)
+            .Replace("<MSBuildPlatformSDKRestoreFile>$(MSBuildThisFileDirectory)sdk.props</MSBuildPlatformSDKRestoreFile>", "")
+            .Replace("<Target Name=\"Restore\" />", """
+                <Target Name="Restore">
+                  <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="_GenerateProjectRestoreGraphPerFramework"
+                           Properties="TargetFramework=first" />
+                  <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="_GenerateProjectRestoreGraphPerFramework"
+                           Properties="TargetFramework=second" />
+                </Target>
+                <Target Name="_GenerateProjectRestoreGraphPerFramework" />
+                """);
+        File.WriteAllText(project, contents);
+
+        RestorePlatformSDK(project).ShouldBeTrue();
+
+        Directory.GetFiles(Path.Combine(directory, "obj"), "*.platform-sdk.props", SearchOption.AllDirectories)
+            .Length.ShouldBe(3);
+        Generate(project, Path.Combine(directory, "first.ninja"), "-p:TargetFramework=first").ShouldBeTrue();
+        Generate(project, Path.Combine(directory, "second.ninja"), "-p:TargetFramework=second").ShouldBeTrue();
+    }
+
+    [UnixOnlyTheory]
     [InlineData(false)]
     [InlineData(true)]
     public void NinjaCompilesAndRunsHelloWorldWithoutTheEngine(bool invalidSource)
@@ -567,6 +666,38 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
 
         success.ShouldBeTrue();
         File.ReadAllText(Path.Combine(directory, "second.txt")).ShouldBe("literal%3B;value|metadata%25|consumed");
+    }
+
+    private static string WritePlatformSDKProject(string directory, string sdkRoot = "")
+    {
+        string project = Path.Combine(directory, "build.proj");
+        File.WriteAllText(project, $$"""
+            <Project DefaultTargets="Build">
+              <UsingTask TaskName="GraphTransformTask" AssemblyFile="{{SecurityElement.Escape(typeof(GraphTransformTask).Assembly.Location)}}" />
+              <PropertyGroup>
+                <TargetPlatformIdentifier>GraphMissingSDK</TargetPlatformIdentifier>
+                <TargetPlatformVersion>1.0</TargetPlatformVersion>
+                <TargetPlatformSdkRootOverride>{{SecurityElement.Escape(sdkRoot)}}</TargetPlatformSdkRootOverride>
+                <MSBuildPlatformSDKRestoreFile>$(MSBuildThisFileDirectory)sdk.props</MSBuildPlatformSDKRestoreFile>
+              </PropertyGroup>
+              <Import Project="$(MSBuildToolsPath)/Microsoft.Common.PlatformSDK.targets" />
+              <Target Name="Restore" />
+              <Target Name="Build">
+                <GraphTransformTask File="result.txt"
+                                    Text="$(TargetPlatformSdkMetadataLocation)|$(TargetPlatformWinMDLocation)|$(TargetPlatformMoniker)|$(TargetPlatformDisplayName)"
+                                    DeclaredInputs="" DeclaredOutputs="result.txt" />
+              </Target>
+            </Project>
+            """);
+        return project;
+    }
+
+    private bool RestorePlatformSDK(string project)
+    {
+        RunnerUtilities.ExecBootstrapedMSBuild(
+            $"\"{project}\" -t:Restore -p:MSBuildRestorePlatformSDK=true -nr:false -v:minimal",
+            out bool succeeded, outputHelper: _output);
+        return succeeded;
     }
 
     private static string WriteProject(string directory)

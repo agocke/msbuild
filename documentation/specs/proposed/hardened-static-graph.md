@@ -7,10 +7,10 @@ writes `build.ninja` and concrete task-invocation manifests, and exits. Ninja
 then launches independent task-host console processes. Execution requires
 neither the MSBuild engine nor another target interpreter or custom scheduler.
 
-This is experimental, opt-in behavior. Hardened validation without graph
-emission still executes builds with the ordinary engine. A first graph-only
-path emits single-project Ninja bundles for the supported subset. Existing
-builds remain unchanged unless graph generation is selected. The
+This is experimental, opt-in behavior. Hardened mode requires graph emission
+and never falls back to ordinary target execution. A first graph-only path
+emits single-project Ninja bundles for the supported subset. Existing
+builds remain unchanged outside the opt-in graph/Restore workflow. The
 [roadmap](hardened-static-graph-implementation.md) describes the implementation.
 
 ## Pipeline
@@ -100,6 +100,42 @@ This is the construction host, not the action execution platform or the
 artifact's target platform. An override does not virtualize filesystem/path
 semantics, change executors, or supply a different toolchain. Remote execution
 and cross-platform toolchain selection remain separate configuration work.
+
+### Restore-time platform SDK discovery
+
+Platform SDK machine searches belong to Restore, not graph construction:
+
+```sh
+msbuild Demo.csproj -target:Restore -p:MSBuildRestorePlatformSDK=true
+```
+
+That ordinary Restore invocation records SDK location/registry lookups,
+display-name discovery, and metadata-path existence checks in a generated
+import. It records empty results too: no installed SDK is a discovery result,
+not permission to search again during graph construction.
+
+The import contains discovery facts, not final build properties. In the fresh
+hardened evaluation, the existing defaulting, path selection, moniker
+construction, and explicit overrides execute normally using those facts.
+For example, changing a display-name or WinMD override does not require
+Restore when it does not affect discovery.
+
+The default import path is
+`$(BaseIntermediateOutputPath)/hardened/$(Configuration)/$(Platform)/$(TargetFramework)/$(MSBuildProjectFile).platform-sdk.props`
+(`obj` is used when the base path is empty). `MSBuildPlatformSDKRestoreFile`
+can select a different file. The Restore hook runs for each framework's
+restore-graph traversal, as well as direct `Restore` targets.
+
+Hardened evaluation requires this import; a missing file fails rather than
+falling back to machine discovery. Before constructing actions, an initial
+target checks the discovery inputs, including platform identifier/version,
+SDK path/metadata overrides, tools/runtime context, and captured host OS.
+A mismatch reports MSB3668 and requires Restore again. Repeating Restore with
+unchanged discovery preserves the file's timestamp.
+
+In this prototype, the queries run during ordinary Restore's evaluation and
+the Restore target hook persists their results. Ordinary non-hardened builds
+retain their existing discovery behavior.
 
 ## Graph construction
 

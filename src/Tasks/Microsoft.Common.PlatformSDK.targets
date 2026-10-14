@@ -1,0 +1,84 @@
+<!--
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Ordinary builds retain evaluation-time discovery. The action-graph workflow
+captures only I/O results in Restore; property derivation remains shared.
+-->
+<Project>
+  <PropertyGroup>
+    <TargetPlatformIdentifier Condition="'$(TargetPlatformIdentifier)' == '' and '$(_EnableDefaultWindowsPlatform)' != 'false'">Windows</TargetPlatformIdentifier>
+    <TargetPlatformVersion Condition="'$(TargetPlatformVersion)' == '' and '$(_EnableDefaultWindowsPlatform)' != 'false'">7.0</TargetPlatformVersion>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(MSBuildRestorePlatformSDK)' == 'true' or '$(MSBuildHardenedGraph)' == 'true'">
+    <_PlatformSDKRestoreBasePath Condition="'$(BaseIntermediateOutputPath)' == ''">obj</_PlatformSDKRestoreBasePath>
+    <_PlatformSDKRestoreBasePath Condition="'$(BaseIntermediateOutputPath)' != ''">$(BaseIntermediateOutputPath)</_PlatformSDKRestoreBasePath>
+    <MSBuildPlatformSDKRestoreFile Condition="'$(MSBuildPlatformSDKRestoreFile)' == ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(_PlatformSDKRestoreBasePath)', 'hardened', '$(Configuration)', '$(Platform)', '$(TargetFramework)', '$(MSBuildProjectFile).platform-sdk.props'))</MSBuildPlatformSDKRestoreFile>
+    <MSBuildPlatformSDKRestoreFile>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(MSBuildPlatformSDKRestoreFile)'))</MSBuildPlatformSDKRestoreFile>
+    <_PlatformSDKRestoreInputProjectFullPath>$(MSBuildProjectFullPath)</_PlatformSDKRestoreInputProjectFullPath>
+    <_PlatformSDKRestoreInputTargetPlatformIdentifier>$(TargetPlatformIdentifier)</_PlatformSDKRestoreInputTargetPlatformIdentifier>
+    <_PlatformSDKRestoreInputTargetPlatformVersion>$(TargetPlatformVersion)</_PlatformSDKRestoreInputTargetPlatformVersion>
+    <_PlatformSDKRestoreInputTargetPlatformSdkRootOverride>$(TargetPlatformSdkRootOverride)</_PlatformSDKRestoreInputTargetPlatformSdkRootOverride>
+    <_PlatformSDKRestoreInputTargetPlatformSdkPath>$(TargetPlatformSdkPath)</_PlatformSDKRestoreInputTargetPlatformSdkPath>
+    <_PlatformSDKRestoreInputTargetPlatformSdkMetadataLocation>$(TargetPlatformSdkMetadataLocation)</_PlatformSDKRestoreInputTargetPlatformSdkMetadataLocation>
+    <_PlatformSDKRestoreInputRuntimeType>$(MSBuildRuntimeType)</_PlatformSDKRestoreInputRuntimeType>
+    <_PlatformSDKRestoreInputToolsPath>$(MSBuildToolsPath)</_PlatformSDKRestoreInputToolsPath>
+    <_PlatformSDKRestoreInputHostOS Condition="$([MSBuild]::IsOSPlatform('windows'))">windows</_PlatformSDKRestoreInputHostOS>
+    <_PlatformSDKRestoreInputHostOS Condition="$([MSBuild]::IsOSPlatform('linux'))">linux</_PlatformSDKRestoreInputHostOS>
+    <_PlatformSDKRestoreInputHostOS Condition="$([MSBuild]::IsOSPlatform('osx'))">osx</_PlatformSDKRestoreInputHostOS>
+    <_PlatformSDKRestoreInputHostOS Condition="$([MSBuild]::IsOSPlatform('freebsd'))">freebsd</_PlatformSDKRestoreInputHostOS>
+  </PropertyGroup>
+
+  <Import Project="$(MSBuildPlatformSDKRestoreFile)" Condition="'$(MSBuildHardenedGraph)' == 'true'" />
+
+  <PropertyGroup>
+    <TargetPlatformSdkPath Condition="'$(TargetPlatformSdkPath)' == '' and '$(TargetPlatformSdkRootOverride)' != ''">$(TargetPlatformSdkRootOverride)\</TargetPlatformSdkPath>
+    <_PlatformSDKRegistryLocation Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(TargetPlatformSdkPath)' == '' and '$(TargetPlatformIdentifier)' == 'Windows' and $([MSBuild]::IsOSPlatform('Windows')) and '$(MSBuildRuntimeType)' != 'Core'">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\Software\Microsoft\Microsoft SDKs\Windows\v$(TargetPlatformVersion)', InstallationFolder, null, RegistryView.Registry32, RegistryView.Default))</_PlatformSDKRegistryLocation>
+    <TargetPlatformSdkPath Condition="'$(TargetPlatformSdkPath)' == '' and '$(TargetPlatformIdentifier)' == 'Windows' and $([MSBuild]::IsOSPlatform('Windows')) and '$(MSBuildRuntimeType)' != 'Core'">$(_PlatformSDKRegistryLocation)</TargetPlatformSdkPath>
+    <_PlatformSDKDiscoveredLocation Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(TargetPlatformSdkPath)' == ''">$([Microsoft.Build.Utilities.ToolLocationHelper]::GetPlatformSDKLocation($(TargetPlatformIdentifier), $(TargetPlatformVersion)))</_PlatformSDKDiscoveredLocation>
+    <TargetPlatformSdkPath Condition="'$(TargetPlatformSdkPath)' == ''">$(_PlatformSDKDiscoveredLocation)</TargetPlatformSdkPath>
+
+    <_PlatformSDKPathExists Condition="'$(MSBuildHardenedGraph)' != 'true'">false</_PlatformSDKPathExists>
+    <_PlatformSDKPathExists Condition="'$(MSBuildHardenedGraph)' != 'true' and Exists('$(TargetPlatformSdkPath)')">true</_PlatformSDKPathExists>
+    <TargetPlatformSdkMetadataLocation Condition="'$(TargetPlatformSdkMetadataLocation)' == '' and '$(_PlatformSDKPathExists)' == 'true'">$(TargetPlatformSdkPath)Windows Metadata</TargetPlatformSdkMetadataLocation>
+    <_PlatformSDKInitialMetadataExists Condition="'$(MSBuildHardenedGraph)' != 'true'">false</_PlatformSDKInitialMetadataExists>
+    <_PlatformSDKInitialMetadataExists Condition="'$(MSBuildHardenedGraph)' != 'true' and Exists('$(TargetPlatformSdkMetadataLocation)')">true</_PlatformSDKInitialMetadataExists>
+    <TargetPlatformSdkMetadataLocation Condition="'$(_PlatformSDKPathExists)' == 'true' and ('$(TargetPlatformSdkMetadataLocation)' == '' or '$(_PlatformSDKInitialMetadataExists)' != 'true')">$(TargetPlatformSdkPath)References\CommonConfiguration\Neutral</TargetPlatformSdkMetadataLocation>
+    <_PlatformSDKSelectedMetadataExists Condition="'$(MSBuildHardenedGraph)' != 'true'">false</_PlatformSDKSelectedMetadataExists>
+    <_PlatformSDKSelectedMetadataExists Condition="'$(MSBuildHardenedGraph)' != 'true' and Exists('$(TargetPlatformSdkMetadataLocation)')">true</_PlatformSDKSelectedMetadataExists>
+    <TargetPlatformWinMDLocation Condition="'$(TargetPlatformWinMDLocation)' == '' and '$(_PlatformSDKSelectedMetadataExists)' == 'true'">$(TargetPlatformSdkMetadataLocation)</TargetPlatformWinMDLocation>
+    <UseOSWinMdReferences Condition="'$(UseOSWinMdReferences)' == '' and ('$(TargetPlatformWinMDLocation)' == '' and '$(TargetPlatformIdentifier)' == 'Windows' and '$(TargetPlatformVersion)' &gt; '7.0')">true</UseOSWinMdReferences>
+    <TargetPlatformWinMDLocation Condition="'$(UseOSWinMdReferences)' == 'true'">$(WinDir)\System32\WinMetadata</TargetPlatformWinMDLocation>
+    <TargetPlatformMoniker Condition="'$(TargetPlatformMoniker)' == '' and '$(TargetPlatformIdentifier)' != '' and '$(TargetPlatformVersion)' != ''">$(TargetPlatformIdentifier),Version=$(TargetPlatformVersion)</TargetPlatformMoniker>
+    <_PlatformSDKDiscoveredDisplayName Condition="'$(MSBuildHardenedGraph)' != 'true' and ('$(TargetPlatformDisplayName)' == '' or '$(MSBuildRestorePlatformSDK)' == 'true')">$([Microsoft.Build.Utilities.ToolLocationHelper]::GetPlatformSDKDisplayName($(TargetPlatformIdentifier), $(TargetPlatformVersion)))</_PlatformSDKDiscoveredDisplayName>
+    <TargetPlatformDisplayName Condition="'$(TargetPlatformDisplayName)' == ''">$(_PlatformSDKDiscoveredDisplayName)</TargetPlatformDisplayName>
+  </PropertyGroup>
+
+  <Target Name="_WritePlatformSDKRestoreImport"
+          BeforeTargets="_GenerateProjectRestoreGraphPerFramework"
+          AfterTargets="Restore"
+          Condition="'$(MSBuildRestorePlatformSDK)' == 'true' and '$(MSBuildHardenedGraph)' != 'true'">
+    <ItemGroup>
+      <_PlatformSDKRestoreInputs Include="ProjectFullPath"><Value>$(_PlatformSDKRestoreInputProjectFullPath)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreInputs Include="TargetPlatformIdentifier"><Value>$(_PlatformSDKRestoreInputTargetPlatformIdentifier)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreInputs Include="TargetPlatformVersion"><Value>$(_PlatformSDKRestoreInputTargetPlatformVersion)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreInputs Include="TargetPlatformSdkRootOverride"><Value>$(_PlatformSDKRestoreInputTargetPlatformSdkRootOverride)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreInputs Include="TargetPlatformSdkPath"><Value>$(_PlatformSDKRestoreInputTargetPlatformSdkPath)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreInputs Include="TargetPlatformSdkMetadataLocation"><Value>$(_PlatformSDKRestoreInputTargetPlatformSdkMetadataLocation)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreInputs Include="RuntimeType"><Value>$(_PlatformSDKRestoreInputRuntimeType)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreInputs Include="ToolsPath"><Value>$(_PlatformSDKRestoreInputToolsPath)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreInputs Include="HostOS"><Value>$(_PlatformSDKRestoreInputHostOS)</Value></_PlatformSDKRestoreInputs>
+      <_PlatformSDKRestoreFacts Include="_PlatformSDKRegistryLocation"><Value>$(_PlatformSDKRegistryLocation)</Value></_PlatformSDKRestoreFacts>
+      <_PlatformSDKRestoreFacts Include="_PlatformSDKDiscoveredLocation"><Value>$(_PlatformSDKDiscoveredLocation)</Value></_PlatformSDKRestoreFacts>
+      <_PlatformSDKRestoreFacts Include="_PlatformSDKPathExists"><Value>$(_PlatformSDKPathExists)</Value></_PlatformSDKRestoreFacts>
+      <_PlatformSDKRestoreFacts Include="_PlatformSDKInitialMetadataExists"><Value>$(_PlatformSDKInitialMetadataExists)</Value></_PlatformSDKRestoreFacts>
+      <_PlatformSDKRestoreFacts Include="_PlatformSDKSelectedMetadataExists"><Value>$(_PlatformSDKSelectedMetadataExists)</Value></_PlatformSDKRestoreFacts>
+      <_PlatformSDKRestoreFacts Include="_PlatformSDKDiscoveredDisplayName"><Value>$(_PlatformSDKDiscoveredDisplayName)</Value></_PlatformSDKRestoreFacts>
+    </ItemGroup>
+    <WritePlatformSDKRestoreImport File="$(MSBuildPlatformSDKRestoreFile)"
+                                   Inputs="@(_PlatformSDKRestoreInputs)"
+                                   Facts="@(_PlatformSDKRestoreFacts)"
+                                   DeclaredInputs=""
+                                   DeclaredOutputs="$(MSBuildPlatformSDKRestoreFile)" />
+  </Target>
+</Project>
