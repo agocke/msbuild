@@ -8,6 +8,8 @@
   <ItemGroup>
     <None Include="..\Samples\ActionGraphHelloWorld\HelloWorld.proj"
           Link="TestResources\HelloWorld.proj" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Samples\ActionGraphHelloWorld\HelloWorld.csproj"
+          Link="TestResources\HelloWorld.csproj" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Samples\ActionGraphHelloWorld\Program.cs"
           Link="TestResources\Program.cs" CopyToOutputDirectory="PreserveNewest" />
     <PackageReference Include="Shouldly" />

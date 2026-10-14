@@ -10,7 +10,7 @@ captures only I/O results in Restore; property derivation remains shared.
     <TargetPlatformVersion Condition="'$(TargetPlatformVersion)' == '' and '$(_EnableDefaultWindowsPlatform)' != 'false'">7.0</TargetPlatformVersion>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(MSBuildRestorePlatformSDK)' == 'true' or '$(MSBuildHardenedGraph)' == 'true'">
+  <PropertyGroup Condition="'$(MSBuildRestoreGraphInputs)' == 'true' or '$(MSBuildRestorePlatformSDK)' == 'true' or '$(MSBuildHardenedGraph)' == 'true'">
     <_PlatformSDKRestoreBasePath Condition="'$(BaseIntermediateOutputPath)' == ''">obj</_PlatformSDKRestoreBasePath>
     <_PlatformSDKRestoreBasePath Condition="'$(BaseIntermediateOutputPath)' != ''">$(BaseIntermediateOutputPath)</_PlatformSDKRestoreBasePath>
     <MSBuildPlatformSDKRestoreFile Condition="'$(MSBuildPlatformSDKRestoreFile)' == ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(_PlatformSDKRestoreBasePath)', 'hardened', '$(Configuration)', '$(Platform)', '$(TargetFramework)', '$(MSBuildProjectFile).platform-sdk.props'))</MSBuildPlatformSDKRestoreFile>
@@ -50,14 +50,14 @@ captures only I/O results in Restore; property derivation remains shared.
     <UseOSWinMdReferences Condition="'$(UseOSWinMdReferences)' == '' and ('$(TargetPlatformWinMDLocation)' == '' and '$(TargetPlatformIdentifier)' == 'Windows' and '$(TargetPlatformVersion)' &gt; '7.0')">true</UseOSWinMdReferences>
     <TargetPlatformWinMDLocation Condition="'$(UseOSWinMdReferences)' == 'true'">$(WinDir)\System32\WinMetadata</TargetPlatformWinMDLocation>
     <TargetPlatformMoniker Condition="'$(TargetPlatformMoniker)' == '' and '$(TargetPlatformIdentifier)' != '' and '$(TargetPlatformVersion)' != ''">$(TargetPlatformIdentifier),Version=$(TargetPlatformVersion)</TargetPlatformMoniker>
-    <_PlatformSDKDiscoveredDisplayName Condition="'$(MSBuildHardenedGraph)' != 'true' and ('$(TargetPlatformDisplayName)' == '' or '$(MSBuildRestorePlatformSDK)' == 'true')">$([Microsoft.Build.Utilities.ToolLocationHelper]::GetPlatformSDKDisplayName($(TargetPlatformIdentifier), $(TargetPlatformVersion)))</_PlatformSDKDiscoveredDisplayName>
+    <_PlatformSDKDiscoveredDisplayName Condition="'$(MSBuildHardenedGraph)' != 'true' and ('$(TargetPlatformDisplayName)' == '' or '$(MSBuildRestoreGraphInputs)' == 'true' or '$(MSBuildRestorePlatformSDK)' == 'true')">$([Microsoft.Build.Utilities.ToolLocationHelper]::GetPlatformSDKDisplayName($(TargetPlatformIdentifier), $(TargetPlatformVersion)))</_PlatformSDKDiscoveredDisplayName>
     <TargetPlatformDisplayName Condition="'$(TargetPlatformDisplayName)' == ''">$(_PlatformSDKDiscoveredDisplayName)</TargetPlatformDisplayName>
   </PropertyGroup>
 
   <Target Name="_WritePlatformSDKRestoreImport"
           BeforeTargets="_GenerateProjectRestoreGraphPerFramework"
           AfterTargets="Restore"
-          Condition="'$(MSBuildRestorePlatformSDK)' == 'true' and '$(MSBuildHardenedGraph)' != 'true'">
+          Condition="('$(MSBuildRestoreGraphInputs)' == 'true' or '$(MSBuildRestorePlatformSDK)' == 'true') and '$(MSBuildHardenedGraph)' != 'true'">
     <ItemGroup>
       <_PlatformSDKRestoreInputs Include="ProjectFullPath"><Value>$(_PlatformSDKRestoreInputProjectFullPath)</Value></_PlatformSDKRestoreInputs>
       <_PlatformSDKRestoreInputs Include="TargetPlatformIdentifier"><Value>$(_PlatformSDKRestoreInputTargetPlatformIdentifier)</Value></_PlatformSDKRestoreInputs>

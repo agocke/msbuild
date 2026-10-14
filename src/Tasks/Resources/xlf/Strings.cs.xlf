@@ -174,6 +174,11 @@
         <target state="translated">Publikování je platné jenom pro typy projektů Aplikace pro Windows nebo Konzolová aplikace.</target>
         <note />
       </trans-unit>
+      <trans-unit id="CommonSdk.HardenedAssemblySearchPath">
+        <source>MSB3669: Hardened reference resolution does not support the search path "{0}" because it can depend on undeclared machine or working-directory state. Use explicit fully qualified directories or the CandidateAssemblyFiles, HintPathFromItem, and TargetFrameworkDirectory search tokens.</source>
+        <target state="new">MSB3669: Hardened reference resolution does not support the search path "{0}" because it can depend on undeclared machine or working-directory state. Use explicit fully qualified directories or the CandidateAssemblyFiles, HintPathFromItem, and TargetFrameworkDirectory search tokens.</target>
+        <note>{StrBegin="MSB3669: "}{0} is an assembly search path. CandidateAssemblyFiles, HintPathFromItem, and TargetFrameworkDirectory are not localized.</note>
+      </trans-unit>
       <trans-unit id="CommonSdk.InvalidConfigurationTextWhenBuildingInsideVisualStudio">
         <source>The BaseOutputPath/OutputPath property is not set for project '{0}'.  Please check to make sure that you have specified a valid combination of Configuration and Platform for this project.  Configuration='{1}'  Platform='{2}'. This error may also appear if some other project is trying to follow a project-to-project reference to this project, this project has been unloaded or is not included in the solution, and the referencing project does not build using the same or an equivalent Configuration or Platform.</source>
         <target state="translated">Vlastnost BaseOutputPath/OutputPath není nastavena pro '{0}' projektu.  Zkontrolujte prosím, jestli jste pro tento projekt zadali platnou kombinaci konfigurace a platformy.  Configuration='{1}' Platform='{2}'. Tato chyba se může zobrazit i v případě, že se některý jiný projekt pokouší sledovat odkaz mezi projekty na tento projekt, projekt se uvolnil nebo není zahrnutý v řešení a odkazující projekt se nestaví pomocí stejné nebo ekvivalentní konfigurace nebo platformy.</target>
@@ -210,9 +215,9 @@
         <note>{StrBegin="MSB9904: "}</note>
       </trans-unit>
       <trans-unit id="CommonSdk.PlatformSDKRestoreConfigurationChanged">
-        <source>MSB3668: The platform SDK restore file "{0}" does not match the current "{1}" configuration. Run Restore with MSBuildRestorePlatformSDK=true for this configuration before generating the action graph.</source>
-        <target state="new">MSB3668: The platform SDK restore file "{0}" does not match the current "{1}" configuration. Run Restore with MSBuildRestorePlatformSDK=true for this configuration before generating the action graph.</target>
-        <note>{StrBegin="MSB3668: "}{0} is a generated MSBuild props file path. {1} is the configuration input name. Restore and MSBuildRestorePlatformSDK=true are not localized.</note>
+        <source>MSB3668: The platform SDK restore file "{0}" does not match the current "{1}" configuration. Run Restore with MSBuildRestoreGraphInputs=true for this configuration before generating the action graph.</source>
+        <target state="new">MSB3668: The platform SDK restore file "{0}" does not match the current "{1}" configuration. Run Restore with MSBuildRestoreGraphInputs=true for this configuration before generating the action graph.</target>
+        <note>{StrBegin="MSB3668: "}{0} is a generated MSBuild props file path. {1} is the configuration input name. Restore and MSBuildRestoreGraphInputs=true are not localized.</note>
       </trans-unit>
       <trans-unit id="CommonSdk.Prefer32BitAndPreferNativeArm64Enabled">
         <source>MSB9902: Prefer32Bit and PreferNativeArm64 options are mutually exclusive. Please enable only one.</source>

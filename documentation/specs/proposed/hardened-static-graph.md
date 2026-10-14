@@ -15,7 +15,8 @@ builds remain unchanged outside the opt-in graph/Restore workflow. The
 
 ## Pipeline
 
-1. Complete restore/fetch and any discovery that produces build graph inputs.
+1. Run ordinary Restore with `MSBuildRestoreGraphInputs=true` to complete
+   restore/fetch and capture the known discovery and cache inputs.
 2. In a fresh evaluation, construct the complete requested target closure,
    executing only zero-I/O task invocations.
 3. Validate and publish the Ninja graph and invocation manifests, then exit
@@ -26,6 +27,7 @@ The current prototype uses global properties; all three paths are absolute.
 Restore must have completed before this invocation:
 
 ```sh
+msbuild Demo.proj -target:Restore -p:MSBuildRestoreGraphInputs=true
 msbuild Demo.proj --hardened-graph -target:Build \
   -p:MSBuildEmitActionGraph=/workspace/out/build.ninja \
   -p:MSBuildActionTaskHost=/tools/MSBuild.ActionTaskHost.dll \
@@ -35,6 +37,12 @@ ninja -f /workspace/out/build.ninja
 
 Graph generation must work from clean task outputs. Recording an ordinary
 build after executing its tasks does not satisfy this contract.
+
+For this prototype, Restore is deliberately unrestricted, trusted
+preparation. It runs without `--hardened-graph`; only the subsequent Build
+evaluation constructs an action graph. Use the same configuration,
+framework/platform selection, and intermediate paths for both invocations.
+Making Restore itself a standalone action graph is deferred.
 
 ## One task contract
 
@@ -106,7 +114,7 @@ and cross-platform toolchain selection remain separate configuration work.
 Platform SDK machine searches belong to Restore, not graph construction:
 
 ```sh
-msbuild Demo.csproj -target:Restore -p:MSBuildRestorePlatformSDK=true
+msbuild Demo.csproj -target:Restore -p:MSBuildRestoreGraphInputs=true
 ```
 
 That ordinary Restore invocation records SDK location/registry lookups,
@@ -136,6 +144,45 @@ unchanged discovery preserves the file's timestamp.
 In this prototype, the queries run during ordinary Restore's evaluation and
 the Restore target hook persists their results. Ordinary non-hardened builds
 retain their existing discovery behavior.
+
+The same flag also snapshots the prior clean-file ledger into
+`$(IntermediateOutputPath)/$(CleanFile).hardened.props` and the presence of the
+unmanaged-registration cache into
+`$(BaseIntermediateOutputPath)/hardened/$(Configuration)/$(Platform)/$(TargetFramework)/$(MSBuildProjectFile).UnmanagedRegistration.cache.props`.
+Absent caches still produce valid imports. Both hooks participate in each
+framework's Restore traversal, and unchanged snapshots are not rewritten.
+The per-configuration/framework paths prevent concurrent captures from
+overwriting one another.
+
+Without the flag, ordinary Restore writes none of these additional imports.
+The earlier `MSBuildRestorePlatformSDK=true` flag remains supported for
+SDK-only capture; prefer `MSBuildRestoreGraphInputs=true` to prepare all known
+graph inputs.
+
+### Explicit reference-resolution sources
+
+Hardened SDK builds do not discover assemblies through installation-wide
+`AssemblyFolders.config`, registry entries, legacy assembly folders, or the
+GAC. They also disable automatic `ReferencePath`, output-directory, and
+raw-filename searches. `Microsoft.Common.props` selects this profile before
+the SDK initializes its search paths, and Common targets skip the
+`GetToolsDirectory32` call and assembly-folder configuration existence probe.
+Visual Studio directory-layout discovery is disabled in this profile.
+Ordinary builds retain their previous behavior.
+
+The Common reference-resolution target validates the effective
+`AssemblySearchPaths` before its resolution dependencies. Supported entries
+are `{CandidateAssemblyFiles}`, `{HintPathFromItem}`,
+`{TargetFrameworkDirectory}`, and explicitly configured fully qualified
+directories. Unsupported tokens or relative search directories fail with
+MSB3669 rather than being silently removed from an explicit override.
+Reference inputs should come from workspace files, pinned/restored reference
+packs, packages, or explicitly selected roots—not untracked installation
+fallbacks. Capturing an installation path alone does not pin its contents.
+
+This is a search-policy restriction, not complete hermetic reference
+resolution: RAR still needs an audited DeclaredIO implementation and a
+complete file/tool input closure before it can participate in an action graph.
 
 ## Graph construction
 

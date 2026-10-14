@@ -162,7 +162,7 @@ not another pure-function allowance:
 
 ```sh
 dotnet restore src/Samples/ActionGraphHelloWorld/HelloWorld.csproj \
-  -p:MSBuildRestorePlatformSDK=true
+  -p:MSBuildRestoreGraphInputs=true
 ```
 
 `Microsoft.Common.PlatformSDK.targets` preserves the shared property logic
@@ -173,6 +173,16 @@ construction after removing the discovered directories, independently
 changing pure overrides, missing/stale imports, and per-framework Restore.
 Writer tests cover literal escaping and unchanged-file timestamps.
 
+The prototype deliberately uses unrestricted ordinary Restore as its trusted
+preparation stage. `MSBuildRestoreGraphInputs=true` captures SDK discovery,
+the prior clean ledger, and unmanaged-registration-cache presence. The cache
+writers now run during ordinary Restore, including each framework's
+restore-graph traversal, rather than depending on hardened mode. SDK process
+cases cover opt-in/off behavior, empty and populated caches, unchanged
+snapshot timestamps, and single/multi-targeting without downloading packages.
+Hardened Restore graph construction remains deferred; hardened Build evaluation
+still has no ambient-discovery fallback.
+
 Hardened `TargetDir` computation now uses
 `MSBuild.NormalizePath(MSBuildProjectDirectory, OutDir)` with an explicit
 absolute base instead of `System.IO.Path.GetFullPath`. It preserves escaping
@@ -181,12 +191,23 @@ Process cases use the shipped property declarations and cover relative and
 absolute output directories, parent traversal, quotes, dollars, and literal
 percent/semicolon characters.
 
-The SDK trial now passes platform discovery and `TargetDir` computation.
-The next observed blocker is the missing legacy clean-file cache import
-`$(IntermediateOutputPath)$(CleanFile).hardened.props`. Its writer hook is
-still conditioned on hardened mode rather than ordinary Restore and needs
-adaptation to the separate-Restore workflow. The stock Roslyn task also lacks
-DeclaredIO annotations. SDK `Build` remains unsupported; ambient discovery
+The hardened SDK now uses an
+[explicit reference-search profile](hardened-static-graph.md#explicit-reference-resolution-sources).
+Early Common props disable installation-wide searches, automatic output and
+raw-filename fallbacks, and Visual Studio directory-layout discovery. Common
+targets skip `GetToolsDirectory32` and the assembly-folder configuration probe;
+the intrinsic remains prohibited. A zero-I/O validation task rejects unsafe
+explicit search overrides before reference-resolution dependencies run.
+Process tests exercise shipped Common and SDK search declarations, present
+and absent assembly-folder configuration, explicit search roots, rejection
+before graph publication, and unchanged ordinary-build search sources.
+
+A fresh ordinary Restore followed by hardened Build now passes platform
+discovery, `TargetDir` computation, both cache imports, and assembly-folder
+initialization. The next observed blocker is the SDK's `AllowEmptyTelemetry`
+task in `Microsoft.NET.TargetFrameworkInference.targets`, which has no
+DeclaredIO contract. RAR and the stock Roslyn task also still need audited
+action-graph adaptation. SDK `Build` remains unsupported; ambient discovery
 has not been allowed as a fallback.
 
 Use existing SDK overlays for a single-framework C# hello-world profile:

@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Security;
 using System.Text.Json;
 using System.Xml.Linq;
@@ -19,6 +20,173 @@ namespace Microsoft.Build.ActionTaskHost.UnitTests;
 public sealed class ActionGraph_Tests(ITestOutputHelper output)
 {
     private readonly ITestOutputHelper _output = output;
+
+    [UnixOnlyTheory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void HardenedReferenceDefaultsIgnoreInstallationAssemblyFolders(bool sdkProfile, bool configExists)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteReferenceSearchProject(directory, sdkProfile, configExists);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph).ShouldBeTrue();
+        Ninja(graph, out bool succeeded);
+
+        succeeded.ShouldBeTrue();
+        File.ReadAllText(Path.Combine(directory, "first.txt"))
+            .ShouldBe("literal%3B;value|{CandidateAssemblyFiles};{HintPathFromItem};{TargetFrameworkDirectory}|");
+    }
+
+    [UnixOnlyTheory]
+    [InlineData("{gac}")]
+    [InlineData("{Registry:machine,v4.8,AssemblyFoldersEx}")]
+    [InlineData("{AssemblyFoldersFromConfig:machine.config,v4.8}")]
+    [InlineData("{RawFileName}")]
+    [InlineData("relative-reference-directory")]
+    public void RejectsUnsafeExplicitReferenceSearchOverridesBeforePublishingGraph(string searchPath)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteReferenceSearchProject(directory, sdkProfile: true, configExists: false, searchPath);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph, out string log).ShouldBeFalse();
+
+        log.ShouldContain("MSB3669");
+        File.Exists(graph).ShouldBeFalse();
+        Directory.Exists(graph + ".actions").ShouldBeFalse();
+        File.Exists(Path.Combine(directory, "first.txt")).ShouldBeFalse();
+    }
+
+    [UnixOnlyFact]
+    public void AcceptsAnExplicitAbsoluteReferenceSearchDirectoryWithoutProbingIt()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string references = Path.Combine(directory, "nonexistent-reference-pack");
+        string project = WriteReferenceSearchProject(directory, sdkProfile: true, configExists: false, references);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph).ShouldBeTrue();
+        Ninja(graph, out bool succeeded);
+
+        succeeded.ShouldBeTrue();
+        File.ReadAllText(Path.Combine(directory, "first.txt")).ShouldBe("literal%3B;value|" + references + "|");
+        Directory.Exists(references).ShouldBeFalse();
+    }
+
+    [UnixOnlyTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OrdinaryReferenceDefaultsRetainTheirExistingSearchSources(bool sdkProfile)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteReferenceSearchProject(directory, sdkProfile, configExists: true);
+
+        string contents = RunnerUtilities.ExecBootstrapedMSBuild(
+            $"\"{project}\" -getProperty:AssemblySearchPaths,AssemblyFoldersConfigFileSearchPath -nr:false -nologo -v:q",
+            out bool succeeded, outputHelper: _output);
+
+        succeeded.ShouldBeTrue();
+        contents.ShouldContain("{RawFileName}");
+        contents.ShouldContain("{AssemblyFoldersFromConfig:");
+        if (!sdkProfile)
+        {
+            contents.ShouldContain("{GAC}");
+            contents.ShouldContain("{Registry:");
+            contents.ShouldContain("{AssemblyFolders}");
+        }
+    }
+
+    [UnixOnlyTheory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void RegularRestoreCapturesGraphInputsOnlyWhenRequested(bool capture, bool multiTarget)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = Path.Combine(directory, "restore.csproj");
+        XDocument contents = XDocument.Load(Path.Combine(AppContext.BaseDirectory, "TestResources", "HelloWorld.csproj"));
+        XElement targetFramework = contents.Descendants("TargetFramework").ShouldHaveSingleItem();
+        string[] frameworks = multiTarget
+            ? [targetFramework.Value, targetFramework.Value + "-windows"]
+            : [targetFramework.Value];
+        targetFramework.Name = multiTarget ? "TargetFrameworks" : "TargetFramework";
+        targetFramework.Value = string.Join(";", frameworks);
+        contents.Root!.Element("PropertyGroup")!.Add(
+            new XElement("RestoreSources", directory),
+            new XElement("NuGetAudit", "false"));
+        File.WriteAllText(project, contents.ToString());
+        if (multiTarget)
+        {
+            foreach (string framework in frameworks)
+            {
+                string intermediate = Path.Combine(directory, "obj", "Debug", framework);
+                Directory.CreateDirectory(intermediate);
+                File.WriteAllLines(Path.Combine(intermediate, "restore.csproj.FileListAbsolute.txt"),
+                    [Path.Combine(directory, "prior-" + framework + ".dll")]);
+            }
+
+            File.WriteAllText(Path.Combine(directory, "obj", "restore.csproj.UnmanagedRegistration.cache"), "");
+        }
+
+        string arguments = $"\"{project}\" -t:Restore -p:MSBuildRestoreGraphInputs={capture} -nr:false -v:minimal";
+        RunnerUtilities.ExecBootstrapedMSBuild(arguments, out bool succeeded, outputHelper: _output);
+        succeeded.ShouldBeTrue();
+        Dictionary<string, DateTime> writes = new();
+        foreach (string framework in frameworks)
+        {
+            string snapshotDirectory = Path.Combine(directory, "obj", "hardened", "Debug", "AnyCPU", framework);
+            string sdk = Path.Combine(snapshotDirectory, "restore.csproj.platform-sdk.props");
+            string unmanaged = Path.Combine(snapshotDirectory, "restore.csproj.UnmanagedRegistration.cache.props");
+            string clean = Path.Combine(directory, "obj", "Debug", framework, "restore.csproj.FileListAbsolute.txt.hardened.props");
+            string[] imports = [sdk, unmanaged, clean];
+            foreach (string file in imports)
+            {
+                File.Exists(file).ShouldBe(capture, file);
+                if (capture)
+                {
+                    File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddMinutes(-10));
+                    writes.Add(file, File.GetLastWriteTimeUtc(file));
+                }
+            }
+
+            if (capture)
+            {
+                XElement cache = XDocument.Load(unmanaged).Root!;
+                XNamespace ns = cache.Name.Namespace;
+                (cache.Element(ns + "PropertyGroup")?.Element(ns + "_HardenedUnmanagedRegistrationCacheExists")?.Value ?? "")
+                    .ShouldBe(multiTarget ? "true" : "");
+                IEnumerable<XElement> priorWrites = XDocument.Load(clean).Descendants(ns + "_CleanUnfilteredPriorFileWrites");
+                if (multiTarget)
+                {
+                    priorWrites.ShouldHaveSingleItem().Attribute("Include")!.Value
+                        .ShouldBe(Path.Combine(directory, "prior-" + framework + ".dll"));
+                }
+                else
+                {
+                    priorWrites.ShouldBeEmpty();
+                }
+            }
+        }
+
+        if (capture)
+        {
+            RunnerUtilities.ExecBootstrapedMSBuild(arguments, out succeeded, outputHelper: _output);
+            succeeded.ShouldBeTrue();
+            foreach (KeyValuePair<string, DateTime> write in writes)
+            {
+                File.GetLastWriteTimeUtc(write.Key).ShouldBe(write.Value);
+            }
+        }
+    }
 
     [UnixOnlyTheory]
     [InlineData(false, "out $ space'quote/", "out $ space'quote/")]
@@ -94,13 +262,15 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
             .ShouldBe(metadata.Replace('\\', '/') + "|explicit-winmd|GraphMissingSDK,Version=1.0|explicit-display|");
     }
 
-    [UnixOnlyFact]
-    public void RestoreRecordsAnAbsentSDKWithoutRepeatingMachineDiscovery()
+    [UnixOnlyTheory]
+    [InlineData("MSBuildRestoreGraphInputs")]
+    [InlineData("MSBuildRestorePlatformSDK")]
+    public void RestoreRecordsAnAbsentSDKWithoutRepeatingMachineDiscovery(string restoreProperty)
     {
         using TestEnvironment env = TestEnvironment.Create(_output);
         string directory = env.CreateFolder().Path;
         string project = WritePlatformSDKProject(directory);
-        RestorePlatformSDK(project).ShouldBeTrue();
+        RestorePlatformSDK(project, restoreProperty).ShouldBeTrue();
         string graph = Path.Combine(directory, "build.ninja");
 
         Generate(project, graph).ShouldBeTrue();
@@ -733,12 +903,62 @@ public sealed class ActionGraph_Tests(ITestOutputHelper output)
         return project;
     }
 
-    private bool RestorePlatformSDK(string project)
+    private bool RestorePlatformSDK(string project, string restoreProperty = "MSBuildRestoreGraphInputs")
     {
         RunnerUtilities.ExecBootstrapedMSBuild(
-            $"\"{project}\" -t:Restore -p:MSBuildRestorePlatformSDK=true -nr:false -v:minimal",
+            $"\"{project}\" -t:Restore -p:{restoreProperty}=true -nr:false -v:minimal",
             out bool succeeded, outputHelper: _output);
         return succeeded;
+    }
+
+    private static string WriteReferenceSearchProject(string directory, bool sdkProfile, bool configExists, string? searchPaths = null)
+    {
+        string sdk = Path.Combine(Path.GetDirectoryName(RunnerUtilities.BootstrapDotnetHostPath)!,
+            "sdk", RunnerUtilities.BootstrapSdkVersion);
+        XElement common = XDocument.Load(Path.Combine(sdk, "Microsoft.Common.CurrentVersion.targets")).Root!;
+        XElement props = XDocument.Load(Path.Combine(sdk, "Current", "Microsoft.Common.props")).Root!;
+        string project = WriteProject(directory);
+        XDocument contents = XDocument.Load(project);
+        XElement root = contents.Root!;
+        XElement build = root.Elements("Target").ShouldHaveSingleItem();
+        root.SetAttributeValue("DefaultTargets", "Build");
+        build.SetAttributeValue("DependsOnTargets", "$(ResolveAssemblyReferencesDependsOn)");
+        build.Element("GraphValueTask")!.AddAfterSelf(new XElement("ItemGroup",
+            new XElement("Values", new XElement("Tag", "$(AssemblySearchPaths)|$(AssemblyFoldersConfigFileSearchPath)"))));
+        XElement inputs = new("PropertyGroup", new XElement("AssemblySearchPaths", searchPaths ?? ""));
+        if (configExists)
+        {
+            string config = Path.Combine(directory, "AssemblyFolders.config");
+            File.WriteAllText(config, "<installation-specific-assembly-search />");
+            inputs.Add(new XElement("AssemblyFoldersConfigFile", config));
+        }
+
+        root.AddFirst(inputs,
+            new XElement(props.Elements("PropertyGroup").Elements("AssemblySearchPath_UseGAC").ShouldHaveSingleItem().Parent!));
+        if (sdkProfile)
+        {
+            XElement sdkProps = XDocument.Load(Path.Combine(sdk, "Sdks", "Microsoft.NET.Sdk", "targets", "Microsoft.NET.Sdk.props")).Root!;
+            XNamespace ns = sdkProps.Name.Namespace;
+            XElement defaults = new(sdkProps.Elements(ns + "PropertyGroup")
+                .Where(group => group.Elements(ns + "AssemblySearchPaths").Any()).ShouldHaveSingleItem());
+            foreach (XElement element in defaults.DescendantsAndSelf())
+            {
+                element.Name = element.Name.LocalName;
+            }
+
+            root.Add(defaults);
+        }
+
+        root.Add(
+            new XElement(common.Elements("PropertyGroup").Elements("AssemblyFoldersConfigFile").ShouldHaveSingleItem().Parent!),
+            new XElement(common.Elements("PropertyGroup").Where(group => group.Elements("AssemblySearchPaths").Any()).ShouldHaveSingleItem()),
+            new XElement(common.Elements("PropertyGroup")
+                .Where(group => group.Element("ResolveAssemblyReferencesDependsOn") is not null && group.Attribute("Condition") is not null)
+                .ShouldHaveSingleItem()),
+            new XElement(common.Elements("Target")
+                .Where(target => target.Attribute("Name")?.Value == "_ValidateHardenedAssemblySearchPaths").ShouldHaveSingleItem()));
+        File.WriteAllText(project, contents.ToString());
+        return project;
     }
 
     private static string WriteProject(string directory)

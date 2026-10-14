@@ -387,7 +387,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
   <PropertyGroup>
     <_HardenedCleanFileWritesImport>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', '$(CleanFile).hardened.props'))</_HardenedCleanFileWritesImport>
-    <_HardenedUnmanagedRegistrationCacheImport>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)', 'hardened', '$(MSBuildProjectFile).UnmanagedRegistration.cache.props'))</_HardenedUnmanagedRegistrationCacheImport>
+    <_HardenedUnmanagedRegistrationCacheImport>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)', 'hardened', '$(Configuration)', '$(Platform)', '$(TargetFramework)', '$(MSBuildProjectFile).UnmanagedRegistration.cache.props'))</_HardenedUnmanagedRegistrationCacheImport>
   </PropertyGroup>
 
   <Import
@@ -611,8 +611,8 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     <AssemblyFoldersSuffix Condition=" '$(AssemblyFoldersSuffix)' == '' ">AssemblyFoldersEx</AssemblyFoldersSuffix>
     <FrameworkRegistryBase Condition=" '$(FrameworkRegistryBase)' == '' ">Software\Microsoft\$(TargetFrameworkIdentifier)</FrameworkRegistryBase>
     <TargetPlatformRegistryBase Condition="'$(TargetPlatformRegistryBase)' == ''">Software\Microsoft\Microsoft SDKs\$(TargetPlatformIdentifier)</TargetPlatformRegistryBase>
-    <AssemblyFoldersConfigFile Condition="'$(AssemblyFoldersConfigFile)' == ''">$([MSBuild]::GetToolsDirectory32())\AssemblyFolders.config</AssemblyFoldersConfigFile>
-    <AssemblyFoldersConfigFileSearchPath Condition="Exists('$(AssemblyFoldersConfigFile)')">{AssemblyFoldersFromConfig:$(AssemblyFoldersConfigFile),$(TargetFrameworkVersion)};</AssemblyFoldersConfigFileSearchPath>
+    <AssemblyFoldersConfigFile Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(AssemblyFoldersConfigFile)' == ''">$([MSBuild]::GetToolsDirectory32())\AssemblyFolders.config</AssemblyFoldersConfigFile>
+    <AssemblyFoldersConfigFileSearchPath Condition="'$(MSBuildHardenedGraph)' != 'true' and Exists('$(AssemblyFoldersConfigFile)')">{AssemblyFoldersFromConfig:$(AssemblyFoldersConfigFile),$(TargetFrameworkVersion)};</AssemblyFoldersConfigFileSearchPath>
 
     <!--
         These are the extensions that assembly reference resolution will consider for resolution.
@@ -662,15 +662,15 @@ Copyright (C) Microsoft Corporation. All rights reserved.
             (10) Look in the application's output folder (like bin\debug)
         -->
     <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseCandidateAssemblyFiles)' != 'false'">{CandidateAssemblyFiles}</AssemblySearchPaths>
-    <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseReferencePath)' != 'false'">$(AssemblySearchPaths);$(ReferencePath)</AssemblySearchPaths>
+    <AssemblySearchPaths Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(AssemblySearchPath_UseReferencePath)' != 'false'">$(AssemblySearchPaths);$(ReferencePath)</AssemblySearchPaths>
     <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseHintPathFromItem)' != 'false'">$(AssemblySearchPaths);{HintPathFromItem}</AssemblySearchPaths>
     <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseTargetFrameworkDirectory)' != 'false'">$(AssemblySearchPaths);{TargetFrameworkDirectory}</AssemblySearchPaths>
-    <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseAssemblyFoldersConfigFileSearchPath)' != 'false'">$(AssemblySearchPaths);$(AssemblyFoldersConfigFileSearchPath)</AssemblySearchPaths>
-    <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseRegistry)' != 'false'">$(AssemblySearchPaths);{Registry:$(FrameworkRegistryBase),$(TargetFrameworkVersion),$(AssemblyFoldersSuffix)$(AssemblyFoldersExConditions)}</AssemblySearchPaths>
-    <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseAssemblyFolders)' != 'false'">$(AssemblySearchPaths);{AssemblyFolders}</AssemblySearchPaths>
-    <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseGAC)' != 'false'">$(AssemblySearchPaths);{GAC}</AssemblySearchPaths>
-    <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseRawFileName)' != 'false'">$(AssemblySearchPaths);{RawFileName}</AssemblySearchPaths>
-    <AssemblySearchPaths Condition="'$(AssemblySearchPath_UseOutDir)' != 'false'">$(AssemblySearchPaths);$(OutDir)</AssemblySearchPaths>
+    <AssemblySearchPaths Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(AssemblySearchPath_UseAssemblyFoldersConfigFileSearchPath)' != 'false'">$(AssemblySearchPaths);$(AssemblyFoldersConfigFileSearchPath)</AssemblySearchPaths>
+    <AssemblySearchPaths Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(AssemblySearchPath_UseRegistry)' != 'false'">$(AssemblySearchPaths);{Registry:$(FrameworkRegistryBase),$(TargetFrameworkVersion),$(AssemblyFoldersSuffix)$(AssemblyFoldersExConditions)}</AssemblySearchPaths>
+    <AssemblySearchPaths Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(AssemblySearchPath_UseAssemblyFolders)' != 'false'">$(AssemblySearchPaths);{AssemblyFolders}</AssemblySearchPaths>
+    <AssemblySearchPaths Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(AssemblySearchPath_UseGAC)' != 'false'">$(AssemblySearchPaths);{GAC}</AssemblySearchPaths>
+    <AssemblySearchPaths Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(AssemblySearchPath_UseRawFileName)' != 'false'">$(AssemblySearchPaths);{RawFileName}</AssemblySearchPaths>
+    <AssemblySearchPaths Condition="'$(MSBuildHardenedGraph)' != 'true' and '$(AssemblySearchPath_UseOutDir)' != 'false'">$(AssemblySearchPaths);$(OutDir)</AssemblySearchPaths>
   </PropertyGroup>
 
   <!-- ContinueOnError takes 3 values:  WarnAndContinue (true), ErrorAndStop (false), and ErrorAndContinue.
@@ -2413,6 +2413,17 @@ Copyright (C) Microsoft Corporation. All rights reserved.
       ExpandSDKReferences;
     </ResolveAssemblyReferencesDependsOn>
   </PropertyGroup>
+
+  <PropertyGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+    <ResolveAssemblyReferencesDependsOn>
+      _ValidateHardenedAssemblySearchPaths;
+      $(ResolveAssemblyReferencesDependsOn)
+    </ResolveAssemblyReferencesDependsOn>
+  </PropertyGroup>
+
+  <Target Name="_ValidateHardenedAssemblySearchPaths" Condition="'$(MSBuildHardenedGraph)' == 'true'">
+    <ValidateHardenedAssemblySearchPaths SearchPaths="$(AssemblySearchPaths)" DeclaredInputs="" DeclaredOutputs="" />
+  </Target>
 
   <Target
       Name="ResolveAssemblyReferences"
@@ -5875,8 +5886,9 @@ Copyright (C) Microsoft Corporation. All rights reserved.
     -->
   <Target
       Name="_WriteHardenedCleanFileWritesImport"
+      BeforeTargets="_GenerateProjectRestoreGraphPerFramework"
       AfterTargets="Restore"
-      Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      Condition="'$(MSBuildRestoreGraphInputs)' == 'true' and '$(MSBuildHardenedGraph)' != 'true'">
 
     <WriteCleanFileWritesImport
         CleanFile="$(IntermediateOutputPath)$(CleanFile)"
@@ -5888,8 +5900,9 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
   <Target
       Name="_WriteHardenedUnmanagedRegistrationCacheImport"
+      BeforeTargets="_GenerateProjectRestoreGraphPerFramework"
       AfterTargets="Restore"
-      Condition="'$(MSBuildHardenedGraph)' == 'true'">
+      Condition="'$(MSBuildRestoreGraphInputs)' == 'true' and '$(MSBuildHardenedGraph)' != 'true'">
 
     <WriteUnmanagedRegistrationCacheImport
         CacheFile="@(_UnmanagedRegistrationCache)"

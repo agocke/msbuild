@@ -11,6 +11,18 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 -->
 <Project>
 
+  <!-- These defaults must precede the SDK's assembly-search-path initialization. -->
+  <PropertyGroup Condition="'$(MSBuildHardenedGraph)' == 'true'">
+    <MSBuildUseVisualStudioDirectoryLayout>false</MSBuildUseVisualStudioDirectoryLayout>
+    <AssemblySearchPath_UseReferencePath>false</AssemblySearchPath_UseReferencePath>
+    <AssemblySearchPath_UseAssemblyFoldersConfigFileSearchPath>false</AssemblySearchPath_UseAssemblyFoldersConfigFileSearchPath>
+    <AssemblySearchPath_UseRegistry>false</AssemblySearchPath_UseRegistry>
+    <AssemblySearchPath_UseAssemblyFolders>false</AssemblySearchPath_UseAssemblyFolders>
+    <AssemblySearchPath_UseGAC>false</AssemblySearchPath_UseGAC>
+    <AssemblySearchPath_UseRawFileName>false</AssemblySearchPath_UseRawFileName>
+    <AssemblySearchPath_UseOutDir>false</AssemblySearchPath_UseOutDir>
+  </PropertyGroup>
+
   <PropertyGroup>
     <ImportByWildcardBeforeMicrosoftCommonProps Condition="'$(ImportByWildcardBeforeMicrosoftCommonProps)' == ''">true</ImportByWildcardBeforeMicrosoftCommonProps>
     <ImportByWildcardAfterMicrosoftCommonProps Condition="'$(ImportByWildcardAfterMicrosoftCommonProps)' == ''">true</ImportByWildcardAfterMicrosoftCommonProps>

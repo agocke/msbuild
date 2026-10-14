@@ -3270,10 +3270,14 @@
   </data>
 
   <data name="CommonSdk.PlatformSDKRestoreConfigurationChanged">
-    <value>MSB3668: The platform SDK restore file "{0}" does not match the current "{1}" configuration. Run Restore with MSBuildRestorePlatformSDK=true for this configuration before generating the action graph.</value>
-    <comment>{StrBegin="MSB3668: "}{0} is a generated MSBuild props file path. {1} is the configuration input name. Restore and MSBuildRestorePlatformSDK=true are not localized.</comment>
+    <value>MSB3668: The platform SDK restore file "{0}" does not match the current "{1}" configuration. Run Restore with MSBuildRestoreGraphInputs=true for this configuration before generating the action graph.</value>
+    <comment>{StrBegin="MSB3668: "}{0} is a generated MSBuild props file path. {1} is the configuration input name. Restore and MSBuildRestoreGraphInputs=true are not localized.</comment>
   </data>
-  <!-- Next available general task message code: MSB3669. -->
+  <data name="CommonSdk.HardenedAssemblySearchPath">
+    <value>MSB3669: Hardened reference resolution does not support the search path "{0}" because it can depend on undeclared machine or working-directory state. Use explicit fully qualified directories or the CandidateAssemblyFiles, HintPathFromItem, and TargetFrameworkDirectory search tokens.</value>
+    <comment>{StrBegin="MSB3669: "}{0} is an assembly search path. CandidateAssemblyFiles, HintPathFromItem, and TargetFrameworkDirectory are not localized.</comment>
+  </data>
+  <!-- Next available general task message code: MSB3670. -->
 
   <!--
         The tasks message bucket is: MSB3001 - MSB3999
