@@ -3266,8 +3266,7 @@ $@"<Project>
                   <Target Name="Build">
                     <AssignTargetPathWithProjectDirectory
                         Files="@(Input)"
-                        RootFolder="$(MSBuildProjectDirectory)"
-                        ProjectDirectory="$(MSBuildProjectDirectory)">
+                        RootFolder="$(MSBuildProjectDirectory)">
                       <Output TaskParameter="AssignedFiles" ItemName="Assigned" />
                     </AssignTargetPathWithProjectDirectory>
                     <ItemGroup>
