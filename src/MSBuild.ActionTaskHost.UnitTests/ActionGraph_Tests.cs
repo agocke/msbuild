@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Security;
 using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.Build.Framework;
 using Microsoft.Build.UnitTests;
 using Microsoft.Build.UnitTests.Shared;
@@ -18,6 +19,46 @@ namespace Microsoft.Build.ActionTaskHost.UnitTests;
 public sealed class ActionGraph_Tests(ITestOutputHelper output)
 {
     private readonly ITestOutputHelper _output = output;
+
+    [UnixOnlyTheory]
+    [InlineData(false, "out $ space'quote/", "out $ space'quote/")]
+    [InlineData(true, "out $ space'quote/", "out $ space'quote/")]
+    [InlineData(false, "unused/../out %253B%3B space/", "out %3B; space/")]
+    public void ConstructsTargetDirectoryFromTheExplicitProjectBase(bool absolute, string outDir, string expected)
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string directory = env.CreateFolder().Path;
+        string project = WriteProject(directory);
+        string commonTargets = Path.Combine(Path.GetDirectoryName(RunnerUtilities.BootstrapDotnetHostPath)!,
+            "sdk", RunnerUtilities.BootstrapSdkVersion, "Microsoft.Common.CurrentVersion.targets");
+        XElement properties = new("PropertyGroup",
+            new XElement("OutDir", absolute ? Path.Combine(directory, outDir) : outDir),
+            new XElement("TargetDir", "must-be-overridden"));
+        foreach (XElement element in XDocument.Load(commonTargets).Root!.Elements("PropertyGroup").Elements("TargetDir"))
+        {
+            properties.Add(new XElement(element));
+        }
+
+        string contents = File.ReadAllText(project)
+            .Replace("<Target Name=\"Build\"", properties + "\n<Target Name=\"Build\"")
+            .Replace("</GraphValueTask>", """
+                </GraphValueTask>
+                <ItemGroup>
+                  <Values>
+                    <Tag>$(TargetDir)</Tag>
+                  </Values>
+                </ItemGroup>
+                """);
+        File.WriteAllText(project, contents);
+        string graph = Path.Combine(directory, "build.ninja");
+
+        Generate(project, graph).ShouldBeTrue();
+        Ninja(graph, out bool succeeded);
+
+        succeeded.ShouldBeTrue();
+        File.ReadAllText(Path.Combine(directory, "first.txt"))
+            .ShouldBe("literal%3B;value|" + Path.GetFullPath(Path.Combine(directory, expected)));
+    }
 
     [UnixOnlyTheory]
     [InlineData("Windows Metadata")]

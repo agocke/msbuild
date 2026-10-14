@@ -173,12 +173,21 @@ construction after removing the discovered directories, independently
 changing pure overrides, missing/stale imports, and per-framework Restore.
 Writer tests cover literal escaping and unchanged-file timestamps.
 
-The SDK trial now passes platform discovery and reaches
-`System.IO.Path.GetFullPath` in `Microsoft.Common.CurrentVersion.targets`
-(computing `TargetDir` from the project directory and `OutDir`). The current
-allowlist rejects that API because its general form can use ambient state.
-The stock Roslyn task also lacks DeclaredIO annotations. SDK `Build` remains
-unsupported; ambient discovery has not been allowed as a fallback.
+Hardened `TargetDir` computation now uses
+`MSBuild.NormalizePath(MSBuildProjectDirectory, OutDir)` with an explicit
+absolute base instead of `System.IO.Path.GetFullPath`. It preserves escaping
+and trailing separators; ordinary builds retain the previous expression.
+Process cases use the shipped property declarations and cover relative and
+absolute output directories, parent traversal, quotes, dollars, and literal
+percent/semicolon characters.
+
+The SDK trial now passes platform discovery and `TargetDir` computation.
+The next observed blocker is the missing legacy clean-file cache import
+`$(IntermediateOutputPath)$(CleanFile).hardened.props`. Its writer hook is
+still conditioned on hardened mode rather than ordinary Restore and needs
+adaptation to the separate-Restore workflow. The stock Roslyn task also lacks
+DeclaredIO annotations. SDK `Build` remains unsupported; ambient discovery
+has not been allowed as a fallback.
 
 Use existing SDK overlays for a single-framework C# hello-world profile:
 

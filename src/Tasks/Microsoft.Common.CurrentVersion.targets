@@ -320,7 +320,8 @@ Copyright (C) Microsoft Corporation. All rights reserved.
         Condition intentionally omitted on this one, because it causes problems
         when we pick up the value of an environment variable named TargetDir
         -->
-    <TargetDir Condition="'$(OutDir)' != ''">$([MSBuild]::Escape($([System.IO.Path]::GetFullPath(`$([System.IO.Path]::Combine(`$(MSBuildProjectDirectory)`, `$(OutDir)`))`))))</TargetDir>
+    <TargetDir Condition="'$(OutDir)' != '' and '$(MSBuildHardenedGraph)' != 'true'">$([MSBuild]::Escape($([System.IO.Path]::GetFullPath(`$([System.IO.Path]::Combine(`$(MSBuildProjectDirectory)`, `$(OutDir)`))`))))</TargetDir>
+    <TargetDir Condition="'$(OutDir)' != '' and '$(MSBuildHardenedGraph)' == 'true'">$([MSBuild]::Escape($([MSBuild]::NormalizePath(`$(MSBuildProjectDirectory)`, `$(OutDir)`))))</TargetDir>
 
     <!-- Example, C:\MyProjects\MyProject\bin\Debug\MyAssembly.dll -->
     <TargetPath Condition=" '$(TargetPath)' == '' ">$(TargetDir)$(TargetFileName)</TargetPath>
