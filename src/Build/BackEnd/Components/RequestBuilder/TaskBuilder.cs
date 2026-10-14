@@ -770,6 +770,7 @@ namespace Microsoft.Build.BackEnd
         private async ValueTask<WorkUnitResult> ExecuteInstantiatedTask(TaskExecutionHost taskExecutionHost, TaskLoggingContext taskLoggingContext, TaskHost taskHost, ItemBucket bucket, TaskExecutionMode howToExecuteTask)
         {
             UpdateContinueOnError(bucket, taskHost);
+            taskExecutionHost.ActionParameters = _buildRequestEntry.ActionGraph is null ? null : new(MSBuildNameIgnoreCaseComparer.Default);
 
             bool taskResult = false;
 
@@ -783,6 +784,17 @@ namespace Microsoft.Build.BackEnd
             }
             else
             {
+                if (_buildRequestEntry.ActionGraph is { } graph)
+                {
+                    ProjectErrorUtilities.VerifyThrowInvalidProject(
+                        taskExecutionHost.SupportsActionGraph,
+                        _taskNode.Location, "HardenedGraphUnsupportedConstruct", "custom task factories or specialized hosting", "action graph construction");
+                    if (graph.Record(taskExecutionHost.TaskInstance, taskExecutionHost.ActionParameters, _taskNode))
+                    {
+                        return new WorkUnitResult(WorkUnitResultCode.Success, WorkUnitActionCode.Continue, null);
+                    }
+                }
+
                 bool taskReturned = false;
                 Exception taskException = null;
 

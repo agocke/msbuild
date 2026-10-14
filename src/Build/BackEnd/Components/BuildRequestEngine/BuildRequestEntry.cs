@@ -74,6 +74,8 @@ namespace Microsoft.Build.BackEnd
     /// </summary>
     internal class BuildRequestEntry
     {
+        internal Microsoft.Build.Graph.Hardened.HardenedActionGraph ActionGraph { get; set; }
+
         /// <summary>
         /// Mapping of Build Request Configurations to Build Requests waiting for configuration resolution.
         /// </summary>

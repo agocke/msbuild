@@ -366,6 +366,13 @@ internal partial class Expander<P, I>
             Justification = "_bindingFlags is masked to AllowedBindingFlags at construction, so it never carries BindingFlags.NonPublic; GetMethods(_bindingFlags) therefore binds only public methods of the property-function allowlist receiver, whose public members are preserved for trimming.")]
         internal object Execute(object objectInstance, IPropertyProvider<P> properties, ExpanderOptions options, IElementLocation elementLocation)
         {
+            if (!string.IsNullOrEmpty(properties.GetProperty("MSBuildEmitActionGraph")?.EvaluatedValue) &&
+                !Graph.Hardened.HardenedActionGraph.IsAllowedFunction(_receiverType, _methodMethodName))
+            {
+                ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "HardenedGraphProhibitedFunction",
+                    _expression, "action graph construction");
+            }
+
             object functionResult = String.Empty;
             object[] args = null;
 

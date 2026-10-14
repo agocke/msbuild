@@ -235,6 +235,13 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         internal ITask TaskInstance { get; private set; }
 
+        internal Dictionary<string, object> ActionParameters { get; set; }
+
+        internal bool SupportsActionGraph => _registeredTaskFactory is null &&
+            _taskFactoryWrapper.TaskFactory is AssemblyTaskFactory &&
+            !_taskFactoryWrapper.TaskFactoryLoadedType.HasSTAThreadAttribute &&
+            !_taskFactoryWrapper.TaskFactoryLoadedType.HasLoadInSeparateAppDomainAttribute;
+
         /// <summary>
         /// FOR UNIT TESTING ONLY
         /// </summary>
@@ -1603,7 +1610,7 @@ namespace Microsoft.Build.BackEnd
                     // Expand out all the metadata, properties, and item vectors in the string.
                     string expandedParameterValue = _batchBucket.Expander.ExpandIntoStringAndUnescape(parameterValue, ExpanderOptions.ExpandAll, parameterLocation);
 
-                    if (expandedParameterValue.Length == 0)
+                    if (expandedParameterValue.Length == 0 && !(ActionParameters is not null && parameterType == typeof(string)))
                     {
                         success = true;
                     }
@@ -1699,7 +1706,7 @@ namespace Microsoft.Build.BackEnd
             // to avoid project authors having to add Conditions on all their tasks to avoid calling them
             // when a particular item list is empty.  This way, we just call the task with an empty list,
             // the task will loop over an empty list, and return quickly.
-            if ((finalTaskItems.Count > 0) || isRequired)
+            if ((finalTaskItems.Count > 0) || isRequired || ActionParameters is not null)
             {
                 // If the task parameter is not a ITaskItem[], then we need to convert
                 // all the TaskItem's in our arraylist to the appropriate datatype.
@@ -1749,6 +1756,10 @@ namespace Microsoft.Build.BackEnd
             try
             {
                 _taskFactoryWrapper.SetPropertyValue(TaskInstance, parameter, parameterValue);
+                if (ActionParameters is not null)
+                {
+                    ActionParameters[parameter.Name] = parameterValue;
+                }
                 success = true;
             }
             catch (TargetInvocationException e)

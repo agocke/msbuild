@@ -1241,6 +1241,17 @@ namespace Microsoft.Build.BackEnd
                 ProjectErrorUtilities.VerifyThrowInvalidProject(allTargets.Length > 0,
                     _requestEntry.RequestConfiguration.Project.ProjectFileLocation, "NoTargetSpecified");
 
+                ProjectInstance actionProject = _requestEntry.RequestConfiguration.Project;
+                bool emitActions = !isRestoreSubmission && !string.IsNullOrEmpty(actionProject.GetPropertyValue("MSBuildEmitActionGraph"));
+                ProjectErrorUtilities.VerifyThrowInvalidProject(
+                    !emitActions || _componentHost.BuildParameters.HardenedGraphValidation,
+                    actionProject.ProjectFileLocation, "HardenedGraphUnsupportedConstruct",
+                    "MSBuildEmitActionGraph without --hardened-graph", "action graph construction");
+                if (emitActions)
+                {
+                    _requestEntry.ActionGraph = new HardenedActionGraph(actionProject, _requestEntry.TaskEnvironment);
+                }
+
                 if (_componentHost.BuildParameters.HardenedGraphValidation)
                 {
                     ProjectInstance project = _requestEntry.RequestConfiguration.Project;
@@ -1270,7 +1281,8 @@ namespace Microsoft.Build.BackEnd
                                         task,
                                         taskIdentityParameters),
                                 (target, task, lookup) =>
-                                    ExecuteHardenedPureTask(pureTaskBuilder, target, task, lookup));
+                                    ExecuteHardenedPureTask(pureTaskBuilder, target, task, lookup),
+                                constructActions: emitActions);
                             diagnostics = validator.Validate(
                                     project,
                                     baseLookup,
@@ -1293,6 +1305,20 @@ namespace Microsoft.Build.BackEnd
                         }
 
                         baseLookup.ConfigureHardenedItemOperationPlan(itemOperationPlan);
+                        if (emitActions)
+                        {
+                            _requestEntry.ActionGraph.Publish();
+                            BuildResult graphResult = new(_requestEntry.Request);
+                            foreach (var target in allTargets)
+                            {
+                                graphResult.AddResultsForTarget(target.name, new TargetResult(
+                                    Array.Empty<ProjectItemInstance.TaskItem>(),
+                                    new WorkUnitResult(WorkUnitResultCode.Success, WorkUnitActionCode.Continue, null)));
+                            }
+
+                            graphResult.EvaluationId = project.EvaluationId;
+                            return graphResult;
+                        }
                     }
                 }
 

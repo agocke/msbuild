@@ -10,12 +10,18 @@ hosts. This roadmap describes planned work, not implemented behavior.
   static/deferred values, and can execute Pure tasks through a callback.
 - `HardenedTaskClassificationResolver` resolves implementation annotations.
   `HardenedDeclaredIOFootprint` records paths, not executable actions.
-- `RequestBuilder` currently validates and then enters ordinary `BuildTargets`.
+- `RequestBuilder` normally validates and then enters ordinary `BuildTargets`.
+  With `MSBuildEmitActionGraph`, it publishes the constructed bundle and returns
+  without ordinary target execution.
 - `TaskExecutionHost` depends on project, batching, and engine logging state.
 - Existing composite SDK overlays provide a starting point for compilation.
 - `MSBuild.ActionTaskHost` executes a hand-authored JSON invocation in a fresh
   process without the engine. It binds scalars, arrays, and items with custom
   metadata; applies explicit context; and checks required declared files.
+- The construction callback now uses normal parameter binding, records nonempty
+  DeclaredIO invocations, and executes zero-I/O invocations with output mappings.
+  Process tests prove a generated Ninja producer/consumer chain, batching,
+  unchanged regeneration, invalidation, and failure propagation.
 
 Reuse these pieces without introducing another target interpreter. Keep
 ordinary builds and existing validation behavior unchanged outside the new
@@ -35,8 +41,7 @@ hosting. Reuse small binding helpers, not the whole `TaskExecutionHost`.
 required outputs fail with useful diagnostics. Parameter checks cover item
 order, metadata, escaping, and unset versus empty values.
 
-This first slice is implemented with process-level tests. Graph emission and
-the Pure-to-DeclaredIO migration remain separate milestones.
+This first slice is implemented with process-level tests.
 
 ## 2. Unify construction-time tasks under Declared-IO
 
@@ -49,6 +54,10 @@ MSBuild return values. Existing public attributes need not be removed.
 **Done when:** a zero-I/O task's returned items and metadata can construct a
 later invocation, while missing declarations, unavailable parameters, and
 file-I/O output mappings fail before action side effects.
+
+Implemented in the opt-in emitter with annotated test tasks. Migrating the
+broader existing Pure task catalog and SDK overlays is still pending; the
+legacy validation path is unchanged.
 
 ## 3. Emit a concrete Ninja graph
 
@@ -74,6 +83,10 @@ file-I/O task. Invalid construction publishes no executable partial graph.
 Focused cases cover buckets, generated inputs, conflicting writes, cycles,
 paths with spaces/dollars/colons, and supported cross-project routing.
 
+The first single-project Unix slice is implemented. Cross-project `MSBuild`
+routing, forward producer resolution, Windows commands, full tool closures,
+and graph-input inventories remain work rather than supported fallbacks.
+
 ## 4. Execute a small build with Ninja
 
 Use a repository `.proj` fixture containing a zero-I/O value transformation,
@@ -90,6 +103,8 @@ ordering and `ninja -j1`.
 - Task failure blocks dependents; unsupported constructs fail during generation.
 
 Then test parallel execution where modeled dependencies permit it.
+
+The process fixture covers these behaviors with conservative action ordering.
 
 ## 5. Compile with the pinned SDK
 
@@ -109,6 +124,15 @@ identity; child artifacts flow through file edges, not nested engine calls.
 and project-reference outputs match ordinary MSBuild, and failures identify
 the originating project/task. Broaden platform and parallelism coverage as
 those scenarios are admitted.
+
+## 6. Exercise dotnet/runtime
+
+After SDK compilation works, select one bounded managed library under
+`~/code/runtime/src/libraries` and construct its compile closure. Complete
+restore and prerequisite tool/reference builds beforehand. Use real source
+generation and compiler actions, then expand to managed project-reference
+closures. Treat native runtime/CMake integration as a separate later boundary,
+not a prerequisite for the first managed-library result.
 
 ## After the prototype
 

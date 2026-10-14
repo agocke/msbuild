@@ -7,9 +7,10 @@ writes `build.ninja` and concrete task-invocation manifests, and exits. Ninja
 then launches independent task-host console processes. Execution requires
 neither the MSBuild engine nor another target interpreter or custom scheduler.
 
-This is proposed, opt-in behavior. The current hardened mode validates builds
-and then executes them with the ordinary engine. Existing builds remain
-unchanged unless graph generation is selected. The
+This is experimental, opt-in behavior. Hardened validation without graph
+emission still executes builds with the ordinary engine. A first graph-only
+path emits single-project Ninja bundles for the supported subset. Existing
+builds remain unchanged unless graph generation is selected. The
 [roadmap](hardened-static-graph-implementation.md) describes the implementation.
 
 ## Pipeline
@@ -21,11 +22,15 @@ unchanged unless graph generation is selected. The
    without ordinary target execution.
 4. Run Ninja separately to execute the actions.
 
-Illustrative commands; `-emitActionGraph` is a proposed switch:
+The current prototype uses global properties; all three paths are absolute.
+Restore must have completed before this invocation:
 
 ```sh
-msbuild Demo.proj --hardened-graph -target:Build -emitActionGraph:out/build.ninja
-ninja -f out/build.ninja
+msbuild Demo.proj --hardened-graph -target:Build \
+  -p:MSBuildEmitActionGraph=/workspace/out/build.ninja \
+  -p:MSBuildActionTaskHost=/tools/MSBuild.ActionTaskHost.dll \
+  -p:MSBuildActionDotNetHost=/tools/dotnet
+ninja -f /workspace/out/build.ninja
 ```
 
 Graph generation must work from clean task outputs. Recording an ordinary
@@ -37,6 +42,14 @@ An audited task uses `[MSBuildDeclaredIOTask]` and explicitly supplies both
 `DeclaredInputs` and `DeclaredOutputs`: finite, exact filesystem path lists,
 separate from its operational parameters. An empty value means an empty list;
 an omitted declaration is an error.
+
+Removing the nonempty-footprint invocations leaves the pure construction
+language: property/item computations and audited zero-I/O tasks assemble
+concrete actions. No file action runs to discover its own parameters or later
+work. Apart from writing the graph bundle, construction has no output effects
+under this contract. A future sandbox can verify the contract; dynamic
+side-effect tracing is not required for graph emission. Engine-managed reads
+of projects, imports, and source globs remain graph-input discovery.
 
 The contract asserts deterministic results from explicit parameters, declared
 input contents, and fixed implementation/host context. It excludes undeclared
@@ -68,6 +81,13 @@ path; execution supplies the contents. Only zero-I/O invocations may use
 
 Reuse MSBuild's target ordering, expression expansion, batching, and
 property/item scope semantics for the supported subset.
+
+The current path reuses the existing hardened construction walk and its
+task-builder callback. After ordinary task parameter binding, file actions
+are captured instead of calling `Execute`; zero-I/O invocations execute and
+gather outputs normally. Successful construction returns before ordinary
+`BuildTargets`, so target timestamp skipping cannot erase actions or execute
+construction tasks a second time. No additional target interpreter is added.
 
 - Record graph inputs: projects/imports, global properties, declared
   environment values, pinned SDK resolution, and glob results. Imports resolve
@@ -166,6 +186,11 @@ versions/types, duplicate parameter names ignoring case, and missing required
 parameters fail explicitly. This file format is experimental, not a public
 serialization API.
 
+During emission, `MSBuildActionEnvironment` optionally selects a semicolon-
+separated list of environment variable names whose current values are captured.
+Without it, action environments are empty; the engine's entire ambient
+environment is not implicitly persisted.
+
 Start with one reusable console application, launched in a fresh process for
 each action. It loads a pinned managed task, binds supported parameter types,
 reconstructs items and metadata, applies explicit execution context, and
@@ -183,6 +208,24 @@ is not an audit for undeclared I/O. Ninja blocks dependents after failure;
 already-running independent commands may finish.
 
 ## Prototype boundary and later work
+
+The implemented emitter initially supports Unix shell commands, one project
+per invocation, conservative action ordering, and dependencies on earlier
+producers. It rejects forward-produced inputs, legacy Pure-only tasks,
+cross-project `MSBuild` tasks, hosting/ContinueOnError overrides, and `OnError`.
+`DependsOnTargets`, before/after targets, batching, and supported `CallTarget`
+construction use the existing hardened walk. Participating zero-I/O tasks
+must use explicit DeclaredIO, even while the legacy validator retains Pure.
+
+Manifests have content-derived names and are written before the Ninja entry
+point is atomically replaced; unchanged manifests and entry points retain
+their timestamps. Adjacent managed assemblies, runtime configuration files,
+and native libraries in the host/task directories are conservative tool
+dependencies. Tools loaded elsewhere must still appear in declared inputs.
+Automatic runtime/tool-closure discovery and graph-input inventories are not
+implemented. Property functions in graph mode have a narrow allowlist,
+including during evaluation; unsupported SDK imports must be adapted rather
+than silently allowed. This is not yet a general SDK or runtime-repository build.
 
 Every file-I/O action must produce at least one persistent regular file, and
 every declared output must exist on success. Inputs are existing external
